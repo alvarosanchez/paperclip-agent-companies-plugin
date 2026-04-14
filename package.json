@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "Empty Paperclip plugin scaffold for agent companies workflows.",
+  "description": "Discover Agent Companies packages inside git repositories before importing them into Paperclip.",
   "scripts": {
     "build": "node ./esbuild.config.mjs",
     "build:rollup": "rollup -c",

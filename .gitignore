@@ -1,5 +1,6 @@
-dist
-node_modules
-*.tgz
-.playwright-cli
-tests/e2e/results
+.tmp/
+.playwright-cli/
+dist/
+node_modules/
+output/
+tests/e2e/results/
