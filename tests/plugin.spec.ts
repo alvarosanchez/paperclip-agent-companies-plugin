@@ -9,7 +9,11 @@ import {
   AGENT_COMPANIES_SCHEMA,
   CATALOG_STATE_KEY,
   DEFAULT_REPOSITORY_URL,
+  type CatalogCompanyContentDetail,
   createRepositorySource,
+  createEmptyCompanyContents,
+  normalizeRepositoryCloneRef,
+  normalizeRepositoryReference,
   type CatalogSnapshot
 } from "../src/catalog.js";
 import {
@@ -78,6 +82,63 @@ version: 1.0.0
 Alpha Labs fixture company.
 `
   );
+  await mkdir(join(root, "alpha", "agents", "ceo"), { recursive: true });
+  await mkdir(join(root, "alpha", "skills", "repo-audit"), { recursive: true });
+  await mkdir(join(root, "alpha", "projects", "import-pipeline", "tasks", "seed-default"), {
+    recursive: true
+  });
+  await mkdir(join(root, "alpha", "issues", "follow-up"), { recursive: true });
+  await writeFile(
+    join(root, "alpha", "agents", "ceo", "AGENTS.md"),
+    `---
+name: Alpha CEO
+title: Chief Executive Officer
+---
+
+Lead Alpha Labs and coordinate the delivery pipeline.
+`
+  );
+  await writeFile(
+    join(root, "alpha", "skills", "repo-audit", "SKILL.md"),
+    `---
+name: Repo Audit
+description: Review repository hygiene.
+---
+
+## Checklist
+
+- Review the repository layout
+- Confirm manifests are present
+`
+  );
+  await writeFile(
+    join(root, "alpha", "projects", "import-pipeline", "PROJECT.md"),
+    `---
+name: Import Pipeline
+description: Build the import path.
+---
+
+Prepare the first import workflow for Alpha Labs.
+`
+  );
+  await writeFile(
+    join(root, "alpha", "projects", "import-pipeline", "tasks", "seed-default", "TASK.md"),
+    `---
+name: Seed Default Company
+---
+
+Create the initial seeded company so the pipeline has a safe default target.
+`
+  );
+  await writeFile(
+    join(root, "alpha", "issues", "follow-up", "ISSUE.md"),
+    `---
+name: Follow Up Review
+---
+
+Double-check the import pipeline after the first successful run.
+`
+  );
   await writeFile(
     join(root, "nested", "beta", "COMPANY.md"),
     `---
@@ -89,6 +150,16 @@ version: 2.0.0
 ---
 
 Beta Works fixture company.
+`
+  );
+  await mkdir(join(root, "nested", "beta", "agents", "operator"), { recursive: true });
+  await writeFile(
+    join(root, "nested", "beta", "agents", "operator", "AGENTS.md"),
+    `---
+name: Beta Operator
+---
+
+Operate the Beta Works delivery workflow.
 `
   );
   await writeFile(
@@ -144,7 +215,8 @@ describe("agent companies plugin", () => {
           schema: AGENT_COMPANIES_SCHEMA,
           version: "1.0.0",
           relativePath: "agency-agents",
-          manifestPath: "agency-agents/COMPANY.md"
+          manifestPath: "agency-agents/COMPANY.md",
+          contents: createEmptyCompanyContents()
         }
       ],
       now: () => "2026-04-14T08:00:00.000Z"
@@ -163,6 +235,7 @@ describe("agent companies plugin", () => {
     expect(data.repositories[0]?.status).toBe("ready");
     expect(data.companies).toHaveLength(1);
     expect(data.companies[0]?.name).toBe("Agency Agents");
+    expect(data.companies[0]?.contents.skills).toEqual([]);
     expect(data.summary.companyCount).toBe(1);
   });
 
@@ -178,7 +251,8 @@ describe("agent companies plugin", () => {
           schema: AGENT_COMPANIES_SCHEMA,
           version: "0.2.0",
           relativePath: "local-company",
-          manifestPath: "local-company/COMPANY.md"
+          manifestPath: "local-company/COMPANY.md",
+          contents: createEmptyCompanyContents()
         }
       ],
       now: () => "2026-04-14T09:15:00.000Z"
@@ -213,6 +287,59 @@ describe("agent companies plugin", () => {
     expect(afterAdd.companies[0]?.slug).toBe("local-company");
   });
 
+  it("normalizes GitHub owner/repo shorthand without breaking local relative paths", () => {
+    const shorthandRepository = createRepositorySource("alvarosanchez/micronaut-agent-company");
+
+    expect(shorthandRepository.url).toBe("https://github.com/alvarosanchez/micronaut-agent-company");
+    expect(shorthandRepository.normalizedUrl).toBe(
+      "https://github.com/alvarosanchez/micronaut-agent-company"
+    );
+    expect(shorthandRepository.label).toBe("alvarosanchez/micronaut-agent-company");
+
+    expect(normalizeRepositoryReference("./fixtures/agent-company")).toBe("./fixtures/agent-company");
+    expect(normalizeRepositoryCloneRef("../fixtures/agent-company")).toBe("../fixtures/agent-company");
+  });
+
+  it("loads selected company markdown details on demand", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:20:00.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    expect(company?.id).toBeTruthy();
+
+    const detail = await harness.getData<CatalogCompanyContentDetail | null>(
+      "catalog.company-content.read",
+      {
+        companyId: company?.id,
+        itemPath: "skills/repo-audit/SKILL.md"
+      }
+    );
+
+    expect(detail?.item.kind).toBe("skills");
+    expect(detail?.item.fullPath).toBe("alpha/skills/repo-audit/SKILL.md");
+    expect(detail?.item.frontmatter).toContain("name: Repo Audit");
+    expect(detail?.item.markdown).toContain("## Checklist");
+    expect(detail?.item.markdown).toContain("Review the repository layout");
+  });
+
   it("only auto-scans seeded sources when catalog state is missing", async () => {
     let scanCount = 0;
     const plugin = createAgentCompaniesPlugin({
@@ -227,7 +354,8 @@ describe("agent companies plugin", () => {
             schema: AGENT_COMPANIES_SCHEMA,
             version: "1.0.0",
             relativePath: "legacy-company",
-            manifestPath: "legacy-company/COMPANY.md"
+            manifestPath: "legacy-company/COMPANY.md",
+            contents: createEmptyCompanyContents()
           }
         ];
       },
@@ -313,5 +441,12 @@ describe("agent companies plugin", () => {
       "alpha/COMPANY.md",
       "nested/beta/COMPANY.md"
     ]);
+    expect(companies[0]?.contents.agents.map((item) => item.name)).toEqual(["Alpha CEO"]);
+    expect(companies[0]?.contents.skills.map((item) => item.name)).toEqual(["Repo Audit"]);
+    expect(companies[0]?.contents.projects.map((item) => item.name)).toEqual(["Import Pipeline"]);
+    expect(companies[0]?.contents.tasks.map((item) => item.name)).toEqual(["Seed Default Company"]);
+    expect(companies[0]?.contents.issues.map((item) => item.name)).toEqual(["Follow Up Review"]);
+    expect(companies[1]?.contents.agents.map((item) => item.name)).toEqual(["Beta Operator"]);
+    expect(companies[1]?.contents.skills).toEqual([]);
   });
 });

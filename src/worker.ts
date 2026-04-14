@@ -8,11 +8,17 @@ import {
   AGENT_COMPANIES_SCHEMA,
   buildCatalogSnapshot,
   CATALOG_STATE_KEY,
+  COMPANY_CONTENT_KEYS,
+  type CatalogCompanyContentDetail,
   createRepositorySource,
+  createEmptyCompanyContents,
   hasPersistedCatalogRepositories,
   normalizeCatalogState,
   normalizeRepositoryCloneRef,
   type CatalogSnapshot,
+  type CompanyContentItem,
+  type CompanyContentKey,
+  type CompanyContents,
   type DiscoveredAgentCompany,
   type RepositorySource,
   type CatalogState
@@ -34,6 +40,8 @@ const IGNORED_DIRECTORY_NAMES = new Set([
 ]);
 
 const FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
+const COMPANY_CONTENT_FILE_NAMES = new Set(["AGENTS.md", "PROJECT.md", "TASK.md", "ISSUE.md", "SKILL.md"]);
+const repositoryCheckoutCache = new Map<string, RepositoryCheckoutCacheEntry>();
 
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
 
@@ -56,6 +64,11 @@ interface GitProcessEnvironmentOptions {
 interface LoadedCatalogState {
   state: CatalogState;
   hasPersistedRepositories: boolean;
+}
+
+interface RepositoryCheckoutCacheEntry {
+  checkoutDirectory: string;
+  tempDirectory: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -139,6 +152,13 @@ function getTopLevelScalar(frontmatter: string, key: string): string | null {
 function summarizeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/\s+/gu, " ").trim().slice(0, 600);
+}
+
+function sortCompanyContentItems(left: CompanyContentItem, right: CompanyContentItem): number {
+  return (
+    left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
+    left.path.localeCompare(right.path, undefined, { sensitivity: "base" })
+  );
 }
 
 function summarizeRepositoryCloneFailure(message: string): string {
@@ -246,6 +266,88 @@ function looksLikeLocalPath(input: string): boolean {
   );
 }
 
+function splitMarkdownDocument(content: string): {
+  frontmatter: string | null;
+  markdown: string;
+} {
+  const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
+  if (!frontmatterMatch) {
+    return {
+      frontmatter: null,
+      markdown: content.trim()
+    };
+  }
+
+  return {
+    frontmatter: frontmatterMatch[1]?.trim() || null,
+    markdown: content.slice(frontmatterMatch[0].length).trim()
+  };
+}
+
+function resolveRepositoryRelativePath(repositoryRoot: string, relativePath: string): string {
+  const normalizedPath = toPosixPath(relativePath);
+  const segments = normalizedPath.split("/").filter(Boolean);
+
+  return segments.length > 0 ? join(repositoryRoot, ...segments) : repositoryRoot;
+}
+
+function getRepositoryRelativeCompanyRoot(company: DiscoveredAgentCompany): string {
+  const companyRoot = dirname(company.manifestPath);
+  return companyRoot === "." ? "" : toPosixPath(companyRoot);
+}
+
+function getRepositoryRelativeCompanyContentPath(
+  company: DiscoveredAgentCompany,
+  itemPath: string
+): string {
+  const companyRoot = getRepositoryRelativeCompanyRoot(company);
+  return companyRoot ? `${companyRoot}/${itemPath}` : itemPath;
+}
+
+function findRepositoryCompany(
+  state: CatalogState,
+  companyId: string
+): { repository: RepositorySource; company: DiscoveredAgentCompany } | null {
+  for (const repository of state.repositories) {
+    const company = repository.companies.find((candidate) => candidate.id === companyId);
+    if (company) {
+      return {
+        repository,
+        company
+      };
+    }
+  }
+
+  return null;
+}
+
+function findCompanyContentEntry(
+  company: DiscoveredAgentCompany,
+  itemPath: string
+): { kind: CompanyContentKey; item: CompanyContentItem } | null {
+  for (const kind of COMPANY_CONTENT_KEYS) {
+    const item = company.contents[kind].find((candidate) => candidate.path === itemPath);
+    if (item) {
+      return {
+        kind,
+        item
+      };
+    }
+  }
+
+  return null;
+}
+
+async function clearRepositoryCheckoutCacheEntry(repositoryId: string): Promise<void> {
+  const cachedEntry = repositoryCheckoutCache.get(repositoryId);
+  if (!cachedEntry) {
+    return;
+  }
+
+  repositoryCheckoutCache.delete(repositoryId);
+  await rm(cachedEntry.tempDirectory, { recursive: true, force: true });
+}
+
 function canonicalizeRepositoryInput(input: string): string {
   const trimmed = input.trim();
   if (!trimmed) {
@@ -293,6 +395,8 @@ async function scanRepositoryEntry(
   timestamp: string,
   logger: PluginContext["logger"]
 ): Promise<RepositorySource> {
+  await clearRepositoryCheckoutCacheEntry(repository.id);
+
   try {
     const companies = await scanRepository(repository);
     logger.info("Scanned repository for agent companies", {
@@ -469,6 +573,154 @@ async function findCompanyManifestPaths(repositoryRoot: string): Promise<string[
   return manifests;
 }
 
+async function findCompanyContentManifestPaths(companyRoot: string): Promise<string[]> {
+  const manifests: string[] = [];
+  const queue = [companyRoot];
+
+  while (queue.length > 0) {
+    const currentDirectory = queue.pop();
+    if (!currentDirectory) {
+      continue;
+    }
+
+    let entries;
+    try {
+      entries = await readdir(currentDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (
+        isRecord(error) &&
+        (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "EACCES")
+      ) {
+        continue;
+      }
+
+      throw error;
+    }
+
+    for (const entry of entries) {
+      const fullPath = join(currentDirectory, entry.name);
+
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        if (!IGNORED_DIRECTORY_NAMES.has(entry.name)) {
+          queue.push(fullPath);
+        }
+        continue;
+      }
+
+      if (entry.isFile() && COMPANY_CONTENT_FILE_NAMES.has(entry.name)) {
+        manifests.push(fullPath);
+      }
+    }
+  }
+
+  manifests.sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+  return manifests;
+}
+
+function classifyCompanyContentPath(relativePath: string): CompanyContentKey | null {
+  const segments = toPosixPath(relativePath).split("/").filter(Boolean);
+  const firstSegment = segments[0];
+  const fileName = segments.at(-1);
+
+  if (!firstSegment || !fileName) {
+    return null;
+  }
+
+  if (fileName === "AGENTS.md" && firstSegment === "agents") {
+    return "agents";
+  }
+
+  if (fileName === "SKILL.md" && firstSegment === "skills") {
+    return "skills";
+  }
+
+  if (fileName === "PROJECT.md" && firstSegment === "projects") {
+    return "projects";
+  }
+
+  if (fileName === "TASK.md" && (firstSegment === "tasks" || firstSegment === "projects")) {
+    return "tasks";
+  }
+
+  if (fileName === "ISSUE.md" && (firstSegment === "issues" || firstSegment === "projects")) {
+    return "issues";
+  }
+
+  return null;
+}
+
+function deriveCompanyContentName(relativePath: string): string {
+  const segments = relativePath.split("/").filter(Boolean);
+  return segments.length >= 2 ? segments[segments.length - 2] ?? relativePath : relativePath;
+}
+
+async function parseCompanyContentItem(
+  manifestPath: string,
+  companyRoot: string
+): Promise<{ kind: CompanyContentKey; item: CompanyContentItem } | null> {
+  const relativePath = toPosixPath(relative(companyRoot, manifestPath));
+  const kind = classifyCompanyContentPath(relativePath);
+
+  if (!kind) {
+    return null;
+  }
+
+  let content;
+  try {
+    content = await readFile(manifestPath, "utf8");
+  } catch (error) {
+    if (
+      isRecord(error) &&
+      (error.code === "ENOENT" || error.code === "EISDIR" || error.code === "EACCES")
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+
+  const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
+  const frontmatter = frontmatterMatch?.[1] ?? null;
+  const name =
+    (frontmatter ? getTopLevelScalar(frontmatter, "name") : null) ??
+    (frontmatter ? getTopLevelScalar(frontmatter, "title") : null) ??
+    deriveCompanyContentName(relativePath);
+
+  return {
+    kind,
+    item: {
+      name,
+      path: relativePath
+    }
+  };
+}
+
+async function scanCompanyContents(companyRoot: string): Promise<CompanyContents> {
+  const contents = createEmptyCompanyContents();
+  const manifestPaths = await findCompanyContentManifestPaths(companyRoot);
+  const parsedItems = await Promise.all(
+    manifestPaths.map((manifestPath) => parseCompanyContentItem(manifestPath, companyRoot))
+  );
+
+  for (const parsedItem of parsedItems) {
+    if (!parsedItem) {
+      continue;
+    }
+
+    contents[parsedItem.kind].push(parsedItem.item);
+  }
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    contents[key].sort(sortCompanyContentItems);
+  }
+
+  return contents;
+}
+
 async function parseAgentCompanyManifest(
   manifestPath: string,
   repositoryRoot: string,
@@ -499,9 +751,11 @@ async function parseAgentCompanyManifest(
     return null;
   }
 
-  const directoryRelativePath = toPosixPath(relative(repositoryRoot, dirname(manifestPath)));
+  const companyRoot = dirname(manifestPath);
+  const directoryRelativePath = toPosixPath(relative(repositoryRoot, companyRoot));
   const normalizedRelativePath = directoryRelativePath === "." ? "" : directoryRelativePath;
   const normalizedManifestPath = toPosixPath(relative(repositoryRoot, manifestPath));
+  const contents = await scanCompanyContents(companyRoot);
   const name =
     getTopLevelScalar(frontmatter, "name") ??
     normalizedRelativePath.split("/").filter(Boolean).at(-1) ??
@@ -517,7 +771,8 @@ async function parseAgentCompanyManifest(
     schema,
     version: getTopLevelScalar(frontmatter, "version"),
     relativePath: normalizedRelativePath,
-    manifestPath: normalizedManifestPath
+    manifestPath: normalizedManifestPath,
+    contents
   };
 }
 
@@ -581,6 +836,118 @@ export async function scanRepositoryForAgentCompanies(
   }
 }
 
+async function cloneRepositoryCheckout(
+  repositoryReference: string
+): Promise<RepositoryCheckoutCacheEntry> {
+  const tempDirectory = await mkdtemp(join(tmpdir(), "paperclip-agent-companies-plugin-content-"));
+  const checkoutDirectory = join(tempDirectory, "checkout");
+  const gitEnvironment = await buildGitProcessEnvironment({
+    preferredHomeDirectory: resolveUserHomeDirectory()
+  });
+
+  try {
+    await runProcess(
+      "git",
+      [
+        "clone",
+        "--depth",
+        "1",
+        "--quiet",
+        "--no-tags",
+        "--single-branch",
+        "--recurse-submodules=no",
+        repositoryReference,
+        checkoutDirectory
+      ],
+      {
+        env: gitEnvironment
+      }
+    );
+
+    return {
+      checkoutDirectory,
+      tempDirectory
+    };
+  } catch (error) {
+    await rm(tempDirectory, { recursive: true, force: true });
+    const message = summarizeErrorMessage(error);
+    if (message.includes("spawn git ENOENT")) {
+      throw new Error("Git is not available in the plugin worker environment.");
+    }
+
+    throw new Error(summarizeRepositoryCloneFailure(message));
+  }
+}
+
+async function resolveRepositoryContentRoot(repository: RepositorySource): Promise<string> {
+  if (looksLikeLocalPath(repository.url)) {
+    return repository.url;
+  }
+
+  const cachedEntry = repositoryCheckoutCache.get(repository.id);
+  if (cachedEntry && (await pathExists(cachedEntry.checkoutDirectory))) {
+    return cachedEntry.checkoutDirectory;
+  }
+
+  await clearRepositoryCheckoutCacheEntry(repository.id);
+  const nextEntry = await cloneRepositoryCheckout(repository.url);
+  repositoryCheckoutCache.set(repository.id, nextEntry);
+
+  return nextEntry.checkoutDirectory;
+}
+
+async function readCatalogCompanyContentDetail(
+  ctx: PluginContext,
+  companyId: string,
+  itemPath: string
+): Promise<CatalogCompanyContentDetail | null> {
+  const state = await loadCatalogState(ctx);
+  const match = findRepositoryCompany(state, companyId);
+  if (!match) {
+    return null;
+  }
+
+  const contentEntry = findCompanyContentEntry(match.company, itemPath);
+  if (!contentEntry) {
+    return null;
+  }
+
+  const repositoryRoot = await resolveRepositoryContentRoot(match.repository);
+  const relativeFilePath = getRepositoryRelativeCompanyContentPath(match.company, contentEntry.item.path);
+  const absoluteFilePath = resolveRepositoryRelativePath(repositoryRoot, relativeFilePath);
+
+  let content;
+  try {
+    content = await readFile(absoluteFilePath, "utf8");
+  } catch (error) {
+    if (
+      isRecord(error) &&
+      (error.code === "ENOENT" || error.code === "EISDIR" || error.code === "EACCES")
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+
+  const document = splitMarkdownDocument(content);
+
+  return {
+    companyId: match.company.id,
+    companyName: match.company.name,
+    repositoryId: match.repository.id,
+    repositoryLabel: match.repository.label,
+    repositoryUrl: match.repository.url,
+    item: {
+      ...contentEntry.item,
+      kind: contentEntry.kind,
+      fullPath: relativeFilePath,
+      frontmatter: document.frontmatter,
+      markdown: document.markdown
+    }
+  };
+}
+
 function createRepositoryScanner(): RepositoryScanner {
   return async (repository) => scanRepositoryForAgentCompanies(repository.url, repository.id);
 }
@@ -601,6 +968,18 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           scanRepository
         );
         return buildCatalogResponse(hydratedState);
+      });
+
+      ctx.data.register("catalog.company-content.read", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const companyId = asNonEmptyString(params.companyId);
+        const itemPath = asNonEmptyString(params.itemPath);
+
+        if (!companyId || !itemPath) {
+          return null;
+        }
+
+        return readCatalogCompanyContentDetail(ctx, companyId, itemPath);
       });
 
       ctx.actions.register("catalog.add-repository", async (rawParams) => {
@@ -641,6 +1020,8 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         if (nextRepositories.length === currentState.repositories.length) {
           throw new Error("Repository not found.");
         }
+
+        await clearRepositoryCheckoutCacheEntry(repositoryId);
 
         const nextState = await persistCatalogState(
           ctx,

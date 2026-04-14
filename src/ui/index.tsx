@@ -1,10 +1,16 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   usePluginAction,
   usePluginData,
   type PluginSettingsPageProps
 } from "@paperclipai/plugin-sdk/ui";
 import {
+  type CatalogCompanyContentDetail,
+  type CompanyContentKey,
+  type CompanyContentItem,
+  type CompanyContents,
   type CatalogCompanySummary,
   type CatalogRepositorySummary,
   type CatalogSnapshot
@@ -248,9 +254,34 @@ const PAGE_STYLES = `
 }
 
 .agent-companies-settings__button--primary {
-  border-color: transparent;
-  background: var(--ac-primary);
-  color: var(--ac-primary-fg);
+  border-color: color-mix(in oklab, var(--ac-info) 42%, var(--ac-border-strong));
+  background: color-mix(in oklab, var(--ac-info) 74%, oklch(0.18 0 0));
+  color: oklch(0.985 0 0);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, oklch(0.985 0 0) 16%, transparent),
+    0 1px 2px color-mix(in oklab, var(--ac-bg) 36%, transparent);
+}
+
+.agent-companies-settings__button--primary:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--ac-info) 54%, var(--ac-border-strong));
+  background: color-mix(in oklab, var(--ac-info) 80%, oklch(0.16 0 0));
+  color: oklch(0.985 0 0);
+}
+
+.agent-companies-settings__button--primary:focus-visible {
+  outline-color: color-mix(in oklab, var(--ac-info) 58%, oklch(0.985 0 0) 18%);
+}
+
+.agent-companies-settings__button--primary:active:not(:disabled) {
+  background: color-mix(in oklab, var(--ac-info) 68%, oklch(0.14 0 0));
+}
+
+.agent-companies-settings__button--primary:disabled {
+  opacity: 1;
+  border-color: color-mix(in oklab, var(--ac-border) 78%, var(--ac-info) 22%);
+  background: color-mix(in oklab, var(--ac-surface-soft) 82%, var(--ac-info) 18%);
+  color: color-mix(in oklab, var(--ac-text-muted) 82%, var(--ac-text) 18%);
+  box-shadow: none;
 }
 
 .agent-companies-settings__button--danger {
@@ -349,6 +380,12 @@ const PAGE_STYLES = `
   align-items: start;
 }
 
+.agent-companies-settings__company-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
 .agent-companies-settings__repo-title,
 .agent-companies-settings__company-title {
   margin: 0;
@@ -431,6 +468,313 @@ const PAGE_STYLES = `
   -webkit-line-clamp: 2;
 }
 
+.agent-companies-settings__company-summary {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: color-mix(in oklab, var(--ac-bg) 72%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.agent-companies-settings__dialog {
+  width: min(960px, 100%);
+  max-height: min(88vh, 920px);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--ac-border-strong);
+  border-radius: 16px;
+  background: color-mix(in oklab, var(--ac-surface) 92%, var(--ac-bg));
+  box-shadow: 0 28px 72px color-mix(in oklab, var(--ac-bg) 62%, transparent);
+  overflow: hidden;
+}
+
+.agent-companies-settings__dialog-head {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.agent-companies-settings__dialog-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.15;
+  font-weight: 700;
+}
+
+.agent-companies-settings__dialog-copy {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__dialog-meta {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-companies-settings__dialog-summary {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.agent-companies-settings__dialog-stat {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 10px;
+  background: var(--ac-surface-muted);
+}
+
+.agent-companies-settings__dialog-stat-value {
+  font-size: 18px;
+  line-height: 1.1;
+  font-weight: 700;
+}
+
+.agent-companies-settings__dialog-layout {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  align-items: stretch;
+  min-height: 0;
+}
+
+.agent-companies-settings__dialog-nav,
+.agent-companies-settings__dialog-preview {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 12px;
+  background: var(--ac-surface-muted);
+}
+
+.agent-companies-settings__dialog-nav {
+  align-content: start;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.agent-companies-settings__dialog-nav-group {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-companies-settings__dialog-nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-companies-settings__dialog-nav-title {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.agent-companies-settings__dialog-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.agent-companies-settings__dialog-nav-button {
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 72%, transparent);
+  color: var(--ac-text);
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.agent-companies-settings__dialog-nav-button:hover {
+  border-color: var(--ac-border-strong);
+  background: color-mix(in oklab, var(--ac-surface-soft) 52%, var(--ac-text) 6%);
+}
+
+.agent-companies-settings__dialog-nav-button[aria-pressed="true"] {
+  border-color: color-mix(in oklab, var(--ac-info) 34%, var(--ac-border));
+  background: var(--ac-info-soft);
+}
+
+.agent-companies-settings__dialog-nav-item-name {
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.agent-companies-settings__dialog-nav-item-path,
+.agent-companies-settings__dialog-preview-path {
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ac-text-muted);
+  word-break: break-word;
+}
+
+.agent-companies-settings__dialog-preview {
+  align-content: start;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.agent-companies-settings__dialog-preview-head {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-companies-settings__dialog-preview-title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.agent-companies-settings__dialog-preview-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.agent-companies-settings__dialog-frontmatter {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 82%, transparent);
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.agent-companies-settings__dialog-markdown {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ac-text);
+  word-break: break-word;
+}
+
+.agent-companies-settings__dialog-markdown > :first-child {
+  margin-top: 0;
+}
+
+.agent-companies-settings__dialog-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-companies-settings__dialog-markdown p,
+.agent-companies-settings__dialog-markdown ul,
+.agent-companies-settings__dialog-markdown ol,
+.agent-companies-settings__dialog-markdown pre,
+.agent-companies-settings__dialog-markdown blockquote,
+.agent-companies-settings__dialog-markdown table {
+  margin: 0 0 12px;
+}
+
+.agent-companies-settings__dialog-markdown ul,
+.agent-companies-settings__dialog-markdown ol {
+  padding-left: 18px;
+}
+
+.agent-companies-settings__dialog-markdown li + li {
+  margin-top: 4px;
+}
+
+.agent-companies-settings__dialog-markdown a {
+  color: var(--ac-info);
+  text-decoration-color: color-mix(in oklab, var(--ac-info) 60%, transparent);
+}
+
+.agent-companies-settings__dialog-markdown a:hover {
+  color: color-mix(in oklab, var(--ac-info) 82%, var(--ac-text));
+}
+
+.agent-companies-settings__dialog-markdown strong {
+  color: var(--ac-text);
+}
+
+.agent-companies-settings__dialog-markdown code {
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 72%, transparent);
+  font-size: 0.95em;
+}
+
+.agent-companies-settings__dialog-markdown pre {
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 72%, transparent);
+}
+
+.agent-companies-settings__dialog-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.agent-companies-settings__dialog-markdown blockquote {
+  padding-left: 12px;
+  border-left: 3px solid color-mix(in oklab, var(--ac-info) 36%, var(--ac-border));
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__dialog-empty,
+.agent-companies-settings__dialog-loading,
+.agent-companies-settings__dialog-preview-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__dialog-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-companies-settings__dialog-preview-error {
+  color: var(--ac-danger);
+}
+
 .agent-companies-settings__loading {
   display: inline-flex;
   align-items: center;
@@ -477,6 +821,14 @@ const PAGE_STYLES = `
     width: 100%;
     justify-content: flex-start;
   }
+
+  .agent-companies-settings__dialog-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .agent-companies-settings__dialog-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -486,6 +838,26 @@ const PAGE_STYLES = `
 
   .agent-companies-settings__company-top {
     grid-template-columns: 1fr;
+  }
+
+  .agent-companies-settings__company-actions {
+    justify-items: start;
+  }
+
+  .agent-companies-settings__dialog-backdrop {
+    padding: 12px;
+  }
+
+  .agent-companies-settings__dialog {
+    padding: 14px;
+  }
+
+  .agent-companies-settings__dialog-head {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-companies-settings__dialog-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 `;
@@ -505,6 +877,49 @@ interface PendingActionState {
 interface CatalogCompanyGroup {
   repository: CatalogRepositorySummary | null;
   companies: CatalogCompanySummary[];
+}
+
+const COMPANY_CONTENT_SECTIONS: Array<{
+  key: CompanyContentKey;
+  label: string;
+  singular: string;
+  plural: string;
+}> = [
+  {
+    key: "agents",
+    label: "Agents",
+    singular: "agent",
+    plural: "agents"
+  },
+  {
+    key: "projects",
+    label: "Projects",
+    singular: "project",
+    plural: "projects"
+  },
+  {
+    key: "tasks",
+    label: "Tasks",
+    singular: "task",
+    plural: "tasks"
+  },
+  {
+    key: "issues",
+    label: "Issues",
+    singular: "issue",
+    plural: "issues"
+  },
+  {
+    key: "skills",
+    label: "Skills",
+    singular: "skill",
+    plural: "skills"
+  }
+];
+
+interface CompanyContentSelection {
+  kind: CompanyContentKey;
+  item: CompanyContentItem;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -558,12 +973,75 @@ function formatCompanyCount(count: number): string {
   return `${count} ${count === 1 ? "company" : "companies"}`;
 }
 
+function formatContentCount(
+  count: number,
+  singular: string,
+  plural: string
+): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function buildCompanyContentSummary(contents: CompanyContents): string {
+  const parts = COMPANY_CONTENT_SECTIONS.flatMap((section) => {
+    const count = contents[section.key].length;
+    return count > 0 ? [formatContentCount(count, section.singular, section.plural)] : [];
+  });
+
+  return parts.length > 0 ? parts.join(" • ") : "No structured contents detected";
+}
+
+function getCompanyContentSection(
+  key: CompanyContentKey
+): (typeof COMPANY_CONTENT_SECTIONS)[number] {
+  return COMPANY_CONTENT_SECTIONS.find((section) => section.key === key) ?? COMPANY_CONTENT_SECTIONS[0];
+}
+
+function getDefaultCompanyContentSelection(
+  company: CatalogCompanySummary
+): CompanyContentSelection | null {
+  for (const section of COMPANY_CONTENT_SECTIONS) {
+    const firstItem = company.contents[section.key][0];
+    if (firstItem) {
+      return {
+        kind: section.key,
+        item: firstItem
+      };
+    }
+  }
+
+  return null;
+}
+
+function findCompanyContentSelection(
+  company: CatalogCompanySummary,
+  itemPath: string | null
+): CompanyContentSelection | null {
+  if (!itemPath) {
+    return getDefaultCompanyContentSelection(company);
+  }
+
+  for (const section of COMPANY_CONTENT_SECTIONS) {
+    const item = company.contents[section.key].find((candidate) => candidate.path === itemPath);
+    if (item) {
+      return {
+        kind: section.key,
+        item
+      };
+    }
+  }
+
+  return getDefaultCompanyContentSelection(company);
+}
+
 function matchesCompanyQuery(company: CatalogCompanySummary, query: string): boolean {
   if (!query) {
     return true;
   }
 
   const normalizedQuery = query.toLowerCase();
+  const contentValues = COMPANY_CONTENT_SECTIONS.flatMap((section) =>
+    company.contents[section.key].flatMap((item) => [item.name, item.path])
+  );
 
   return [
     company.name,
@@ -571,7 +1049,8 @@ function matchesCompanyQuery(company: CatalogCompanySummary, query: string): boo
     company.description ?? "",
     company.relativePath,
     company.manifestPath,
-    company.repositoryLabel
+    company.repositoryLabel,
+    ...contentValues
   ].some((value) => value.toLowerCase().includes(normalizedQuery));
 }
 
@@ -691,7 +1170,12 @@ function RepositoryCard(props: {
   );
 }
 
-function CompanyCard({ company }: { company: CatalogCompanySummary }): React.JSX.Element {
+function CompanyCard(props: {
+  company: CatalogCompanySummary;
+  onOpenContents(companyId: string): void;
+}): React.JSX.Element {
+  const { company, onOpenContents } = props;
+
   return (
     <article className="agent-companies-settings__company-card" data-testid="company-card">
       <div className="agent-companies-settings__company-top">
@@ -699,25 +1183,275 @@ function CompanyCard({ company }: { company: CatalogCompanySummary }): React.JSX
           <h3 className="agent-companies-settings__company-title">{company.name}</h3>
           <div className="agent-companies-settings__company-path">Manifest: {company.manifestPath}</div>
         </div>
-        {company.version ? (
-          <div className="agent-companies-settings__badge-row">
-            <span className="agent-companies-settings__badge">Version {company.version}</span>
-          </div>
-        ) : null}
+        <div className="agent-companies-settings__company-actions">
+          {company.version ? (
+            <div className="agent-companies-settings__badge-row">
+              <span className="agent-companies-settings__badge">Version {company.version}</span>
+            </div>
+          ) : null}
+          <button
+            className="agent-companies-settings__button"
+            data-testid="company-details-trigger"
+            onClick={() => onOpenContents(company.id)}
+            type="button"
+          >
+            View contents
+          </button>
+        </div>
       </div>
       {company.description ? (
         <p className="agent-companies-settings__company-description">{company.description}</p>
       ) : null}
+      <p className="agent-companies-settings__company-summary">
+        {buildCompanyContentSummary(company.contents)}
+      </p>
     </article>
+  );
+}
+
+function CompanyDetailsDialog(props: {
+  company: CatalogCompanySummary;
+  onClose(): void;
+}): React.JSX.Element {
+  const { company, onClose } = props;
+  const [selectedItemPath, setSelectedItemPath] = useState<string | null>(
+    getDefaultCompanyContentSelection(company)?.item.path ?? null
+  );
+  const selectedSelection = findCompanyContentSelection(company, selectedItemPath);
+  const selectedSection = selectedSelection ? getCompanyContentSection(selectedSelection.kind) : null;
+  const detail = usePluginData<CatalogCompanyContentDetail | null>(
+    "catalog.company-content.read",
+    selectedSelection
+      ? {
+          companyId: company.id,
+          itemPath: selectedSelection.item.path
+        }
+      : {}
+  );
+  const detailData =
+    detail.data?.companyId === company.id &&
+    detail.data?.item.path === selectedSelection?.item.path
+      ? detail.data
+      : null;
+
+  useEffect(() => {
+    setSelectedItemPath(getDefaultCompanyContentSelection(company)?.item.path ?? null);
+  }, [company.id]);
+
+  return (
+    <div
+      className="agent-companies-settings__dialog-backdrop"
+      data-testid="company-details-modal"
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        aria-labelledby="agent-companies-details-title"
+        aria-modal="true"
+        className="agent-companies-settings__dialog"
+        data-testid="company-details-dialog"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="agent-companies-settings__dialog-head">
+          <div>
+            <span className="agent-companies-settings__eyebrow">Company Contents</span>
+            <h2 className="agent-companies-settings__dialog-title" id="agent-companies-details-title">
+              {company.name}
+            </h2>
+            <p className="agent-companies-settings__dialog-copy">
+              Structured manifests discovered for this company package.
+            </p>
+          </div>
+          <button
+            className="agent-companies-settings__button"
+            onClick={onClose}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="agent-companies-settings__dialog-meta">
+          <div className="agent-companies-settings__badge-row">
+            <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
+              {company.repositoryLabel}
+            </span>
+            {company.version ? (
+              <span className="agent-companies-settings__badge">Version {company.version}</span>
+            ) : null}
+            <span className="agent-companies-settings__badge">Manifest: {company.manifestPath}</span>
+          </div>
+          {company.description ? (
+            <div className="agent-companies-settings__notice">{company.description}</div>
+          ) : null}
+        </div>
+
+        <div className="agent-companies-settings__dialog-summary">
+          {COMPANY_CONTENT_SECTIONS.map((section) => {
+            const count = company.contents[section.key].length;
+
+            return (
+              <div
+                className="agent-companies-settings__dialog-stat"
+                data-testid={`company-details-count-${section.key}`}
+                key={section.key}
+              >
+                <span className="agent-companies-settings__metric-label">{section.label}</span>
+                <strong className="agent-companies-settings__dialog-stat-value">{count}</strong>
+                <span className="agent-companies-settings__metric-note">
+                  {formatContentCount(count, section.singular, section.plural)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="agent-companies-settings__dialog-layout">
+          <nav className="agent-companies-settings__dialog-nav" data-testid="company-details-nav">
+            {COMPANY_CONTENT_SECTIONS.map((section) => {
+              const items = company.contents[section.key];
+
+              return (
+                <section className="agent-companies-settings__dialog-nav-group" key={section.key}>
+                  <div className="agent-companies-settings__dialog-nav-head">
+                    <h3 className="agent-companies-settings__dialog-nav-title">{section.label}</h3>
+                    <span className="agent-companies-settings__badge">
+                      {formatContentCount(items.length, section.singular, section.plural)}
+                    </span>
+                  </div>
+                  {items.length > 0 ? (
+                    <ul className="agent-companies-settings__dialog-nav-list">
+                      {items.map((item) => {
+                        const isActive = selectedSelection?.item.path === item.path;
+
+                        return (
+                          <li key={item.path}>
+                            <button
+                              aria-pressed={isActive}
+                              className="agent-companies-settings__dialog-nav-button"
+                              data-testid="company-details-item"
+                              onClick={() => setSelectedItemPath(item.path)}
+                              type="button"
+                            >
+                              <span className="agent-companies-settings__dialog-nav-item-name">
+                                {item.name}
+                              </span>
+                              <span className="agent-companies-settings__dialog-nav-item-path">
+                                {item.path}
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : (
+                    <p className="agent-companies-settings__dialog-empty">
+                      No {section.plural} in this package.
+                    </p>
+                  )}
+                </section>
+              );
+            })}
+          </nav>
+
+          <section
+            className="agent-companies-settings__dialog-preview"
+            data-testid="company-details-preview"
+          >
+            {!selectedSelection ? (
+              <p className="agent-companies-settings__dialog-empty">
+                Select an item to preview its rendered markdown.
+              </p>
+            ) : detail.loading && !detailData ? (
+              <div className="agent-companies-settings__dialog-loading">
+                <span className="agent-companies-settings__spinner" />
+                Loading item details.
+              </div>
+            ) : detail.error ? (
+              <p className="agent-companies-settings__dialog-preview-error">
+                Could not load that file: {detail.error.message}
+              </p>
+            ) : detailData ? (
+              <>
+                <div className="agent-companies-settings__dialog-preview-head">
+                  <div className="agent-companies-settings__badge-row">
+                    <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
+                      {selectedSection?.label ?? "Item"}
+                    </span>
+                  </div>
+                  <div>
+                    <h3 className="agent-companies-settings__dialog-preview-title">
+                      {detailData.item.name}
+                    </h3>
+                    <div className="agent-companies-settings__dialog-preview-path">
+                      {detailData.item.fullPath}
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className="agent-companies-settings__dialog-preview-body"
+                  data-testid="company-details-preview-body"
+                >
+                  {detailData.item.frontmatter ? (
+                    <details open>
+                      <summary className="agent-companies-settings__metric-label">Frontmatter</summary>
+                      <pre className="agent-companies-settings__dialog-frontmatter">
+                        {detailData.item.frontmatter}
+                      </pre>
+                    </details>
+                  ) : null}
+
+                  {detailData.item.markdown ? (
+                    <div
+                      className="agent-companies-settings__dialog-markdown"
+                      data-testid="company-details-markdown"
+                    >
+                      <ReactMarkdown
+                        components={{
+                          a: ({ href, ...anchorProps }) => (
+                            <a
+                              {...anchorProps}
+                              className="agent-companies-settings__external-link"
+                              href={href}
+                              rel="noreferrer"
+                              target="_blank"
+                            />
+                          )
+                        }}
+                        remarkPlugins={[remarkGfm]}
+                      >
+                        {detailData.item.markdown}
+                      </ReactMarkdown>
+                    </div>
+                  ) : (
+                    <p className="agent-companies-settings__dialog-empty">
+                      No markdown body below the frontmatter for this file.
+                    </p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="agent-companies-settings__dialog-empty">
+                That file is no longer available in the latest repository snapshot.
+              </p>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
   );
 }
 
 function CompanyGroupCard({
   repository,
-  companies
+  companies,
+  onOpenContents
 }: {
   repository: CatalogRepositorySummary | null;
   companies: CatalogCompanySummary[];
+  onOpenContents(companyId: string): void;
 }): React.JSX.Element {
   const repositoryLabel = repository?.label ?? companies[0]?.repositoryLabel ?? "Unknown source";
   const repositoryUrl = repository?.url ?? companies[0]?.repositoryUrl ?? "";
@@ -756,7 +1490,7 @@ function CompanyGroupCard({
 
       <div className="agent-companies-settings__company-list">
         {companies.map((company) => (
-          <CompanyCard company={company} key={company.id} />
+          <CompanyCard company={company} key={company.id} onOpenContents={onOpenContents} />
         ))}
       </div>
     </section>
@@ -778,10 +1512,44 @@ export function AgentCompaniesSettingsPage({
   const [companyQuery, setCompanyQuery] = useState("");
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingActionState | null>(null);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const visibleCompanies = catalog.companies.filter((company) =>
     matchesCompanyQuery(company, companyQuery.trim())
   );
   const companyGroups = buildCompanyGroups(catalog.repositories, visibleCompanies);
+  const selectedCompany = selectedCompanyId
+    ? catalog.companies.find((company) => company.id === selectedCompanyId) ?? null
+    : null;
+
+  useEffect(() => {
+    if (!selectedCompany) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedCompanyId(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [selectedCompany]);
+
+  useEffect(() => {
+    if (!selectedCompanyId) {
+      return;
+    }
+
+    if (catalog.companies.some((company) => company.id === selectedCompanyId)) {
+      return;
+    }
+
+    setSelectedCompanyId(null);
+  }, [catalog.companies, selectedCompanyId]);
 
   async function refreshCatalog(noticeState: NoticeState | null = null): Promise<void> {
     if (noticeState) {
@@ -986,7 +1754,7 @@ export function AgentCompaniesSettingsPage({
               disabled={pendingAction !== null}
               id="agent-companies-repository-input"
               onChange={(event) => setRepositoryInput(event.target.value)}
-              placeholder="https://github.com/owner/repo or /path/to/repo"
+              placeholder="owner/repo, https://github.com/owner/repo, or local path"
               type="text"
               value={repositoryInput}
             />
@@ -1069,6 +1837,7 @@ export function AgentCompaniesSettingsPage({
                 <CompanyGroupCard
                   companies={group.companies}
                   key={group.repository?.id ?? group.companies[0]?.repositoryId ?? "unknown-repo"}
+                  onOpenContents={setSelectedCompanyId}
                   repository={group.repository}
                 />
               ))}
@@ -1090,6 +1859,10 @@ export function AgentCompaniesSettingsPage({
           )}
         </section>
       </div>
+
+      {selectedCompany ? (
+        <CompanyDetailsDialog company={selectedCompany} onClose={() => setSelectedCompanyId(null)} />
+      ) : null}
     </section>
   );
 }
