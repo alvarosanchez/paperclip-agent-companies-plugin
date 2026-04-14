@@ -104,11 +104,33 @@ function asIsoTimestamp(value: unknown): string | null {
   return text ?? null;
 }
 
-function sortCompanyContentItems(left: CompanyContentItem, right: CompanyContentItem): number {
+export function sortCompanyContentItems(left: CompanyContentItem, right: CompanyContentItem): number {
   return (
     left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
     left.path.localeCompare(right.path, undefined, { sensitivity: "base" })
   );
+}
+
+export function normalizeCompanyContentPath(value: string): string | null {
+  const normalizedPath = value.trim().replace(/[\\]+/gu, "/");
+  if (
+    !normalizedPath ||
+    normalizedPath.startsWith("/") ||
+    normalizedPath.startsWith("~/") ||
+    /^[A-Za-z]:\//u.test(normalizedPath)
+  ) {
+    return null;
+  }
+
+  const segments = normalizedPath.split("/").filter(Boolean);
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+
+  return segments.join("/");
 }
 
 function deriveCompanyContentName(path: string): string {
@@ -126,7 +148,10 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
     return null;
   }
 
-  const path = rawPath.replace(/[\\]+/gu, "/");
+  const path = normalizeCompanyContentPath(rawPath);
+  if (!path) {
+    return null;
+  }
 
   return {
     name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),

@@ -12,13 +12,16 @@ import {
   type CatalogCompanyContentDetail,
   createRepositorySource,
   createEmptyCompanyContents,
+  normalizeCatalogState,
   normalizeRepositoryCloneRef,
   normalizeRepositoryReference,
   type CatalogSnapshot
 } from "../src/catalog.js";
 import {
   buildGitProcessEnvironment,
+  clearRepositoryCheckoutCacheEntry,
   createAgentCompaniesPlugin,
+  resolveRepositoryContentRoot,
   scanRepositoryForAgentCompanies
 } from "../src/worker.js";
 
@@ -300,6 +303,56 @@ describe("agent companies plugin", () => {
     expect(normalizeRepositoryCloneRef("../fixtures/agent-company")).toBe("../fixtures/agent-company");
   });
 
+  it("drops unsafe persisted company content paths during catalog normalization", () => {
+    const repository = createRepositorySource("/tmp/agent-company-repo");
+    const state = normalizeCatalogState({
+      repositories: [
+        {
+          ...repository,
+          companies: [
+            {
+              id: `${repository.id}:alpha/COMPANY.md`,
+              name: "Alpha Labs",
+              slug: "alpha-labs",
+              description: "Fixture company",
+              schema: AGENT_COMPANIES_SCHEMA,
+              version: "1.0.0",
+              relativePath: "alpha",
+              manifestPath: "alpha/COMPANY.md",
+              contents: {
+                agents: [
+                  {
+                    name: "Alpha CEO",
+                    path: "agents/ceo/AGENTS.md"
+                  },
+                  {
+                    name: "Unsafe parent traversal",
+                    path: "../outside/AGENTS.md"
+                  },
+                  {
+                    name: "Unsafe absolute path",
+                    path: "/tmp/AGENTS.md"
+                  }
+                ],
+                projects: [],
+                tasks: [],
+                issues: [],
+                skills: []
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(state.repositories[0]?.companies[0]?.contents.agents).toEqual([
+      {
+        name: "Alpha CEO",
+        path: "agents/ceo/AGENTS.md"
+      }
+    ]);
+  });
+
   it("loads selected company markdown details on demand", async () => {
     const repositoryPath = await createRepositoryFixture();
     const plugin = createAgentCompaniesPlugin({
@@ -338,6 +391,117 @@ describe("agent companies plugin", () => {
     expect(detail?.item.frontmatter).toContain("name: Repo Audit");
     expect(detail?.item.markdown).toContain("## Checklist");
     expect(detail?.item.markdown).toContain("Review the repository layout");
+  });
+
+  it("returns null when tampered company content paths resolve outside the repository root", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const repository = createRepositorySource(repositoryPath);
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:25:00.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [
+        {
+          ...repository,
+          status: "ready",
+          companies: [
+            {
+              id: `${repository.id}:alpha/COMPANY.md`,
+              name: "Alpha Labs",
+              slug: "alpha-labs",
+              description: "Fixture company",
+              schema: AGENT_COMPANIES_SCHEMA,
+              version: "1.0.0",
+              relativePath: "alpha",
+              manifestPath: "../outside/COMPANY.md",
+              contents: {
+                agents: [],
+                projects: [],
+                tasks: [],
+                issues: [],
+                skills: [
+                  {
+                    name: "Repo Audit",
+                    path: "skills/repo-audit/SKILL.md"
+                  }
+                ]
+              }
+            }
+          ],
+          lastScannedAt: "2026-04-14T09:20:00.000Z",
+          lastScanError: null
+        }
+      ],
+      updatedAt: "2026-04-14T09:20:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+
+    const detail = await harness.getData<CatalogCompanyContentDetail | null>(
+      "catalog.company-content.read",
+      {
+        companyId: `${repository.id}:alpha/COMPANY.md`,
+        itemPath: "skills/repo-audit/SKILL.md"
+      }
+    );
+
+    expect(detail).toBeNull();
+  });
+
+  it("reuses one in-flight repository clone for concurrent content root resolution", async () => {
+    const repository = createRepositorySource("https://github.com/alvarosanchez/micronaut-agent-company");
+    let cloneCount = 0;
+
+    const [firstRoot, secondRoot] = await Promise.all([
+      resolveRepositoryContentRoot(repository, {
+        cloneCheckout: async () => {
+          cloneCount += 1;
+
+          const tempDirectory = await mkdtemp(
+            join(tmpdir(), "paperclip-agent-companies-plugin-content-root-test-")
+          );
+          tempDirectories.push(tempDirectory);
+
+          const checkoutDirectory = join(tempDirectory, "checkout");
+          await mkdir(checkoutDirectory, { recursive: true });
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+
+          return {
+            checkoutDirectory,
+            tempDirectory
+          };
+        }
+      }),
+      resolveRepositoryContentRoot(repository, {
+        cloneCheckout: async () => {
+          cloneCount += 1;
+
+          const tempDirectory = await mkdtemp(
+            join(tmpdir(), "paperclip-agent-companies-plugin-content-root-test-")
+          );
+          tempDirectories.push(tempDirectory);
+
+          const checkoutDirectory = join(tempDirectory, "checkout");
+          await mkdir(checkoutDirectory, { recursive: true });
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+
+          return {
+            checkoutDirectory,
+            tempDirectory
+          };
+        }
+      })
+    ]);
+
+    expect(cloneCount).toBe(1);
+    expect(firstRoot).toBe(secondRoot);
+
+    await clearRepositoryCheckoutCacheEntry(repository.id);
   });
 
   it("only auto-scans seeded sources when catalog state is missing", async () => {

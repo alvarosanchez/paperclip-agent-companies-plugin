@@ -13,8 +13,10 @@ import {
   createRepositorySource,
   createEmptyCompanyContents,
   hasPersistedCatalogRepositories,
+  normalizeCompanyContentPath,
   normalizeCatalogState,
   normalizeRepositoryCloneRef,
+  sortCompanyContentItems,
   type CatalogSnapshot,
   type CompanyContentItem,
   type CompanyContentKey,
@@ -42,6 +44,7 @@ const IGNORED_DIRECTORY_NAMES = new Set([
 const FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
 const COMPANY_CONTENT_FILE_NAMES = new Set(["AGENTS.md", "PROJECT.md", "TASK.md", "ISSUE.md", "SKILL.md"]);
 const repositoryCheckoutCache = new Map<string, RepositoryCheckoutCacheEntry>();
+const repositoryCheckoutInflight = new Map<string, Promise<RepositoryCheckoutCacheEntry>>();
 
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
 
@@ -152,13 +155,6 @@ function getTopLevelScalar(frontmatter: string, key: string): string | null {
 function summarizeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/\s+/gu, " ").trim().slice(0, 600);
-}
-
-function sortCompanyContentItems(left: CompanyContentItem, right: CompanyContentItem): number {
-  return (
-    left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
-    left.path.localeCompare(right.path, undefined, { sensitivity: "base" })
-  );
 }
 
 function summarizeRepositoryCloneFailure(message: string): string {
@@ -285,10 +281,24 @@ function splitMarkdownDocument(content: string): {
 }
 
 function resolveRepositoryRelativePath(repositoryRoot: string, relativePath: string): string {
-  const normalizedPath = toPosixPath(relativePath);
-  const segments = normalizedPath.split("/").filter(Boolean);
+  const normalizedPath = normalizeCompanyContentPath(relativePath);
+  if (!normalizedPath) {
+    throw new Error(`Expected a repository-relative path but received "${relativePath}".`);
+  }
 
-  return segments.length > 0 ? join(repositoryRoot, ...segments) : repositoryRoot;
+  const resolvedRepositoryRoot = resolve(repositoryRoot);
+  const resolvedPath = resolve(resolvedRepositoryRoot, ...normalizedPath.split("/"));
+  const repositoryRelativePath = relative(resolvedRepositoryRoot, resolvedPath);
+
+  if (
+    repositoryRelativePath === "" ||
+    repositoryRelativePath === ".." ||
+    repositoryRelativePath.startsWith(`..${sep}`)
+  ) {
+    throw new Error(`Path "${relativePath}" resolves outside the repository root.`);
+  }
+
+  return resolvedPath;
 }
 
 function getRepositoryRelativeCompanyRoot(company: DiscoveredAgentCompany): string {
@@ -338,7 +348,7 @@ function findCompanyContentEntry(
   return null;
 }
 
-async function clearRepositoryCheckoutCacheEntry(repositoryId: string): Promise<void> {
+export async function clearRepositoryCheckoutCacheEntry(repositoryId: string): Promise<void> {
   const cachedEntry = repositoryCheckoutCache.get(repositoryId);
   if (!cachedEntry) {
     return;
@@ -662,7 +672,11 @@ async function parseCompanyContentItem(
   manifestPath: string,
   companyRoot: string
 ): Promise<{ kind: CompanyContentKey; item: CompanyContentItem } | null> {
-  const relativePath = toPosixPath(relative(companyRoot, manifestPath));
+  const relativePath = normalizeCompanyContentPath(toPosixPath(relative(companyRoot, manifestPath)));
+  if (!relativePath) {
+    return null;
+  }
+
   const kind = classifyCompanyContentPath(relativePath);
 
   if (!kind) {
@@ -702,11 +716,9 @@ async function parseCompanyContentItem(
 async function scanCompanyContents(companyRoot: string): Promise<CompanyContents> {
   const contents = createEmptyCompanyContents();
   const manifestPaths = await findCompanyContentManifestPaths(companyRoot);
-  const parsedItems = await Promise.all(
-    manifestPaths.map((manifestPath) => parseCompanyContentItem(manifestPath, companyRoot))
-  );
 
-  for (const parsedItem of parsedItems) {
+  for (const manifestPath of manifestPaths) {
+    const parsedItem = await parseCompanyContentItem(manifestPath, companyRoot);
     if (!parsedItem) {
       continue;
     }
@@ -879,20 +891,47 @@ async function cloneRepositoryCheckout(
   }
 }
 
-async function resolveRepositoryContentRoot(repository: RepositorySource): Promise<string> {
+export async function resolveRepositoryContentRoot(
+  repository: RepositorySource,
+  options: {
+    cloneCheckout?: (repositoryReference: string) => Promise<RepositoryCheckoutCacheEntry>;
+    doesPathExist?: (path: string) => Promise<boolean>;
+  } = {}
+): Promise<string> {
   if (looksLikeLocalPath(repository.url)) {
     return repository.url;
   }
 
+  const doesPathExist = options.doesPathExist ?? pathExists;
+  const cloneCheckout = options.cloneCheckout ?? cloneRepositoryCheckout;
   const cachedEntry = repositoryCheckoutCache.get(repository.id);
-  if (cachedEntry && (await pathExists(cachedEntry.checkoutDirectory))) {
+  if (cachedEntry && (await doesPathExist(cachedEntry.checkoutDirectory))) {
     return cachedEntry.checkoutDirectory;
   }
 
-  await clearRepositoryCheckoutCacheEntry(repository.id);
-  const nextEntry = await cloneRepositoryCheckout(repository.url);
-  repositoryCheckoutCache.set(repository.id, nextEntry);
+  if (cachedEntry) {
+    await clearRepositoryCheckoutCacheEntry(repository.id);
+  }
 
+  let inFlightCheckout = repositoryCheckoutInflight.get(repository.id);
+  if (!inFlightCheckout) {
+    inFlightCheckout = (async () => {
+      const nextEntry = await cloneCheckout(repository.url);
+      repositoryCheckoutCache.set(repository.id, nextEntry);
+      return nextEntry;
+    })();
+
+    repositoryCheckoutInflight.set(repository.id, inFlightCheckout);
+    inFlightCheckout.finally(() => {
+      if (repositoryCheckoutInflight.get(repository.id) === inFlightCheckout) {
+        repositoryCheckoutInflight.delete(repository.id);
+      }
+    }).catch(() => {
+      // noop: the awaiting caller will receive the original rejection
+    });
+  }
+
+  const nextEntry = await inFlightCheckout;
   return nextEntry.checkoutDirectory;
 }
 
@@ -912,9 +951,14 @@ async function readCatalogCompanyContentDetail(
     return null;
   }
 
-  const repositoryRoot = await resolveRepositoryContentRoot(match.repository);
   const relativeFilePath = getRepositoryRelativeCompanyContentPath(match.company, contentEntry.item.path);
-  const absoluteFilePath = resolveRepositoryRelativePath(repositoryRoot, relativeFilePath);
+  const repositoryRoot = await resolveRepositoryContentRoot(match.repository);
+  let absoluteFilePath;
+  try {
+    absoluteFilePath = resolveRepositoryRelativePath(repositoryRoot, relativeFilePath);
+  } catch {
+    return null;
+  }
 
   let content;
   try {
