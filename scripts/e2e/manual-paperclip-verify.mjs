@@ -17,6 +17,7 @@ const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-agent-companies-plugin-manual';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
+const settingsPageHeading = 'Repository Sources';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const env = {
@@ -398,7 +399,9 @@ async function main() {
     console.log('State preservation: disabled; this disposable instance will be deleted on exit.');
   }
   console.log('The URL has been opened in your default browser.');
-  console.log(`Confirm that ${pluginDisplayName} appears in the installed plugins list.`);
+  console.log(`Open ${pluginDisplayName} from the installed plugins list.`);
+  console.log(`Confirm that the ${settingsPageHeading} settings page shows the preloaded paperclipai/companies source.`);
+  console.log('Confirm that discovered companies are listed, then try adding and removing a source.');
   console.log('Press Ctrl+C when you are done inspecting the instance.');
   console.log('');
 

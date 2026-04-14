@@ -15,6 +15,7 @@ const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-agent-companies-plugin-e2e';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
+const settingsPageHeading = 'Repository Sources';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const defaultTimeoutMs = 30000;
@@ -361,13 +362,31 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   page.setDefaultTimeout(defaultTimeoutMs);
+  const consoleMessages = [];
+  const pageErrors = [];
+
+  page.on('console', (message) => {
+    consoleMessages.push({
+      type: message.type(),
+      text: message.text()
+    });
+  });
+  page.on('pageerror', (error) => {
+    pageErrors.push(error instanceof Error ? error.stack ?? error.message : String(error));
+  });
 
   try {
     await gotoWithTimeout(page, settingsIndexUrl);
     log(`Opened installed plugins page: ${settingsIndexUrl}`);
 
-    await page.getByText(pluginDisplayName, { exact: true }).first().waitFor({ timeout: 120000 });
+    const pluginEntry = page.getByText(pluginDisplayName, { exact: true }).first();
+    await pluginEntry.waitFor({ timeout: 120000 });
+    await pluginEntry.click();
 
+    await page.getByText(settingsPageHeading, { exact: true }).first().waitFor({ timeout: 120000 });
+    await page.locator('[data-testid="repo-card"]').first().waitFor({ timeout: 120000 });
+    await page.locator('[data-testid="company-card"]').first().waitFor({ timeout: 120000 });
+  } finally {
     await mkdir(join(pluginRoot, 'tests/e2e/results'), { recursive: true });
     await page.screenshot({ path: join(pluginRoot, 'tests/e2e/results/last-run.png'), fullPage: true });
     const bodyText = await page.locator('body').textContent();
@@ -377,13 +396,15 @@ async function main() {
         {
           baseUrl,
           settingsIndexUrl,
-          bodyText
+          finalUrl: page.url(),
+          bodyText,
+          consoleMessages,
+          pageErrors
         },
         null,
         2
       )
     );
-  } finally {
     await browser.close();
   }
 

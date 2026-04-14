@@ -22,6 +22,14 @@ function withPlugins(config) {
 }
 
 export default [
+  withPlugins({
+    input: "src/catalog.ts",
+    output: {
+      file: "dist/catalog.js",
+      format: "es",
+      sourcemap: true
+    }
+  }),
   withPlugins(presets.rollup.manifest),
   withPlugins(presets.rollup.worker),
   withPlugins(presets.rollup.ui)
