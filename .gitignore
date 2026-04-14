@@ -1,1 +1,6 @@
 .tmp/
+.playwright-cli/
+dist/
+node_modules/
+output/
+tests/e2e/results/
