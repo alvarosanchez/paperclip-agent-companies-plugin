@@ -3,8 +3,38 @@ export const PLUGIN_DISPLAY_NAME = "Agent Companies Plugin";
 export const DEFAULT_REPOSITORY_URL = "https://github.com/paperclipai/companies";
 export const CATALOG_STATE_KEY = "agent-companies.catalog.v1";
 export const AGENT_COMPANIES_SCHEMA = "agentcompanies/v1";
+export const COMPANY_CONTENT_KEYS = ["agents", "projects", "tasks", "issues", "skills"] as const;
+
+export type CompanyContentKey = (typeof COMPANY_CONTENT_KEYS)[number];
 
 export type RepositoryScanStatus = "idle" | "ready" | "error";
+
+export interface CompanyContentItem {
+  name: string;
+  path: string;
+}
+
+export interface CompanyContents {
+  agents: CompanyContentItem[];
+  projects: CompanyContentItem[];
+  tasks: CompanyContentItem[];
+  issues: CompanyContentItem[];
+  skills: CompanyContentItem[];
+}
+
+export interface CatalogCompanyContentDetail {
+  companyId: string;
+  companyName: string;
+  repositoryId: string;
+  repositoryLabel: string;
+  repositoryUrl: string;
+  item: CompanyContentItem & {
+    kind: CompanyContentKey;
+    fullPath: string;
+    frontmatter: string | null;
+    markdown: string;
+  };
+}
 
 export interface DiscoveredAgentCompany {
   id: string;
@@ -15,6 +45,7 @@ export interface DiscoveredAgentCompany {
   version: string | null;
   relativePath: string;
   manifestPath: string;
+  contents: CompanyContents;
 }
 
 export interface RepositorySource {
@@ -58,6 +89,7 @@ export interface CatalogSnapshot {
 }
 
 const GIT_SSH_REPOSITORY_PATTERN = /^git@([^:]+):(.+)$/i;
+const GITHUB_SHORTHAND_REPOSITORY_PATTERN = /^(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+?)(?:\.git)?$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -70,6 +102,99 @@ function asNonEmptyString(value: unknown): string | null {
 function asIsoTimestamp(value: unknown): string | null {
   const text = asNonEmptyString(value);
   return text ?? null;
+}
+
+export function sortCompanyContentItems(left: CompanyContentItem, right: CompanyContentItem): number {
+  return (
+    left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
+    left.path.localeCompare(right.path, undefined, { sensitivity: "base" })
+  );
+}
+
+export function normalizeCompanyContentPath(value: string): string | null {
+  const normalizedPath = value.trim().replace(/[\\]+/gu, "/");
+  if (
+    !normalizedPath ||
+    normalizedPath.startsWith("/") ||
+    normalizedPath.startsWith("~/") ||
+    /^[A-Za-z]:\//u.test(normalizedPath)
+  ) {
+    return null;
+  }
+
+  const segments = normalizedPath.split("/").filter(Boolean);
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+
+  return segments.join("/");
+}
+
+function deriveCompanyContentName(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  return segments.length >= 2 ? segments[segments.length - 2] ?? path : path;
+}
+
+function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const rawPath = asNonEmptyString(value.path);
+  if (!rawPath) {
+    return null;
+  }
+
+  const path = normalizeCompanyContentPath(rawPath);
+  if (!path) {
+    return null;
+  }
+
+  return {
+    name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),
+    path
+  };
+}
+
+export function createEmptyCompanyContents(): CompanyContents {
+  return {
+    agents: [],
+    projects: [],
+    tasks: [],
+    issues: [],
+    skills: []
+  };
+}
+
+function normalizeCompanyContents(value: unknown): CompanyContents {
+  if (!isRecord(value)) {
+    return createEmptyCompanyContents();
+  }
+
+  const contents = createEmptyCompanyContents();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    const items: CompanyContentItem[] = [];
+    const seenPaths = new Set<string>();
+    const rawItems = Array.isArray(value[key]) ? value[key] : [];
+
+    for (const rawItem of rawItems) {
+      const item = normalizeCompanyContentItem(rawItem);
+      if (!item || seenPaths.has(item.path)) {
+        continue;
+      }
+
+      items.push(item);
+      seenPaths.add(item.path);
+    }
+
+    contents[key] = items.sort(sortCompanyContentItems);
+  }
+
+  return contents;
 }
 
 function normalizeRepositoryScanStatus(value: unknown): RepositoryScanStatus {
@@ -108,6 +233,33 @@ function normalizeSshRepository(input: string): string {
   return `https://${host.toLowerCase()}/${normalizedPath}`;
 }
 
+function normalizeGithubShorthandRepository(input: string): string | null {
+  const trimmed = input.trim();
+  if (
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("~/") ||
+    /^[A-Za-z]:[\\/]/u.test(trimmed) ||
+    trimmed.includes("\\")
+  ) {
+    return null;
+  }
+
+  const match = GITHUB_SHORTHAND_REPOSITORY_PATTERN.exec(trimmed);
+  if (!match?.groups) {
+    return null;
+  }
+
+  const owner = match.groups.owner?.trim();
+  const repo = match.groups.repo?.trim();
+  if (!owner || !repo) {
+    return null;
+  }
+
+  return `https://github.com/${owner}/${repo}`;
+}
+
 export function normalizeRepositoryReference(input: string): string {
   const trimmed = input.trim();
   if (!trimmed) {
@@ -116,6 +268,11 @@ export function normalizeRepositoryReference(input: string): string {
 
   if (GIT_SSH_REPOSITORY_PATTERN.test(trimmed)) {
     return normalizeSshRepository(trimmed);
+  }
+
+  const githubShorthand = normalizeGithubShorthandRepository(trimmed);
+  if (githubShorthand) {
+    return githubShorthand;
   }
 
   const parsedUrl = maybeParseRepositoryUrl(trimmed);
@@ -145,6 +302,11 @@ export function normalizeRepositoryCloneRef(input: string): string {
 
   if (GIT_SSH_REPOSITORY_PATTERN.test(trimmed)) {
     return trimmed.replace(/\/+$/u, "");
+  }
+
+  const githubShorthand = normalizeGithubShorthandRepository(trimmed);
+  if (githubShorthand) {
+    return githubShorthand;
   }
 
   const parsedUrl = maybeParseRepositoryUrl(trimmed);
@@ -212,7 +374,8 @@ function normalizeCompany(value: unknown, repositoryId: string): DiscoveredAgent
     schema: asNonEmptyString(value.schema) ?? AGENT_COMPANIES_SCHEMA,
     version: asNonEmptyString(value.version),
     relativePath,
-    manifestPath
+    manifestPath,
+    contents: normalizeCompanyContents(value.contents)
   };
 }
 

@@ -41,6 +41,100 @@ function log(message) {
   console.log(`[paperclip-agent-companies-plugin:e2e] ${message}`);
 }
 
+function clamp01(value) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function oklabToSrgb(lightness, a, b) {
+  const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (lightness - 0.0894841775 * a - 1.291485548 * b) ** 3;
+
+  return [
+    clamp01(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+    clamp01(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+    clamp01(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s)
+  ];
+}
+
+function parseCssColor(input) {
+  const value = input.trim().toLowerCase();
+  const rgbMatch = value.match(/^rgba?\(([^)]+)\)$/);
+  if (rgbMatch) {
+    const channels = rgbMatch[1]
+      .split(/[,\s/]+/)
+      .filter(Boolean)
+      .slice(0, 3)
+      .map((channel) => Number(channel.replace('%', '')));
+
+    if (channels.length < 3 || channels.some((channel) => Number.isNaN(channel))) {
+      throw new Error(`Could not parse RGB color from "${input}".`);
+    }
+
+    return channels.map((channel) => channel / 255);
+  }
+
+  const oklabMatch = value.match(/^oklab\(([^)]+)\)$/);
+  if (oklabMatch) {
+    const channels = oklabMatch[1]
+      .split(/[,\s/]+/)
+      .filter(Boolean)
+      .slice(0, 3)
+      .map((channel) => Number(channel));
+
+    if (channels.length < 3 || channels.some((channel) => Number.isNaN(channel))) {
+      throw new Error(`Could not parse OKLab color from "${input}".`);
+    }
+
+    return oklabToSrgb(channels[0], channels[1], channels[2]);
+  }
+
+  const oklchMatch = value.match(/^oklch\(([^)]+)\)$/);
+  if (oklchMatch) {
+    const channels = oklchMatch[1]
+      .split(/[,\s/]+/)
+      .filter(Boolean)
+      .slice(0, 3);
+
+    if (channels.length < 3) {
+      throw new Error(`Could not parse OKLCH color from "${input}".`);
+    }
+
+    const lightness = Number(channels[0]);
+    const chroma = Number(channels[1]);
+    const hue = Number(channels[2].replace('deg', ''));
+    if ([lightness, chroma, hue].some((channel) => Number.isNaN(channel))) {
+      throw new Error(`Could not parse OKLCH color from "${input}".`);
+    }
+
+    const hueInRadians = (hue * Math.PI) / 180;
+    return oklabToSrgb(lightness, chroma * Math.cos(hueInRadians), chroma * Math.sin(hueInRadians));
+  }
+
+  throw new Error(`Unsupported CSS color format "${input}".`);
+}
+
+function linearizeChannel(value) {
+  return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function relativeLuminance([red, green, blue]) {
+  return (
+    0.2126 * linearizeChannel(red) +
+    0.7152 * linearizeChannel(green) +
+    0.0722 * linearizeChannel(blue)
+  );
+}
+
+function contrastRatio(foreground, background) {
+  const foregroundLuminance = relativeLuminance(foreground);
+  const backgroundLuminance = relativeLuminance(background);
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance);
+  const darker = Math.min(foregroundLuminance, backgroundLuminance);
+
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 function getPaperclipCommandArgs(args) {
   return ['-p', 'node@20', '-p', 'paperclipai', 'paperclipai', ...args];
 }
@@ -233,6 +327,98 @@ async function waitForReady(url, timeoutMs) {
   throw new Error(`Timed out waiting for Paperclip at ${healthUrl}`);
 }
 
+async function createFixtureRepository() {
+  const repositoryRoot = await mkdtemp(join(stateRoot, 'company-details-fixture-'));
+  const longMarkdownBody = Array.from({ length: 48 }, (_, index) => `### Review checkpoint ${index + 1}
+
+- Confirm the repository layout
+- Verify the import manifests
+- Keep the preview pane scrollable without moving the whole dialog
+`).join('\n');
+
+  await mkdir(join(repositoryRoot, 'agents', 'ceo'), { recursive: true });
+  await mkdir(join(repositoryRoot, 'skills', 'repo-audit'), { recursive: true });
+  await mkdir(join(repositoryRoot, 'projects', 'first-import', 'tasks', 'scope-catalog'), {
+    recursive: true
+  });
+  await mkdir(join(repositoryRoot, 'issues', 'follow-up-review'), { recursive: true });
+
+  await writeFile(
+    join(repositoryRoot, 'COMPANY.md'),
+    `---
+name: Modal Demo Company
+description: Disposable fixture used to verify the company contents modal.
+slug: modal-demo-company
+schema: agentcompanies/v1
+version: 1.0.0
+---
+
+Fixture company for Paperclip smoke verification.
+`
+  );
+  await writeFile(
+    join(repositoryRoot, 'agents', 'ceo', 'AGENTS.md'),
+    `---
+name: CEO
+title: Chief Executive Officer
+---
+
+Lead the import effort and coordinate the team.
+`
+  );
+  await writeFile(
+    join(repositoryRoot, 'skills', 'repo-audit', 'SKILL.md'),
+    `---
+name: Repo Audit
+description: Validate the repository before import.
+---
+
+## Review goals
+
+- Confirm the repository layout
+- Verify the import manifests
+
+${longMarkdownBody}
+`
+  );
+  await writeFile(
+    join(repositoryRoot, 'projects', 'first-import', 'PROJECT.md'),
+    `---
+name: First Import
+description: Prepare the first import project.
+---
+
+Set up the first end-to-end import project.
+`
+  );
+  await writeFile(
+    join(repositoryRoot, 'projects', 'first-import', 'tasks', 'scope-catalog', 'TASK.md'),
+    `---
+name: Scope Catalog
+---
+
+Define the first catalog scope and its acceptance criteria.
+`
+  );
+  await writeFile(
+    join(repositoryRoot, 'issues', 'follow-up-review', 'ISSUE.md'),
+    `---
+name: Follow-up Review
+---
+
+Review the import results after the initial run.
+`
+  );
+
+  await runCommand('git', ['init'], { cwd: repositoryRoot });
+  await runCommand('git', ['config', 'user.name', 'Codex E2E'], { cwd: repositoryRoot });
+  await runCommand('git', ['config', 'user.email', 'codex@example.com'], { cwd: repositoryRoot });
+  await runCommand('git', ['add', '.'], { cwd: repositoryRoot });
+  await runCommand('git', ['commit', '-m', 'Initial fixture'], { cwd: repositoryRoot });
+
+  return repositoryRoot;
+}
+
 async function ensureCompanySeeded() {
   const companiesUrl = new URL('/api/companies', baseUrl).toString();
   const existingCompanies = await fetchJson(companiesUrl);
@@ -349,6 +535,8 @@ async function main() {
   log(`Paperclip server is ready at ${baseUrl}.`);
 
   await ensureCompanySeeded();
+  const fixtureRepository = await createFixtureRepository();
+  log(`Created local fixture repository at ${fixtureRepository}.`);
 
   await runCommand(
     'npx',
@@ -384,8 +572,103 @@ async function main() {
     await pluginEntry.click();
 
     await page.getByText(settingsPageHeading, { exact: true }).first().waitFor({ timeout: 120000 });
-    await page.locator('[data-testid="repo-card"]').first().waitFor({ timeout: 120000 });
-    await page.locator('[data-testid="company-card"]').first().waitFor({ timeout: 120000 });
+    await page.locator('[data-testid="catalog-page"]').waitFor({ timeout: 120000 });
+
+    const repositoryInput = page.locator('#agent-companies-repository-input');
+    const addRepositoryButton = page.getByRole('button', { name: 'Add repository' });
+    await repositoryInput.waitFor({ timeout: 120000 });
+    await addRepositoryButton.waitFor({ timeout: 120000 });
+    const addRepositoryButtonStyle = await addRepositoryButton.evaluate((node) => {
+      const style = getComputedStyle(node);
+      const probe = document.createElement('div');
+      probe.style.display = 'none';
+      document.body.appendChild(probe);
+      probe.style.color = style.color;
+      const normalizedColor = getComputedStyle(probe).color;
+      probe.style.color = style.backgroundColor;
+      const normalizedBackgroundColor = getComputedStyle(probe).color;
+      probe.remove();
+
+      return {
+        backgroundColor: normalizedBackgroundColor,
+        color: normalizedColor,
+        rawBackgroundColor: style.backgroundColor,
+        rawColor: style.color
+      };
+    });
+    const addRepositoryContrast = contrastRatio(
+      parseCssColor(addRepositoryButtonStyle.color),
+      parseCssColor(addRepositoryButtonStyle.backgroundColor)
+    );
+    if (addRepositoryContrast < 4.5) {
+      throw new Error(
+        `Expected Add repository button contrast >= 4.5, received ${addRepositoryContrast.toFixed(2)} (raw text ${addRepositoryButtonStyle.rawColor}, raw background ${addRepositoryButtonStyle.rawBackgroundColor}).`
+      );
+    }
+
+    await repositoryInput.fill(fixtureRepository);
+    await addRepositoryButton.click();
+
+    const fixtureCompanyCard = page.locator('[data-testid="company-card"]').filter({
+      hasText: 'Modal Demo Company'
+    });
+    await fixtureCompanyCard.first().waitFor({ timeout: 120000 });
+    await fixtureCompanyCard.getByRole('button', { name: 'View contents' }).click();
+
+    const detailsModal = page.locator('[data-testid="company-details-modal"]');
+    await detailsModal.waitFor({ timeout: 120000 });
+    const detailsDialog = detailsModal.locator('[data-testid="company-details-dialog"]');
+    const detailsPreview = detailsModal.locator('[data-testid="company-details-preview"]');
+    const detailsPreviewBody = detailsModal.locator('[data-testid="company-details-preview-body"]');
+    const detailsNav = detailsModal.locator('[data-testid="company-details-nav"]');
+
+    await detailsModal.getByText('Modal Demo Company', { exact: true }).waitFor({ timeout: 120000 });
+    await detailsPreview.getByRole('heading', { name: 'CEO', exact: true }).waitFor({ timeout: 120000 });
+    await detailsPreview.getByText('Lead the import effort and coordinate the team.', { exact: true }).waitFor({ timeout: 120000 });
+
+    await detailsNav.getByRole('button', { name: /Repo Audit/i }).click();
+    await detailsPreview.getByRole('heading', { name: 'Repo Audit', exact: true }).waitFor({ timeout: 120000 });
+    await detailsPreview.getByText('Review goals', { exact: true }).waitFor({ timeout: 120000 });
+    await detailsPreview.getByRole('heading', { name: 'Review checkpoint 48', exact: true }).waitFor({
+      timeout: 120000
+    });
+
+    await page.waitForFunction(
+      (previewBody) => previewBody instanceof HTMLElement && previewBody.scrollHeight > previewBody.clientHeight,
+      await detailsPreviewBody.elementHandle(),
+      { timeout: 120000 }
+    );
+    await detailsPreviewBody.evaluate((node) => {
+      node.scrollTop = 220;
+    });
+
+    const scrollState = await Promise.all([
+      detailsDialog.evaluate((node) => ({
+        overflowY: getComputedStyle(node).overflowY,
+        scrollTop: node.scrollTop
+      })),
+      detailsPreviewBody.evaluate((node) => ({
+        overflowY: getComputedStyle(node).overflowY,
+        scrollTop: node.scrollTop
+      }))
+    ]);
+    const [dialogScrollState, previewScrollState] = scrollState;
+
+    if (dialogScrollState.overflowY !== 'hidden') {
+      throw new Error(`Expected fixed dialog shell overflow, received ${dialogScrollState.overflowY}.`);
+    }
+
+    if (previewScrollState.overflowY !== 'auto') {
+      throw new Error(`Expected preview body overflow:auto, received ${previewScrollState.overflowY}.`);
+    }
+
+    if (dialogScrollState.scrollTop !== 0) {
+      throw new Error(`Expected dialog shell to stay fixed, received scrollTop=${dialogScrollState.scrollTop}.`);
+    }
+
+    if (previewScrollState.scrollTop < 180) {
+      throw new Error(`Expected preview body to scroll independently, received scrollTop=${previewScrollState.scrollTop}.`);
+    }
   } finally {
     await mkdir(join(pluginRoot, 'tests/e2e/results'), { recursive: true });
     await page.screenshot({ path: join(pluginRoot, 'tests/e2e/results/last-run.png'), fullPage: true });

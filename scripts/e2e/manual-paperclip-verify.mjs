@@ -401,7 +401,7 @@ async function main() {
   console.log('The URL has been opened in your default browser.');
   console.log(`Open ${pluginDisplayName} from the installed plugins list.`);
   console.log(`Confirm that the ${settingsPageHeading} settings page shows the preloaded paperclipai/companies source.`);
-  console.log('Confirm that discovered companies are listed, then try adding and removing a source.');
+  console.log('Confirm that discovered companies are listed, open View contents on a company, click an item in the left column, and confirm the rendered markdown updates on the right.');
   console.log('Press Ctrl+C when you are done inspecting the instance.');
   console.log('');
 
