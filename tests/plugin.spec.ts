@@ -452,6 +452,44 @@ describe("agent companies plugin", () => {
     expect(typeof prepared.source.files["skills/repo-audit/assets/icon.svg"]).toBe("string");
   });
 
+  it("rejects inline import sources with oversized files", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await mkdir(join(repositoryPath, "alpha", "assets"), { recursive: true });
+    await writeFile(
+      join(repositoryPath, "alpha", "assets", "oversized.bin"),
+      Buffer.alloc(1024 * 1024 + 1, 1)
+    );
+
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:30.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await expect(
+      harness.performAction("catalog.prepare-company-import", {
+        companyId: company?.id
+      })
+    ).rejects.toThrow(
+      /File "assets\/oversized\.bin" is .*per-file limit of 1\.0 MiB\./u
+    );
+  });
+
   it("tracks imported companies and blocks repeat imports", async () => {
     const repositoryPath = await createRepositoryFixture();
     const plugin = createAgentCompaniesPlugin({

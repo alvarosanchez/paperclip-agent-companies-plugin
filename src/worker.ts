@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
@@ -87,6 +87,10 @@ const PORTABLE_FILE_CONTENT_TYPES = new Map<string, string>([
   [".svg", "image/svg+xml"],
   [".webp", "image/webp"]
 ]);
+// Keep inline bridge payloads bounded so one import cannot overwhelm worker memory.
+const MAX_INLINE_IMPORT_FILES = 250;
+const MAX_INLINE_IMPORT_SINGLE_FILE_BYTES = 1024 * 1024;
+const MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
 
@@ -114,6 +118,12 @@ interface LoadedCatalogState {
 interface RepositoryCheckoutCacheEntry {
   checkoutDirectory: string;
   tempDirectory: string;
+}
+
+interface PortableCatalogFileBuildResult {
+  entry: PortableCatalogFileEntry;
+  sourceBytes: number;
+  payloadBytes: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -305,6 +315,20 @@ function isLikelyTextFilePath(filePath: string): boolean {
 function inferPortableFileContentType(filePath: string): string | null {
   const normalizedPath = toPosixPath(filePath).toLowerCase();
   return PORTABLE_FILE_CONTENT_TYPES.get(extname(normalizedPath)) ?? null;
+}
+
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    const kibibytes = bytes / 1024;
+    return `${kibibytes.toFixed(kibibytes >= 10 ? 0 : 1)} KiB`;
+  }
+
+  const mebibytes = bytes / (1024 * 1024);
+  return `${mebibytes.toFixed(mebibytes >= 10 ? 0 : 1)} MiB`;
 }
 
 function updateRepository(
@@ -1157,18 +1181,42 @@ async function findPortableCompanyFilePaths(companyRoot: string): Promise<string
 async function buildPortableCatalogFileEntry(
   companyRoot: string,
   filePath: string
-): Promise<PortableCatalogFileEntry> {
+): Promise<PortableCatalogFileBuildResult> {
   const absolutePath = resolveRepositoryRelativePath(companyRoot, filePath);
-  const content = await readFile(absolutePath);
+  const fileStats = await stat(absolutePath);
 
-  if (isLikelyTextFilePath(filePath) || isProbablyTextBuffer(content)) {
-    return content.toString("utf8");
+  if (!fileStats.isFile()) {
+    throw new Error(`File "${filePath}" is no longer available for import.`);
   }
 
-  return {
-    encoding: "base64",
+  if (fileStats.size > MAX_INLINE_IMPORT_SINGLE_FILE_BYTES) {
+    throw new Error(
+      `File "${filePath}" is ${formatByteCount(fileStats.size)}, which exceeds the inline import per-file limit of ${formatByteCount(MAX_INLINE_IMPORT_SINGLE_FILE_BYTES)}.`
+    );
+  }
+
+  const content = await readFile(absolutePath);
+  const sourceBytes = content.byteLength;
+
+  if (isLikelyTextFilePath(filePath) || isProbablyTextBuffer(content)) {
+    const entry = content.toString("utf8");
+    return {
+      entry,
+      sourceBytes,
+      payloadBytes: Buffer.byteLength(entry, "utf8")
+    };
+  }
+
+  const entry = {
+    encoding: "base64" as const,
     data: content.toString("base64"),
     contentType: inferPortableFileContentType(filePath)
+  };
+
+  return {
+    entry,
+    sourceBytes,
+    payloadBytes: Buffer.byteLength(entry.data, "utf8")
   };
 }
 
@@ -1195,15 +1243,33 @@ async function buildCatalogCompanyImportSource(
     throw new Error("Company package is missing COMPANY.md.");
   }
 
+  if (filePaths.length > MAX_INLINE_IMPORT_FILES) {
+    throw new Error(
+      `"${match.company.name}" exceeds the inline import file limit of ${MAX_INLINE_IMPORT_FILES} files (${filePaths.length} discovered). Remove extra files or trim the package before importing.`
+    );
+  }
+
   const files: Record<string, PortableCatalogFileEntry> = {};
   let textFileCount = 0;
   let binaryFileCount = 0;
+  let totalSourceBytes = 0;
+  let totalPayloadBytes = 0;
 
   for (const filePath of filePaths) {
     const fileEntry = await buildPortableCatalogFileEntry(companyRoot, filePath);
-    files[filePath] = fileEntry;
+    const nextTotalPayloadBytes = totalPayloadBytes + fileEntry.payloadBytes;
 
-    if (typeof fileEntry === "string") {
+    if (nextTotalPayloadBytes > MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES) {
+      throw new Error(
+        `Adding "${filePath}" would exceed the inline import payload limit of ${formatByteCount(MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES)} (${formatByteCount(nextTotalPayloadBytes)} after encoding). Remove large assets or trim the package before importing.`
+      );
+    }
+
+    totalSourceBytes += fileEntry.sourceBytes;
+    totalPayloadBytes = nextTotalPayloadBytes;
+    files[filePath] = fileEntry.entry;
+
+    if (typeof fileEntry.entry === "string") {
       textFileCount += 1;
     } else {
       binaryFileCount += 1;
@@ -1214,7 +1280,9 @@ async function buildCatalogCompanyImportSource(
     companyId: match.company.id,
     companyName: match.company.name,
     repositoryId: match.repository.id,
-    fileCount: filePaths.length
+    fileCount: filePaths.length,
+    totalSourceBytes,
+    totalPayloadBytes
   });
 
   return {

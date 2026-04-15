@@ -1000,6 +1000,12 @@ interface PaperclipCompanyImportResult {
   projects?: Array<{
     action?: string;
   }> | null;
+  issues?: Array<{
+    action?: string;
+  }> | null;
+  skills?: Array<{
+    action?: string;
+  }> | null;
   warnings?: unknown;
 }
 
@@ -2042,6 +2048,7 @@ export function AgentCompaniesSettingsPage({
       return;
     }
 
+    setSelectedCompanyId(null);
     setImportCompanyId(company.id);
     setImportCompanyName(company.name);
     setImportError(null);
@@ -2154,6 +2161,8 @@ export function AgentCompaniesSettingsPage({
         })(),
         formatImportResultSummary("Agents", importedCompany.agents),
         formatImportResultSummary("Projects", importedCompany.projects),
+        formatImportResultSummary("Issues", importedCompany.issues),
+        formatImportResultSummary("Skills", importedCompany.skills),
         warningCount > 0
           ? `Warnings: ${warningCount} returned during import.`
           : null,

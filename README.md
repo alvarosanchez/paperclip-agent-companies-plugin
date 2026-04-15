@@ -27,6 +27,7 @@ This version focuses on repository discovery plus one-click import:
   - scans newly added repos immediately
   - inventories structured company manifests for `agents`, `projects`, `tasks`, `issues`, and `skills`
   - packages any discovered company into an inline Paperclip portability source so imports work for both GitHub repositories and local git checkouts
+  - bounds inline import payloads by file count, per-file size, and encoded payload size so oversized packages fail with actionable errors instead of overwhelming the bridge
   - keeps persisted discoveries across restarts and only rescans when an operator triggers `Scan` or `Scan all`
   - reuses the local OS user's git config and credential helpers when the worker clones a repository
   - preserves per-repository scan errors inline instead of failing the whole catalog
