@@ -2393,7 +2393,7 @@ export function AgentCompaniesSettingsPage({
       const importDetails = [
         `Package contents: ${buildCompanyContentSummary(importCompany.contents)}`,
         "Auto-sync: enabled daily by default after import.",
-        "Sync mode: overwrite existing content.",
+        "Default sync mode after import: overwrite existing content.",
         (() => {
           const companyAction = normalizeImportAction(importedCompany.company?.action);
           return companyAction ? `Company record: ${companyAction}` : null;
@@ -2502,8 +2502,9 @@ export function AgentCompaniesSettingsPage({
         companyId,
         paperclipApiBase: getPaperclipApiBase()
       }) as CatalogCompanySyncResult;
-      const warningDetails = getVisibleSyncWarningDetails(syncResult).slice(0, 3);
-      const warningCount = warningDetails.length;
+      const visibleWarningDetails = getVisibleSyncWarningDetails(syncResult);
+      const warningCount = visibleWarningDetails.length;
+      const warningDetails = visibleWarningDetails.slice(0, 3);
       const syncDetails = [
         `Package contents: ${buildCompanyContentSummary(company.contents)}`,
         syncResult.collisionStrategy === "replace"
