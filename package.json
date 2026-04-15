@@ -57,7 +57,7 @@
     "@rollup/plugin-typescript": "^12.1.2",
     "@types/node": "^24.6.0",
     "@types/react": "^19.0.8",
-    "esbuild": "^0.27.3",
+    "esbuild": "^0.28.0",
     "lucide-react": "^1.8.0",
     "playwright": "1.59.1",
     "react": "^19.2.5",
