@@ -9,17 +9,25 @@ import {
   buildCatalogSnapshot,
   CATALOG_STATE_KEY,
   type CatalogPreparedCompanyImport,
+  type CatalogCompanySyncResult,
+  DEFAULT_AUTO_SYNC_ENABLED,
+  DEFAULT_SYNC_COLLISION_STRATEGY,
   type ImportedCatalogCompanyRecord,
   COMPANY_CONTENT_KEYS,
   type CatalogCompanyContentDetail,
   createRepositorySource,
   createEmptyCompanyContents,
   hasPersistedCatalogRepositories,
+  isCatalogCompanySyncAvailable,
+  isCatalogCompanyAutoSyncDue,
   normalizeCompanyContentPath,
   normalizeCatalogState,
   normalizeRepositoryCloneRef,
+  type PaperclipCompanyImportResult,
   sortCompanyContentItems,
   type CatalogSnapshot,
+  type CatalogSyncCollisionStrategy,
+  type CatalogCompanySyncStatus,
   type CompanyContentItem,
   type CompanyContentKey,
   type CompanyContents,
@@ -48,6 +56,8 @@ const FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
 const COMPANY_CONTENT_FILE_NAMES = new Set(["AGENTS.md", "PROJECT.md", "TASK.md", "ISSUE.md", "SKILL.md"]);
 const repositoryCheckoutCache = new Map<string, RepositoryCheckoutCacheEntry>();
 const repositoryCheckoutInflight = new Map<string, Promise<RepositoryCheckoutCacheEntry>>();
+const companySyncInflight = new Map<string, Promise<CatalogCompanySyncResult>>();
+let autoSyncSweepPromise: Promise<void> | null = null;
 const TEXT_FILE_EXTENSIONS = new Set([
   ".css",
   ".html",
@@ -91,12 +101,21 @@ const PORTABLE_FILE_CONTENT_TYPES = new Map<string, string>([
 const MAX_INLINE_IMPORT_FILES = 250;
 const MAX_INLINE_IMPORT_SINGLE_FILE_BYTES = 1024 * 1024;
 const MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES = 8 * 1024 * 1024;
+const AUTO_SYNC_JOB_KEY = "catalog-auto-sync";
+const DEFAULT_STARTUP_AUTO_SYNC_DELAY_MS = 5000;
+const STALE_SYNC_TIMEOUT_MS = 30 * 60 * 1000;
 
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
+type SyncImportExecutor = (
+  ctx: PluginContext,
+  input: SyncImportRequest
+) => Promise<PaperclipCompanyImportResult>;
 
 interface AgentCompaniesPluginOptions {
   now?: () => string;
   scanRepository?: RepositoryScanner;
+  syncImport?: SyncImportExecutor;
+  startupAutoSyncDelayMs?: number | null;
 }
 
 interface ProcessResult {
@@ -126,12 +145,38 @@ interface PortableCatalogFileBuildResult {
   payloadBytes: number;
 }
 
+interface SyncImportRequest {
+  sourceCompanyId: string;
+  sourceCompanyName: string;
+  importedCompanyId: string;
+  collisionStrategy: CatalogSyncCollisionStrategy;
+  preparedImport: CatalogPreparedCompanyImport;
+  paperclipApiBase: string | null;
+}
+
+interface PaperclipApiConnection {
+  apiBase: string;
+  apiKey: string | null;
+}
+
+interface StoredBoardCredential {
+  apiBase: string;
+  token: string;
+  createdAt: string;
+  updatedAt: string;
+  userId: string | null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function asNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function asIsoTimestamp(value: unknown): string | null {
+  return asNonEmptyString(value);
 }
 
 function toPosixPath(value: string): string {
@@ -174,6 +219,245 @@ function getCredentialConfigPaths(homeDirectory: string): {
     xdgConfigHome,
     xdgGitConfigPath: join(xdgConfigHome, "git", "config")
   };
+}
+
+function expandHomePrefix(value: string): string {
+  if (value === "~") {
+    return resolveUserHomeDirectory();
+  }
+
+  if (value.startsWith("~/")) {
+    return resolve(resolveUserHomeDirectory(), value.slice(2));
+  }
+
+  return value;
+}
+
+function resolvePaperclipHomeDirectory(): string {
+  const configuredHome = process.env.PAPERCLIP_HOME?.trim();
+  if (configuredHome) {
+    return resolve(expandHomePrefix(configuredHome));
+  }
+
+  return resolve(resolveUserHomeDirectory(), ".paperclip");
+}
+
+function resolvePaperclipInstanceId(): string {
+  const instanceId = process.env.PAPERCLIP_INSTANCE_ID?.trim() || "default";
+  return /^[A-Za-z0-9_-]+$/u.test(instanceId) ? instanceId : "default";
+}
+
+function resolveDefaultPaperclipConfigPath(): string {
+  return join(
+    resolvePaperclipHomeDirectory(),
+    "instances",
+    resolvePaperclipInstanceId(),
+    "config.json"
+  );
+}
+
+function resolvePaperclipConfigPath(): string {
+  const explicitPath = process.env.PAPERCLIP_CONFIG_PATH?.trim() || process.env.PAPERCLIP_CONFIG?.trim();
+  if (explicitPath) {
+    return resolve(expandHomePrefix(explicitPath));
+  }
+
+  return resolveDefaultPaperclipConfigPath();
+}
+
+function resolvePaperclipAuthStorePath(): string {
+  const explicitPath = process.env.PAPERCLIP_AUTH_STORE?.trim();
+  if (explicitPath) {
+    return resolve(expandHomePrefix(explicitPath));
+  }
+
+  return join(resolvePaperclipHomeDirectory(), "auth.json");
+}
+
+function normalizeApiBase(apiBase: string): string {
+  return apiBase.trim().replace(/\/+$/u, "");
+}
+
+async function readJsonObjectFile(filePath: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function inferPaperclipApiBaseFromConfig(configPath: string): Promise<string> {
+  const host = process.env.PAPERCLIP_SERVER_HOST?.trim() || "localhost";
+  let port = Number(process.env.PAPERCLIP_SERVER_PORT || "");
+
+  if (!Number.isFinite(port) || port <= 0) {
+    const config = await readJsonObjectFile(configPath);
+    const server = config?.server;
+    if (isRecord(server) && typeof server.port === "number" && Number.isFinite(server.port) && server.port > 0) {
+      port = server.port;
+    } else {
+      port = 3100;
+    }
+  }
+
+  if (!Number.isFinite(port) || port <= 0) {
+    port = 3100;
+  }
+
+  return `http://${host}:${port}`;
+}
+
+async function readStoredBoardCredential(apiBase: string): Promise<StoredBoardCredential | null> {
+  const authStore = await readJsonObjectFile(resolvePaperclipAuthStorePath());
+  const credentials = authStore?.credentials;
+  if (!isRecord(credentials)) {
+    return null;
+  }
+
+  const credential = credentials[normalizeApiBase(apiBase)];
+  if (!isRecord(credential)) {
+    return null;
+  }
+
+  const normalizedApiBase = asNonEmptyString(credential.apiBase);
+  const token = asNonEmptyString(credential.token);
+  const createdAt = asIsoTimestamp(credential.createdAt);
+  const updatedAt = asIsoTimestamp(credential.updatedAt);
+
+  if (!normalizedApiBase || !token || !createdAt || !updatedAt) {
+    return null;
+  }
+
+  return {
+    apiBase: normalizedApiBase,
+    token,
+    createdAt,
+    updatedAt,
+    userId: asNonEmptyString(credential.userId)
+  };
+}
+
+async function resolvePaperclipApiConnection(preferredApiBase: string | null = null): Promise<PaperclipApiConnection> {
+  const explicitApiBase = process.env.PAPERCLIP_API_URL?.trim();
+  const configPath = resolvePaperclipConfigPath();
+  const apiBase = normalizeApiBase(
+    explicitApiBase || preferredApiBase || (await inferPaperclipApiBaseFromConfig(configPath))
+  );
+  const apiKey = process.env.PAPERCLIP_API_KEY?.trim() || (await readStoredBoardCredential(apiBase))?.token || null;
+
+  return {
+    apiBase,
+    apiKey
+  };
+}
+
+function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+
+  function visit(candidate: unknown, depth = 0): void {
+    if (depth > 4 || lines.length >= maxLines) {
+      return;
+    }
+
+    if (typeof candidate === "string") {
+      const normalized = candidate.replace(/\s+/gu, " ").trim();
+      if (normalized && !seen.has(normalized)) {
+        seen.add(normalized);
+        lines.push(normalized);
+      }
+      return;
+    }
+
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        visit(item, depth + 1);
+        if (lines.length >= maxLines) {
+          break;
+        }
+      }
+      return;
+    }
+
+    if (!isRecord(candidate)) {
+      return;
+    }
+
+    for (const key of ["message", "error", "detail", "reason", "title"]) {
+      visit(candidate[key], depth + 1);
+      if (lines.length >= maxLines) {
+        return;
+      }
+    }
+
+    for (const key of ["details", "errors", "issues", "warnings"]) {
+      visit(candidate[key], depth + 1);
+      if (lines.length >= maxLines) {
+        return;
+      }
+    }
+  }
+
+  visit(value);
+  return lines;
+}
+
+function getPaperclipApiErrorMessage(payload: unknown, status: number): string {
+  if (!isRecord(payload)) {
+    return `Request failed with status ${status}.`;
+  }
+
+  const directMessage = payload.message ?? payload.error;
+  const primaryMessage =
+    typeof directMessage === "string" && directMessage.trim() ? directMessage.trim() : null;
+  const detailLines = getStructuredMessageLines(payload.details ?? payload.errors ?? payload).filter(
+    (line) => line !== primaryMessage
+  );
+
+  if (primaryMessage && detailLines.length > 0) {
+    return [primaryMessage, ...detailLines.map((line) => `- ${line}`)].join("\n");
+  }
+
+  if (primaryMessage) {
+    return primaryMessage;
+  }
+
+  if (detailLines.length > 0) {
+    return detailLines.map((line) => `- ${line}`).join("\n");
+  }
+
+  return `Request failed with status ${status}.`;
+}
+
+async function parsePaperclipJsonResponse(response: Response): Promise<unknown> {
+  const contentType = response.headers.get("content-type") ?? "";
+  const rawBody = await response.text();
+  const normalizedBody = rawBody.trim();
+
+  if (
+    contentType.includes("text/html") ||
+    normalizedBody.startsWith("<!DOCTYPE html") ||
+    normalizedBody.startsWith("<html")
+  ) {
+    throw new Error("Paperclip returned HTML instead of JSON.");
+  }
+
+  let payload: unknown = null;
+  if (normalizedBody) {
+    try {
+      payload = JSON.parse(normalizedBody);
+    } catch {
+      throw new Error("Paperclip returned an unexpected non-JSON response.");
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(getPaperclipApiErrorMessage(payload, response.status));
+  }
+
+  return payload;
 }
 
 function slugify(value: string): string {
@@ -344,6 +628,29 @@ function updateRepository(
   };
 }
 
+function updateImportedCatalogCompany(
+  state: CatalogState,
+  sourceCompanyId: string,
+  updater: (company: ImportedCatalogCompanyRecord) => ImportedCatalogCompanyRecord
+): CatalogState {
+  let didUpdate = false;
+  const importedCompanies = state.importedCompanies.map((company) => {
+    if (company.sourceCompanyId !== sourceCompanyId) {
+      return company;
+    }
+
+    didUpdate = true;
+    return updater(company);
+  });
+
+  return didUpdate
+    ? {
+        ...state,
+        importedCompanies
+      }
+    : state;
+}
+
 function shouldAutoScan(repository: RepositorySource): boolean {
   return (
     repository.status === "idle" &&
@@ -448,7 +755,7 @@ function buildAlreadyImportedErrorMessage(
     importedCompany.importedCompanyName.trim() ||
     importedCompany.importedCompanyId;
 
-  return `"${companyName}" has already been imported as "${importedLabel}". Sync support will replace re-import later.`;
+  return `"${companyName}" has already been imported as "${importedLabel}". Use sync to update the existing Paperclip company.`;
 }
 
 function assertCatalogCompanyCanBeImported(
@@ -461,6 +768,80 @@ function assertCatalogCompanyCanBeImported(
   }
 
   throw new Error(buildAlreadyImportedErrorMessage(company.name, importedCompany));
+}
+
+function assertCatalogCompanyCanBeSynced(
+  state: CatalogState,
+  company: DiscoveredAgentCompany
+): ImportedCatalogCompanyRecord {
+  const importedCompany = findImportedCatalogCompany(state, company.id);
+  if (!importedCompany) {
+    throw new Error(`"${company.name}" must be imported before it can be synced.`);
+  }
+
+  return importedCompany;
+}
+
+function isRunningSyncStale(
+  importedCompany: ImportedCatalogCompanyRecord,
+  timestamp: string
+): boolean {
+  if (importedCompany.lastSyncStatus !== "running") {
+    return false;
+  }
+
+  const runningSince = importedCompany.syncRunningSince ?? importedCompany.lastSyncAttemptAt;
+  if (!runningSince) {
+    return true;
+  }
+
+  const runningSinceTimestamp = Date.parse(runningSince);
+  const nowTimestamp = Date.parse(timestamp);
+  if (!Number.isFinite(runningSinceTimestamp) || !Number.isFinite(nowTimestamp)) {
+    return true;
+  }
+
+  return nowTimestamp - runningSinceTimestamp >= STALE_SYNC_TIMEOUT_MS;
+}
+
+function isSyncCurrentlyRunning(
+  importedCompany: ImportedCatalogCompanyRecord,
+  timestamp: string
+): boolean {
+  return importedCompany.lastSyncStatus === "running" && !isRunningSyncStale(importedCompany, timestamp);
+}
+
+function recoverStaleImportedCompanySyncs(
+  state: CatalogState,
+  timestamp: string
+): { state: CatalogState; changed: boolean } {
+  let changed = false;
+
+  const importedCompanies = state.importedCompanies.map((importedCompany) => {
+    if (!isRunningSyncStale(importedCompany, timestamp)) {
+      return importedCompany;
+    }
+
+    changed = true;
+    return {
+      ...importedCompany,
+      lastSyncStatus: "failed" as CatalogCompanySyncStatus,
+      lastSyncError:
+        importedCompany.lastSyncError ??
+        "The previous sync did not finish before the stale-run timeout expired.",
+      syncRunningSince: null
+    };
+  });
+
+  return {
+    state: changed
+      ? {
+          ...state,
+          importedCompanies
+        }
+      : state,
+    changed
+  };
 }
 
 function findCompanyContentEntry(
@@ -508,6 +889,20 @@ async function loadCatalogState(ctx: PluginContext): Promise<CatalogState> {
   return normalizeCatalogState(storedState);
 }
 
+async function loadCatalogStateWithSyncRecovery(
+  ctx: PluginContext,
+  timestamp: string
+): Promise<CatalogState> {
+  const state = await loadCatalogState(ctx);
+  const recoveredState = recoverStaleImportedCompanySyncs(state, timestamp);
+
+  if (!recoveredState.changed) {
+    return state;
+  }
+
+  return persistCatalogState(ctx, recoveredState.state, timestamp);
+}
+
 async function loadCatalogStateRecord(ctx: PluginContext): Promise<LoadedCatalogState> {
   const storedState = await ctx.state.get(CATALOG_SCOPE);
 
@@ -525,6 +920,7 @@ async function persistCatalogState(
   const nextState = normalizeCatalogState({
     repositories: state.repositories,
     importedCompanies: state.importedCompanies,
+    paperclipApiBase: state.paperclipApiBase,
     updatedAt: now
   });
 
@@ -600,8 +996,8 @@ async function ensureSeedRepositoriesScanned(
   return persistCatalogState(ctx, nextState, now);
 }
 
-function buildCatalogResponse(state: CatalogState): CatalogSnapshot {
-  return buildCatalogSnapshot(state);
+function buildCatalogResponse(state: CatalogState, timestamp: string): CatalogSnapshot {
+  return buildCatalogSnapshot(state, timestamp);
 }
 
 async function runProcess(
@@ -1222,7 +1618,10 @@ async function buildPortableCatalogFileEntry(
 
 async function buildCatalogCompanyImportSource(
   ctx: PluginContext,
-  companyId: string
+  companyId: string,
+  options: {
+    allowImported?: boolean;
+  } = {}
 ): Promise<CatalogPreparedCompanyImport> {
   const state = await loadCatalogState(ctx);
   const match = findRepositoryCompany(state, companyId);
@@ -1230,7 +1629,9 @@ async function buildCatalogCompanyImportSource(
     throw new Error("Company not found.");
   }
 
-  assertCatalogCompanyCanBeImported(state, match.company);
+  if (!options.allowImported) {
+    assertCatalogCompanyCanBeImported(state, match.company);
+  }
 
   const repositoryRoot = await resolveRepositoryContentRoot(match.repository);
   const companyRelativeRoot = getRepositoryRelativeCompanyRoot(match.company);
@@ -1300,26 +1701,332 @@ async function buildCatalogCompanyImportSource(
   };
 }
 
+async function executeDefaultSyncImport(
+  _ctx: PluginContext,
+  input: SyncImportRequest
+): Promise<PaperclipCompanyImportResult> {
+  const connection = await resolvePaperclipApiConnection(input.paperclipApiBase);
+  const requestUrl = `${connection.apiBase}/api/companies/import`;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json"
+  };
+
+  if (connection.apiKey) {
+    headers.authorization = `Bearer ${connection.apiKey}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(requestUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        source: input.preparedImport.source,
+        include: {
+          company: true,
+          agents: true,
+          projects: true,
+          issues: true,
+          skills: true
+        },
+        target: {
+          mode: "existing_company",
+          companyId: input.importedCompanyId
+        },
+        collisionStrategy: input.collisionStrategy
+      })
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not reach the Paperclip import API at ${connection.apiBase}: ${summarizeErrorMessage(error)}`
+    );
+  }
+
+  const payload = await parsePaperclipJsonResponse(response);
+  if (!isRecord(payload)) {
+    throw new Error("Paperclip returned an unexpected sync response.");
+  }
+
+  return payload as PaperclipCompanyImportResult;
+}
+
+async function runCatalogCompanySync(
+  ctx: PluginContext,
+  sourceCompanyId: string,
+  options: {
+    now: () => string;
+    scanRepository: RepositoryScanner;
+    syncImport: SyncImportExecutor;
+    trigger: "manual" | "schedule" | "startup";
+  }
+): Promise<CatalogCompanySyncResult> {
+  const existingSync = companySyncInflight.get(sourceCompanyId);
+  if (existingSync) {
+    return existingSync;
+  }
+
+  const syncPromise = (async () => {
+    const startedAt = options.now();
+    let currentState = await loadCatalogStateWithSyncRecovery(ctx, startedAt);
+    const initialMatch = findRepositoryCompany(currentState, sourceCompanyId);
+    if (!initialMatch) {
+      throw new Error("Company not found.");
+    }
+
+    const importedCompany = assertCatalogCompanyCanBeSynced(currentState, initialMatch.company);
+    if (isSyncCurrentlyRunning(importedCompany, startedAt)) {
+      throw new Error(`"${initialMatch.company.name}" is already syncing.`);
+    }
+
+    currentState = await persistCatalogState(
+      ctx,
+      updateImportedCatalogCompany(currentState, sourceCompanyId, (company) => ({
+        ...company,
+        lastSyncStatus: "running",
+        syncRunningSince: startedAt,
+        lastSyncAttemptAt: startedAt,
+        lastSyncError: null
+      })),
+      startedAt
+    );
+
+    try {
+      const scannedRepository = await scanRepositoryEntry(
+        initialMatch.repository,
+        options.scanRepository,
+        startedAt,
+        ctx.logger
+      );
+      currentState = await persistCatalogState(
+        ctx,
+        updateRepository(currentState, initialMatch.repository.id, () => scannedRepository),
+        options.now()
+      );
+
+      if (scannedRepository.lastScanError) {
+        throw new Error(`Source repository scan failed: ${scannedRepository.lastScanError}`);
+      }
+
+      const refreshedMatch = findRepositoryCompany(currentState, sourceCompanyId);
+      if (!refreshedMatch) {
+        throw new Error(
+          `"${initialMatch.company.name}" no longer exists in the source repository after the latest scan.`
+        );
+      }
+
+      const latestSourceVersion = refreshedMatch.company.version;
+      const syncAvailable = isCatalogCompanySyncAvailable(
+        importedCompany.importedSourceVersion,
+        latestSourceVersion
+      );
+
+      if (!syncAvailable) {
+        const syncedAt = options.now();
+        const latestState = await loadCatalogState(ctx);
+
+        await persistCatalogState(
+          ctx,
+          updateImportedCatalogCompany(latestState, sourceCompanyId, (company) => ({
+            ...company,
+            importedSourceVersion: latestSourceVersion,
+            lastSyncStatus: "succeeded",
+            syncRunningSince: null,
+            lastSyncedAt: syncedAt,
+            lastSyncError: null
+          })),
+          syncedAt
+        );
+
+        ctx.logger.info("Skipped imported agent company sync because it is already up to date", {
+          sourceCompanyId,
+          sourceCompanyName: refreshedMatch.company.name,
+          importedCompanyId: importedCompany.importedCompanyId,
+          trigger: options.trigger,
+          latestSourceVersion
+        });
+
+        return {
+          company: {
+            id: importedCompany.importedCompanyId,
+            name: importedCompany.importedCompanyName,
+            action: "unchanged"
+          },
+          sourceCompanyId,
+          sourceCompanyName: refreshedMatch.company.name,
+          importedCompanyId: importedCompany.importedCompanyId,
+          importedCompanyName: importedCompany.importedCompanyName,
+          importedCompanyIssuePrefix: importedCompany.importedCompanyIssuePrefix,
+          importedSourceVersion: latestSourceVersion,
+          latestSourceVersion,
+          collisionStrategy: importedCompany.syncCollisionStrategy,
+          syncedAt,
+          upToDate: true
+        };
+      }
+
+      const preparedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId, {
+        allowImported: true
+      });
+      const importResult = await options.syncImport(ctx, {
+        sourceCompanyId,
+        sourceCompanyName: refreshedMatch.company.name,
+        importedCompanyId: importedCompany.importedCompanyId,
+        collisionStrategy: importedCompany.syncCollisionStrategy,
+        preparedImport,
+        paperclipApiBase: currentState.paperclipApiBase
+      });
+      const syncedAt = options.now();
+      const latestState = await loadCatalogState(ctx);
+      const nextImportedCompanyId =
+        asNonEmptyString(importResult.company?.id) ?? importedCompany.importedCompanyId;
+      const nextImportedCompanyName = importedCompany.importedCompanyName;
+
+      await persistCatalogState(
+        ctx,
+        updateImportedCatalogCompany(latestState, sourceCompanyId, (company) => ({
+          ...company,
+          importedCompanyId: nextImportedCompanyId,
+          importedCompanyName: nextImportedCompanyName,
+          importedSourceVersion: latestSourceVersion,
+          lastSyncStatus: "succeeded",
+          syncRunningSince: null,
+          lastSyncedAt: syncedAt,
+          lastSyncError: null
+        })),
+        syncedAt
+      );
+
+      ctx.logger.info("Synced imported agent company", {
+        sourceCompanyId,
+        sourceCompanyName: refreshedMatch.company.name,
+        importedCompanyId: nextImportedCompanyId,
+        trigger: options.trigger,
+        collisionStrategy: importedCompany.syncCollisionStrategy
+      });
+
+      return {
+        ...importResult,
+        sourceCompanyId,
+        sourceCompanyName: refreshedMatch.company.name,
+        importedCompanyId: nextImportedCompanyId,
+        importedCompanyName: nextImportedCompanyName,
+        importedCompanyIssuePrefix: importedCompany.importedCompanyIssuePrefix,
+        importedSourceVersion: latestSourceVersion,
+        latestSourceVersion,
+        collisionStrategy: importedCompany.syncCollisionStrategy,
+        syncedAt,
+        upToDate: false
+      };
+    } catch (error) {
+      const failedAt = options.now();
+      const latestState = await loadCatalogState(ctx);
+
+      await persistCatalogState(
+        ctx,
+        updateImportedCatalogCompany(latestState, sourceCompanyId, (company) => ({
+          ...company,
+          lastSyncStatus: "failed",
+          syncRunningSince: null,
+          lastSyncError: summarizeErrorMessage(error)
+        })),
+        failedAt
+      );
+
+      ctx.logger.warn("Imported agent company sync failed", {
+        sourceCompanyId,
+        trigger: options.trigger,
+        error: summarizeErrorMessage(error)
+      });
+      throw error;
+    }
+  })().finally(() => {
+    if (companySyncInflight.get(sourceCompanyId) === syncPromise) {
+      companySyncInflight.delete(sourceCompanyId);
+    }
+  });
+
+  companySyncInflight.set(sourceCompanyId, syncPromise);
+  return syncPromise;
+}
+
+async function runDueAutoSyncs(
+  ctx: PluginContext,
+  options: {
+    now: () => string;
+    scanRepository: RepositoryScanner;
+    syncImport: SyncImportExecutor;
+    trigger: "schedule" | "startup";
+  }
+): Promise<void> {
+  if (autoSyncSweepPromise) {
+    return autoSyncSweepPromise;
+  }
+
+  autoSyncSweepPromise = (async () => {
+    const timestamp = options.now();
+    const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+    const dueImports = currentState.importedCompanies.filter((company) =>
+      isCatalogCompanyAutoSyncDue(company, timestamp)
+    );
+
+    for (const importedCompany of dueImports) {
+      try {
+        await runCatalogCompanySync(ctx, importedCompany.sourceCompanyId, {
+          ...options,
+          trigger: options.trigger
+        });
+      } catch (error) {
+        ctx.logger.warn("Automatic agent company sync failed", {
+          sourceCompanyId: importedCompany.sourceCompanyId,
+          trigger: options.trigger,
+          error: summarizeErrorMessage(error)
+        });
+      }
+    }
+  })().finally(() => {
+    autoSyncSweepPromise = null;
+  });
+
+  return autoSyncSweepPromise;
+}
+
+async function scanRepositorySource(repository: RepositorySource): Promise<DiscoveredAgentCompany[]> {
+  const repositoryRoot = await resolveRepositoryContentRoot(repository);
+  return scanRepositoryDirectory(repositoryRoot, repository.id);
+}
+
 function createRepositoryScanner(): RepositoryScanner {
-  return async (repository) => scanRepositoryForAgentCompanies(repository.url, repository.id);
+  return scanRepositorySource;
 }
 
 export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions = {}) {
   const now = options.now ?? (() => new Date().toISOString());
   const scanRepository = options.scanRepository ?? createRepositoryScanner();
+  const syncImport = options.syncImport ?? executeDefaultSyncImport;
+  const startupAutoSyncDelayMs =
+    options.startupAutoSyncDelayMs === undefined
+      ? DEFAULT_STARTUP_AUTO_SYNC_DELAY_MS
+      : options.startupAutoSyncDelayMs;
 
   return definePlugin({
     async setup(ctx) {
       ctx.data.register("catalog.read", async () => {
+        const timestamp = now();
         const loadedState = await loadCatalogStateRecord(ctx);
         const hydratedState = await ensureSeedRepositoriesScanned(
           ctx,
           loadedState.state,
           loadedState.hasPersistedRepositories,
-          now(),
+          timestamp,
           scanRepository
         );
-        return buildCatalogResponse(hydratedState);
+        const recoveredState = recoverStaleImportedCompanySyncs(hydratedState, timestamp);
+        const nextState = recoveredState.changed
+          ? await persistCatalogState(ctx, recoveredState.state, timestamp)
+          : hydratedState;
+
+        return buildCatalogResponse(nextState, timestamp);
       });
 
       ctx.data.register("catalog.company-content.read", async (rawParams) => {
@@ -1346,7 +2053,9 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const importedCompanyId = getRequiredString(params, "importedCompanyId");
         const importedCompanyName = getRequiredString(params, "importedCompanyName");
         const importedCompanyIssuePrefix = asNonEmptyString(params.importedCompanyIssuePrefix);
-        const currentState = await loadCatalogState(ctx);
+        const paperclipApiBase = asNonEmptyString(params.paperclipApiBase);
+        const timestamp = now();
+        const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
         const match = findRepositoryCompany(currentState, sourceCompanyId);
 
         if (!match) {
@@ -1358,11 +2067,11 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           throw new Error(buildAlreadyImportedErrorMessage(match.company.name, existingImport));
         }
 
-        const timestamp = now();
         const nextState = await persistCatalogState(
           ctx,
           {
             ...currentState,
+            paperclipApiBase: paperclipApiBase ?? currentState.paperclipApiBase,
             importedCompanies: [
               ...currentState.importedCompanies.filter(
                 (candidate) => candidate.sourceCompanyId !== sourceCompanyId
@@ -1372,14 +2081,81 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
                 importedCompanyId,
                 importedCompanyName,
                 importedCompanyIssuePrefix,
-                importedAt: timestamp
+                importedSourceVersion: match.company.version,
+                importedAt: timestamp,
+                autoSyncEnabled: existingImport?.autoSyncEnabled ?? DEFAULT_AUTO_SYNC_ENABLED,
+                syncCollisionStrategy:
+                  existingImport?.syncCollisionStrategy ?? DEFAULT_SYNC_COLLISION_STRATEGY,
+                lastSyncStatus: "succeeded",
+                lastSyncAttemptAt: existingImport?.lastSyncAttemptAt ?? timestamp,
+                lastSyncedAt: timestamp,
+                lastSyncError: null,
+                syncRunningSince: null
               }
             ]
           },
           timestamp
         );
 
-        return buildCatalogResponse(nextState);
+        return buildCatalogResponse(nextState, timestamp);
+      });
+
+      ctx.actions.register("catalog.set-company-auto-sync", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const sourceCompanyId = getRequiredString(params, "sourceCompanyId");
+        const enabled = typeof params.enabled === "boolean" ? params.enabled : null;
+
+        if (enabled === null) {
+          throw new Error("enabled must be a boolean.");
+        }
+
+        const timestamp = now();
+        const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+        const match = findRepositoryCompany(currentState, sourceCompanyId);
+        if (!match) {
+          throw new Error("Company not found.");
+        }
+
+        assertCatalogCompanyCanBeSynced(currentState, match.company);
+
+        const nextState = await persistCatalogState(
+          ctx,
+          updateImportedCatalogCompany(currentState, sourceCompanyId, (company) => ({
+            ...company,
+            autoSyncEnabled: enabled
+          })),
+          timestamp
+        );
+
+        return buildCatalogResponse(nextState, timestamp);
+      });
+
+      ctx.actions.register("catalog.sync-company", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const companyId = getRequiredString(params, "companyId");
+        const paperclipApiBase = asNonEmptyString(params.paperclipApiBase);
+
+        if (paperclipApiBase) {
+          const timestamp = now();
+          const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+          if (currentState.paperclipApiBase !== paperclipApiBase) {
+            await persistCatalogState(
+              ctx,
+              {
+                ...currentState,
+                paperclipApiBase
+              },
+              timestamp
+            );
+          }
+        }
+
+        return runCatalogCompanySync(ctx, companyId, {
+          now,
+          scanRepository,
+          syncImport,
+          trigger: "manual"
+        });
       });
 
       ctx.actions.register("catalog.add-repository", async (rawParams) => {
@@ -1406,7 +2182,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           now()
         );
 
-        return buildCatalogResponse(nextState);
+        return buildCatalogResponse(nextState, now());
       });
 
       ctx.actions.register("catalog.remove-repository", async (rawParams) => {
@@ -1432,7 +2208,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           now()
         );
 
-        return buildCatalogResponse(nextState);
+        return buildCatalogResponse(nextState, now());
       });
 
       ctx.actions.register("catalog.scan-repository", async (rawParams) => {
@@ -1452,12 +2228,12 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           now()
         );
 
-        return buildCatalogResponse(nextState);
+        return buildCatalogResponse(nextState, now());
       });
 
       ctx.actions.register("catalog.scan-all-repositories", async () => {
-        let nextState = await loadCatalogState(ctx);
         const timestamp = now();
+        let nextState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
 
         for (const repository of nextState.repositories) {
           const scannedRepository = await scanRepositoryEntry(repository, scanRepository, timestamp, ctx.logger);
@@ -1465,8 +2241,29 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         }
 
         const persistedState = await persistCatalogState(ctx, nextState, timestamp);
-        return buildCatalogResponse(persistedState);
+        return buildCatalogResponse(persistedState, timestamp);
       });
+
+      ctx.jobs.register(AUTO_SYNC_JOB_KEY, async () => {
+        await runDueAutoSyncs(ctx, {
+          now,
+          scanRepository,
+          syncImport,
+          trigger: "schedule"
+        });
+      });
+
+      if (startupAutoSyncDelayMs !== null && Number.isFinite(startupAutoSyncDelayMs) && startupAutoSyncDelayMs >= 0) {
+        const startupTimer = setTimeout(() => {
+          void runDueAutoSyncs(ctx, {
+            now,
+            scanRepository,
+            syncImport,
+            trigger: "startup"
+          });
+        }, startupAutoSyncDelayMs);
+        startupTimer.unref?.();
+      }
     }
   });
 }

@@ -22,6 +22,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "instance.settings.register",
     "plugin.state.read",
     "plugin.state.write",
+    "jobs.schedule",
+    "http.outbound",
     "ui.page.register"
   ],
   instanceConfigSchema: {
@@ -32,6 +34,14 @@ const manifest: PaperclipPluginManifestV1 = {
     worker: "./dist/worker.js",
     ui: "./dist/ui"
   },
+  jobs: [
+    {
+      jobKey: "catalog-auto-sync",
+      displayName: "Daily Agent Company Auto-Sync",
+      description: "Checks imported agent companies and syncs any source that is due for its daily update.",
+      schedule: "0 3 * * *"
+    }
+  ],
   ui: {
     slots: [
       {
