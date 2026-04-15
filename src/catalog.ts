@@ -36,6 +36,43 @@ export interface CatalogCompanyContentDetail {
   };
 }
 
+export type PortableCatalogFileEntry =
+  | string
+  | {
+      encoding: "base64";
+      data: string;
+      contentType?: string | null;
+    };
+
+export interface CatalogPreparedCompanyImport {
+  companyId: string;
+  companyName: string;
+  source: {
+    type: "inline";
+    files: Record<string, PortableCatalogFileEntry>;
+  };
+  stats: {
+    fileCount: number;
+    textFileCount: number;
+    binaryFileCount: number;
+  };
+}
+
+export interface ImportedCatalogCompanyRecord {
+  sourceCompanyId: string;
+  importedCompanyId: string;
+  importedCompanyName: string;
+  importedCompanyIssuePrefix: string | null;
+  importedAt: string | null;
+}
+
+export interface CatalogCompanyImportStatus {
+  id: string;
+  name: string;
+  issuePrefix: string | null;
+  importedAt: string | null;
+}
+
 export interface DiscoveredAgentCompany {
   id: string;
   name: string;
@@ -62,6 +99,7 @@ export interface RepositorySource {
 
 export interface CatalogState {
   repositories: RepositorySource[];
+  importedCompanies: ImportedCatalogCompanyRecord[];
   updatedAt: string | null;
 }
 
@@ -74,6 +112,7 @@ export interface CatalogCompanySummary extends DiscoveredAgentCompany {
   repositoryLabel: string;
   repositoryUrl: string;
   repositoryIsDefault: boolean;
+  importedCompany: CatalogCompanyImportStatus | null;
 }
 
 export interface CatalogSnapshot {
@@ -379,6 +418,38 @@ function normalizeCompany(value: unknown, repositoryId: string): DiscoveredAgent
   };
 }
 
+function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompanyRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const sourceCompanyId =
+    asNonEmptyString(value.sourceCompanyId) ??
+    asNonEmptyString(value.catalogCompanyId) ??
+    asNonEmptyString(value.companyId);
+  const importedCompanyId =
+    asNonEmptyString(value.importedCompanyId) ??
+    asNonEmptyString(value.paperclipCompanyId);
+
+  if (!sourceCompanyId || !importedCompanyId) {
+    return null;
+  }
+
+  return {
+    sourceCompanyId,
+    importedCompanyId,
+    importedCompanyName:
+      asNonEmptyString(value.importedCompanyName) ??
+      asNonEmptyString(value.paperclipCompanyName) ??
+      importedCompanyId,
+    importedCompanyIssuePrefix:
+      asNonEmptyString(value.importedCompanyIssuePrefix) ??
+      asNonEmptyString(value.paperclipCompanyIssuePrefix) ??
+      asNonEmptyString(value.issuePrefix),
+    importedAt: asIsoTimestamp(value.importedAt)
+  };
+}
+
 function normalizeRepositorySource(value: unknown): RepositorySource | null {
   if (!isRecord(value)) {
     return null;
@@ -447,6 +518,7 @@ export function createRepositorySource(rawInput: string): RepositorySource {
 export function createDefaultCatalogState(): CatalogState {
   return {
     repositories: [createRepositorySource(DEFAULT_REPOSITORY_URL)],
+    importedCompanies: [],
     updatedAt: null
   };
 }
@@ -483,13 +555,41 @@ export function normalizeCatalogState(value: unknown): CatalogState {
     seen.add(normalizedRepository.id);
   }
 
+  const rawImportedCompanies = Array.isArray(value.importedCompanies)
+    ? value.importedCompanies
+    : Array.isArray(value.imports)
+      ? value.imports
+      : [];
+  const importedCompanies = new Map<string, ImportedCatalogCompanyRecord>();
+
+  for (const importedCompany of rawImportedCompanies) {
+    const normalizedImportedCompany = normalizeImportedCatalogCompany(importedCompany);
+    if (!normalizedImportedCompany) {
+      continue;
+    }
+
+    importedCompanies.set(normalizedImportedCompany.sourceCompanyId, normalizedImportedCompany);
+  }
+
   return {
     repositories: repositories.length > 0 || hadExplicitRepositories ? repositories : createDefaultCatalogState().repositories,
+    importedCompanies: [...importedCompanies.values()],
     updatedAt: asIsoTimestamp(value.updatedAt)
   };
 }
 
 export function buildCatalogSnapshot(state: CatalogState): CatalogSnapshot {
+  const importedCompaniesBySourceId = new Map<string, CatalogCompanyImportStatus>(
+    state.importedCompanies.map((importedCompany) => [
+      importedCompany.sourceCompanyId,
+      {
+        id: importedCompany.importedCompanyId,
+        name: importedCompany.importedCompanyName,
+        issuePrefix: importedCompany.importedCompanyIssuePrefix,
+        importedAt: importedCompany.importedAt
+      }
+    ])
+  );
   const repositories = state.repositories.map((repository) => ({
     ...repository,
     companyCount: repository.companies.length
@@ -501,7 +601,8 @@ export function buildCatalogSnapshot(state: CatalogState): CatalogSnapshot {
         repositoryId: repository.id,
         repositoryLabel: repository.label,
         repositoryUrl: repository.url,
-        repositoryIsDefault: repository.isDefault
+        repositoryIsDefault: repository.isDefault,
+        importedCompany: importedCompaniesBySourceId.get(company.id) ?? null
       }))
     )
     .sort((left, right) =>

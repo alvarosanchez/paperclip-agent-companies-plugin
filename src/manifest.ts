@@ -6,7 +6,7 @@ const manifest: PaperclipPluginManifestV1 = {
   apiVersion: 1,
   version: "0.1.0",
   displayName: PLUGIN_DISPLAY_NAME,
-  description: "Discover Agent Companies packages inside git repositories before importing them into Paperclip.",
+  description: "Discover Agent Companies packages inside git repositories and import selected companies into Paperclip.",
   author: "Alvaro Sanchez-Mariscal",
   categories: ["automation"],
   capabilities: [

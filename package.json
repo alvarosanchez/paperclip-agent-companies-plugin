@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "Discover Agent Companies packages inside git repositories before importing them into Paperclip.",
+  "description": "Discover Agent Companies packages inside git repositories and import selected companies into Paperclip.",
   "scripts": {
     "build": "node ./esbuild.config.mjs",
     "build:rollup": "rollup -c",

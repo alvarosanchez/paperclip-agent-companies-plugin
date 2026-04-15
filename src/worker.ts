@@ -1,13 +1,15 @@
 import { constants } from "node:fs";
-import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { definePlugin, runWorker, type PluginContext, type ScopeKey } from "@paperclipai/plugin-sdk";
 import {
   AGENT_COMPANIES_SCHEMA,
   buildCatalogSnapshot,
   CATALOG_STATE_KEY,
+  type CatalogPreparedCompanyImport,
+  type ImportedCatalogCompanyRecord,
   COMPANY_CONTENT_KEYS,
   type CatalogCompanyContentDetail,
   createRepositorySource,
@@ -22,6 +24,7 @@ import {
   type CompanyContentKey,
   type CompanyContents,
   type DiscoveredAgentCompany,
+  type PortableCatalogFileEntry,
   type RepositorySource,
   type CatalogState
 } from "./catalog.js";
@@ -45,6 +48,49 @@ const FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
 const COMPANY_CONTENT_FILE_NAMES = new Set(["AGENTS.md", "PROJECT.md", "TASK.md", "ISSUE.md", "SKILL.md"]);
 const repositoryCheckoutCache = new Map<string, RepositoryCheckoutCacheEntry>();
 const repositoryCheckoutInflight = new Map<string, Promise<RepositoryCheckoutCacheEntry>>();
+const TEXT_FILE_EXTENSIONS = new Set([
+  ".css",
+  ".html",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".sh",
+  ".svg",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".yaml",
+  ".yml"
+]);
+const TEXT_FILE_NAMES = new Set([
+  ".env",
+  ".eslintrc",
+  ".gitignore",
+  ".npmignore",
+  ".paperclip.yaml",
+  ".paperclip.yml",
+  ".prettierignore",
+  ".prettierrc",
+  "dockerfile",
+  "makefile"
+]);
+const PORTABLE_FILE_CONTENT_TYPES = new Map<string, string>([
+  [".gif", "image/gif"],
+  [".ico", "image/x-icon"],
+  [".jpeg", "image/jpeg"],
+  [".jpg", "image/jpeg"],
+  [".pdf", "application/pdf"],
+  [".png", "image/png"],
+  [".svg", "image/svg+xml"],
+  [".webp", "image/webp"]
+]);
+// Keep inline bridge payloads bounded so one import cannot overwhelm worker memory.
+const MAX_INLINE_IMPORT_FILES = 250;
+const MAX_INLINE_IMPORT_SINGLE_FILE_BYTES = 1024 * 1024;
+const MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
 
@@ -72,6 +118,12 @@ interface LoadedCatalogState {
 interface RepositoryCheckoutCacheEntry {
   checkoutDirectory: string;
   tempDirectory: string;
+}
+
+interface PortableCatalogFileBuildResult {
+  entry: PortableCatalogFileEntry;
+  sourceBytes: number;
+  payloadBytes: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -230,6 +282,55 @@ function getRequiredString(params: Record<string, unknown>, key: string): string
   return value;
 }
 
+function isProbablyTextBuffer(buffer: Buffer): boolean {
+  if (buffer.length === 0) {
+    return true;
+  }
+
+  const sampleLength = Math.min(buffer.length, 1024);
+  let suspiciousByteCount = 0;
+
+  for (let index = 0; index < sampleLength; index += 1) {
+    const byte = buffer[index];
+
+    if (byte === 0) {
+      return false;
+    }
+
+    if (byte < 7 || (byte > 14 && byte < 32)) {
+      suspiciousByteCount += 1;
+    }
+  }
+
+  return suspiciousByteCount / sampleLength < 0.1;
+}
+
+function isLikelyTextFilePath(filePath: string): boolean {
+  const normalizedPath = toPosixPath(filePath).toLowerCase();
+  const fileName = normalizedPath.split("/").at(-1) ?? normalizedPath;
+
+  return TEXT_FILE_NAMES.has(fileName) || TEXT_FILE_EXTENSIONS.has(extname(fileName));
+}
+
+function inferPortableFileContentType(filePath: string): string | null {
+  const normalizedPath = toPosixPath(filePath).toLowerCase();
+  return PORTABLE_FILE_CONTENT_TYPES.get(extname(normalizedPath)) ?? null;
+}
+
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    const kibibytes = bytes / 1024;
+    return `${kibibytes.toFixed(kibibytes >= 10 ? 0 : 1)} KiB`;
+  }
+
+  const mebibytes = bytes / (1024 * 1024);
+  return `${mebibytes.toFixed(mebibytes >= 10 ? 0 : 1)} MiB`;
+}
+
 function updateRepository(
   state: CatalogState,
   repositoryId: string,
@@ -331,6 +432,37 @@ function findRepositoryCompany(
   return null;
 }
 
+function findImportedCatalogCompany(
+  state: CatalogState,
+  sourceCompanyId: string
+): ImportedCatalogCompanyRecord | null {
+  return state.importedCompanies.find((candidate) => candidate.sourceCompanyId === sourceCompanyId) ?? null;
+}
+
+function buildAlreadyImportedErrorMessage(
+  companyName: string,
+  importedCompany: ImportedCatalogCompanyRecord
+): string {
+  const importedLabel =
+    importedCompany.importedCompanyIssuePrefix?.trim() ||
+    importedCompany.importedCompanyName.trim() ||
+    importedCompany.importedCompanyId;
+
+  return `"${companyName}" has already been imported as "${importedLabel}". Sync support will replace re-import later.`;
+}
+
+function assertCatalogCompanyCanBeImported(
+  state: CatalogState,
+  company: DiscoveredAgentCompany
+): void {
+  const importedCompany = findImportedCatalogCompany(state, company.id);
+  if (!importedCompany) {
+    return;
+  }
+
+  throw new Error(buildAlreadyImportedErrorMessage(company.name, importedCompany));
+}
+
 function findCompanyContentEntry(
   company: DiscoveredAgentCompany,
   itemPath: string
@@ -392,6 +524,7 @@ async function persistCatalogState(
 ): Promise<CatalogState> {
   const nextState = normalizeCatalogState({
     repositories: state.repositories,
+    importedCompanies: state.importedCompanies,
     updatedAt: now
   });
 
@@ -992,6 +1125,181 @@ async function readCatalogCompanyContentDetail(
   };
 }
 
+async function findPortableCompanyFilePaths(companyRoot: string): Promise<string[]> {
+  const filePaths: string[] = [];
+  const queue = [companyRoot];
+
+  while (queue.length > 0) {
+    const currentDirectory = queue.pop();
+    if (!currentDirectory) {
+      continue;
+    }
+
+    let entries;
+    try {
+      entries = await readdir(currentDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (
+        isRecord(error) &&
+        (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "EACCES")
+      ) {
+        continue;
+      }
+
+      throw error;
+    }
+
+    for (const entry of entries) {
+      const fullPath = join(currentDirectory, entry.name);
+
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        if (!IGNORED_DIRECTORY_NAMES.has(entry.name)) {
+          queue.push(fullPath);
+        }
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      const relativePath = normalizeCompanyContentPath(toPosixPath(relative(companyRoot, fullPath)));
+      if (relativePath) {
+        filePaths.push(relativePath);
+      }
+    }
+  }
+
+  filePaths.sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+  return filePaths;
+}
+
+async function buildPortableCatalogFileEntry(
+  companyRoot: string,
+  filePath: string
+): Promise<PortableCatalogFileBuildResult> {
+  const absolutePath = resolveRepositoryRelativePath(companyRoot, filePath);
+  const fileStats = await stat(absolutePath);
+
+  if (!fileStats.isFile()) {
+    throw new Error(`File "${filePath}" is no longer available for import.`);
+  }
+
+  if (fileStats.size > MAX_INLINE_IMPORT_SINGLE_FILE_BYTES) {
+    throw new Error(
+      `File "${filePath}" is ${formatByteCount(fileStats.size)}, which exceeds the inline import per-file limit of ${formatByteCount(MAX_INLINE_IMPORT_SINGLE_FILE_BYTES)}.`
+    );
+  }
+
+  const content = await readFile(absolutePath);
+  const sourceBytes = content.byteLength;
+
+  if (isLikelyTextFilePath(filePath) || isProbablyTextBuffer(content)) {
+    const entry = content.toString("utf8");
+    return {
+      entry,
+      sourceBytes,
+      payloadBytes: Buffer.byteLength(entry, "utf8")
+    };
+  }
+
+  const entry = {
+    encoding: "base64" as const,
+    data: content.toString("base64"),
+    contentType: inferPortableFileContentType(filePath)
+  };
+
+  return {
+    entry,
+    sourceBytes,
+    payloadBytes: Buffer.byteLength(entry.data, "utf8")
+  };
+}
+
+async function buildCatalogCompanyImportSource(
+  ctx: PluginContext,
+  companyId: string
+): Promise<CatalogPreparedCompanyImport> {
+  const state = await loadCatalogState(ctx);
+  const match = findRepositoryCompany(state, companyId);
+  if (!match) {
+    throw new Error("Company not found.");
+  }
+
+  assertCatalogCompanyCanBeImported(state, match.company);
+
+  const repositoryRoot = await resolveRepositoryContentRoot(match.repository);
+  const companyRelativeRoot = getRepositoryRelativeCompanyRoot(match.company);
+  const companyRoot = companyRelativeRoot
+    ? resolveRepositoryRelativePath(repositoryRoot, companyRelativeRoot)
+    : repositoryRoot;
+  const filePaths = await findPortableCompanyFilePaths(companyRoot);
+
+  if (!filePaths.includes("COMPANY.md")) {
+    throw new Error("Company package is missing COMPANY.md.");
+  }
+
+  if (filePaths.length > MAX_INLINE_IMPORT_FILES) {
+    throw new Error(
+      `"${match.company.name}" exceeds the inline import file limit of ${MAX_INLINE_IMPORT_FILES} files (${filePaths.length} discovered). Remove extra files or trim the package before importing.`
+    );
+  }
+
+  const files: Record<string, PortableCatalogFileEntry> = {};
+  let textFileCount = 0;
+  let binaryFileCount = 0;
+  let totalSourceBytes = 0;
+  let totalPayloadBytes = 0;
+
+  for (const filePath of filePaths) {
+    const fileEntry = await buildPortableCatalogFileEntry(companyRoot, filePath);
+    const nextTotalPayloadBytes = totalPayloadBytes + fileEntry.payloadBytes;
+
+    if (nextTotalPayloadBytes > MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES) {
+      throw new Error(
+        `Adding "${filePath}" would exceed the inline import payload limit of ${formatByteCount(MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES)} (${formatByteCount(nextTotalPayloadBytes)} after encoding). Remove large assets or trim the package before importing.`
+      );
+    }
+
+    totalSourceBytes += fileEntry.sourceBytes;
+    totalPayloadBytes = nextTotalPayloadBytes;
+    files[filePath] = fileEntry.entry;
+
+    if (typeof fileEntry.entry === "string") {
+      textFileCount += 1;
+    } else {
+      binaryFileCount += 1;
+    }
+  }
+
+  ctx.logger.info("Prepared inline company import source", {
+    companyId: match.company.id,
+    companyName: match.company.name,
+    repositoryId: match.repository.id,
+    fileCount: filePaths.length,
+    totalSourceBytes,
+    totalPayloadBytes
+  });
+
+  return {
+    companyId: match.company.id,
+    companyName: match.company.name,
+    source: {
+      type: "inline",
+      files
+    },
+    stats: {
+      fileCount: filePaths.length,
+      textFileCount,
+      binaryFileCount
+    }
+  };
+}
+
 function createRepositoryScanner(): RepositoryScanner {
   return async (repository) => scanRepositoryForAgentCompanies(repository.url, repository.id);
 }
@@ -1024,6 +1332,54 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         }
 
         return readCatalogCompanyContentDetail(ctx, companyId, itemPath);
+      });
+
+      ctx.actions.register("catalog.prepare-company-import", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const companyId = getRequiredString(params, "companyId");
+        return buildCatalogCompanyImportSource(ctx, companyId);
+      });
+
+      ctx.actions.register("catalog.record-company-import", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const sourceCompanyId = getRequiredString(params, "sourceCompanyId");
+        const importedCompanyId = getRequiredString(params, "importedCompanyId");
+        const importedCompanyName = getRequiredString(params, "importedCompanyName");
+        const importedCompanyIssuePrefix = asNonEmptyString(params.importedCompanyIssuePrefix);
+        const currentState = await loadCatalogState(ctx);
+        const match = findRepositoryCompany(currentState, sourceCompanyId);
+
+        if (!match) {
+          throw new Error("Company not found.");
+        }
+
+        const existingImport = findImportedCatalogCompany(currentState, sourceCompanyId);
+        if (existingImport && existingImport.importedCompanyId !== importedCompanyId) {
+          throw new Error(buildAlreadyImportedErrorMessage(match.company.name, existingImport));
+        }
+
+        const timestamp = now();
+        const nextState = await persistCatalogState(
+          ctx,
+          {
+            ...currentState,
+            importedCompanies: [
+              ...currentState.importedCompanies.filter(
+                (candidate) => candidate.sourceCompanyId !== sourceCompanyId
+              ),
+              {
+                sourceCompanyId,
+                importedCompanyId,
+                importedCompanyName,
+                importedCompanyIssuePrefix,
+                importedAt: timestamp
+              }
+            ]
+          },
+          timestamp
+        );
+
+        return buildCatalogResponse(nextState);
       });
 
       ctx.actions.register("catalog.add-repository", async (rawParams) => {

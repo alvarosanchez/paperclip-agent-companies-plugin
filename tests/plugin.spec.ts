@@ -10,6 +10,7 @@ import {
   CATALOG_STATE_KEY,
   DEFAULT_REPOSITORY_URL,
   type CatalogCompanyContentDetail,
+  type CatalogPreparedCompanyImport,
   createRepositorySource,
   createEmptyCompanyContents,
   normalizeCatalogState,
@@ -86,6 +87,7 @@ Alpha Labs fixture company.
 `
   );
   await mkdir(join(root, "alpha", "agents", "ceo"), { recursive: true });
+  await mkdir(join(root, "alpha", "skills", "repo-audit", "assets"), { recursive: true });
   await mkdir(join(root, "alpha", "skills", "repo-audit"), { recursive: true });
   await mkdir(join(root, "alpha", "projects", "import-pipeline", "tasks", "seed-default"), {
     recursive: true
@@ -112,6 +114,13 @@ description: Review repository hygiene.
 
 - Review the repository layout
 - Confirm manifests are present
+`
+  );
+  await writeFile(
+    join(root, "alpha", "skills", "repo-audit", "assets", "icon.svg"),
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <circle cx="12" cy="12" r="10" fill="#3b82f6" />
+</svg>
 `
   );
   await writeFile(
@@ -391,6 +400,145 @@ describe("agent companies plugin", () => {
     expect(detail?.item.frontmatter).toContain("name: Repo Audit");
     expect(detail?.item.markdown).toContain("## Checklist");
     expect(detail?.item.markdown).toContain("Review the repository layout");
+  });
+
+  it("packages a discovered company as an inline import source", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:00.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    expect(company?.id).toBeTruthy();
+
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id
+      }
+    );
+
+    expect(prepared.companyId).toBe(company?.id);
+    expect(prepared.companyName).toBe("Alpha Labs");
+    expect(prepared.source.type).toBe("inline");
+    expect(prepared.stats.fileCount).toBeGreaterThanOrEqual(6);
+    expect(prepared.stats.textFileCount).toBe(prepared.stats.fileCount);
+    expect(Object.keys(prepared.source.files).sort()).toEqual([
+      "COMPANY.md",
+      "agents/ceo/AGENTS.md",
+      "issues/follow-up/ISSUE.md",
+      "projects/import-pipeline/PROJECT.md",
+      "projects/import-pipeline/tasks/seed-default/TASK.md",
+      "skills/repo-audit/SKILL.md",
+      "skills/repo-audit/assets/icon.svg"
+    ]);
+    expect(typeof prepared.source.files["COMPANY.md"]).toBe("string");
+    expect(typeof prepared.source.files["skills/repo-audit/assets/icon.svg"]).toBe("string");
+  });
+
+  it("rejects inline import sources with oversized files", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await mkdir(join(repositoryPath, "alpha", "assets"), { recursive: true });
+    await writeFile(
+      join(repositoryPath, "alpha", "assets", "oversized.bin"),
+      Buffer.alloc(1024 * 1024 + 1, 1)
+    );
+
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:30.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await expect(
+      harness.performAction("catalog.prepare-company-import", {
+        companyId: company?.id
+      })
+    ).rejects.toThrow(
+      /File "assets\/oversized\.bin" is .*per-file limit of 1\.0 MiB\./u
+    );
+  });
+
+  it("tracks imported companies and blocks repeat imports", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:23:00.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    expect(company?.importedCompany).toBeNull();
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    const afterImportRecord = await harness.getData<CatalogSnapshot>("catalog.read");
+    const importedCompany = afterImportRecord.companies.find(
+      (candidate) => candidate.id === company?.id
+    );
+
+    expect(importedCompany?.importedCompany).toEqual({
+      id: "paperclip-company-123",
+      name: "Alpha Labs Imported",
+      issuePrefix: "ALP",
+      importedAt: "2026-04-14T09:23:00.000Z"
+    });
+
+    await expect(
+      harness.performAction("catalog.prepare-company-import", {
+        companyId: company?.id
+      })
+    ).rejects.toThrow('"Alpha Labs" has already been imported as "ALP".');
   });
 
   it("returns null when tampered company content paths resolve outside the repository root", async () => {
