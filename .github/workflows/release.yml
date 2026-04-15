@@ -52,10 +52,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "PLUGIN_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Stamp package version from tag
+      - name: Verify package version matches release tag
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.version }}
-        run: npm pkg set version="$RELEASE_VERSION"
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$PACKAGE_VERSION" != "$RELEASE_VERSION" ]]; then
+            echo "package.json version ($PACKAGE_VERSION) does not match release tag version ($RELEASE_VERSION)."
+            exit 1
+          fi
 
       - name: Typecheck
         run: pnpm typecheck

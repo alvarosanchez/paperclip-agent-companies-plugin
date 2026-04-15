@@ -161,7 +161,6 @@ export interface RepositorySource {
 export interface CatalogState {
   repositories: RepositorySource[];
   importedCompanies: ImportedCatalogCompanyRecord[];
-  paperclipApiBase: string | null;
   updatedAt: string | null;
 }
 
@@ -466,27 +465,6 @@ function maybeParseRepositoryUrl(input: string): URL | null {
   }
 }
 
-function normalizePaperclipApiBase(value: unknown): string | null {
-  const input = asNonEmptyString(value);
-  if (!input) {
-    return null;
-  }
-
-  try {
-    const parsedUrl = new URL(input);
-    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-      return null;
-    }
-
-    parsedUrl.pathname = "";
-    parsedUrl.search = "";
-    parsedUrl.hash = "";
-    return parsedUrl.toString().replace(/\/+$/u, "");
-  } catch {
-    return null;
-  }
-}
-
 function canonicalizeHttpRepository(url: URL): string {
   const segments = normalizeDisplaySegments(url);
   return `https://${url.host.toLowerCase()}/${segments.join("/")}`;
@@ -786,7 +764,6 @@ export function createDefaultCatalogState(): CatalogState {
   return {
     repositories: [createRepositorySource(DEFAULT_REPOSITORY_URL)],
     importedCompanies: [],
-    paperclipApiBase: null,
     updatedAt: null
   };
 }
@@ -842,7 +819,6 @@ export function normalizeCatalogState(value: unknown): CatalogState {
   return {
     repositories: repositories.length > 0 || hadExplicitRepositories ? repositories : createDefaultCatalogState().repositories,
     importedCompanies: [...importedCompanies.values()],
-    paperclipApiBase: normalizePaperclipApiBase(value.paperclipApiBase),
     updatedAt: asIsoTimestamp(value.updatedAt)
   };
 }

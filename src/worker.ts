@@ -224,7 +224,6 @@ interface SyncImportRequest {
   importedCompanyId: string;
   collisionStrategy: CatalogSyncCollisionStrategy;
   preparedImport: CatalogPreparedCompanyImport;
-  paperclipApiBase: string | null;
 }
 
 interface PaperclipApiConnection {
@@ -412,11 +411,9 @@ async function readStoredBoardCredential(apiBase: string): Promise<StoredBoardCr
   };
 }
 
-async function resolvePaperclipApiConnection(preferredApiBase: string | null = null): Promise<PaperclipApiConnection> {
-  void preferredApiBase;
+async function resolvePaperclipApiConnection(): Promise<PaperclipApiConnection> {
   const explicitApiBase = process.env.PAPERCLIP_API_URL?.trim();
   const configPath = resolvePaperclipConfigPath();
-  // Do not let action payloads retarget authenticated worker-side Paperclip requests.
   const apiBase = normalizeApiBase(explicitApiBase || (await inferPaperclipApiBaseFromConfig(configPath)));
   const apiKey = process.env.PAPERCLIP_API_KEY?.trim() || (await readStoredBoardCredential(apiBase))?.token || null;
 
@@ -855,11 +852,8 @@ function parseSupportedPaperclipAgentIcons(content: string): Set<string> {
   return icons;
 }
 
-async function resolveSupportedPaperclipAgentIcons(
-  preferredApiBase: string | null
-): Promise<Set<string>> {
+async function resolveSupportedPaperclipAgentIcons(): Promise<Set<string>> {
   const fallbackIcons = new Set(DEFAULT_SUPPORTED_PAPERCLIP_AGENT_ICONS);
-  void preferredApiBase;
 
   try {
     const connection = await resolvePaperclipApiConnection();
@@ -960,8 +954,7 @@ async function discoverPaperclipAgentIcons(
 async function applyPaperclipAgentIconsToPortableFiles(
   ctx: PluginContext,
   companyRoot: string,
-  files: Record<string, PortableCatalogFileEntry>,
-  paperclipApiBase: string | null
+  files: Record<string, PortableCatalogFileEntry>
 ): Promise<PortableCatalogFileAugmentationResult> {
   const requestedIcons = await discoverPaperclipAgentIcons(companyRoot);
   if (requestedIcons.size === 0) {
@@ -971,7 +964,7 @@ async function applyPaperclipAgentIconsToPortableFiles(
     };
   }
 
-  const supportedIcons = await resolveSupportedPaperclipAgentIcons(paperclipApiBase);
+  const supportedIcons = await resolveSupportedPaperclipAgentIcons();
   const extensionPath = findPortablePaperclipExtensionPath(files) ?? PAPERCLIP_EXTENSION_FILE_NAMES[0];
   const existingExtensionEntry = files[extensionPath];
 
@@ -1283,7 +1276,6 @@ async function persistCatalogState(
   const nextState = normalizeCatalogState({
     repositories: state.repositories,
     importedCompanies: state.importedCompanies,
-    paperclipApiBase: state.paperclipApiBase,
     updatedAt: now
   });
 
@@ -1922,7 +1914,7 @@ async function findPortableCompanyFilePaths(companyRoot: string): Promise<string
       }
 
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORY_NAMES.has(entry.name)) {
+        if (!IGNORED_DIRECTORY_NAMES.has(entry.name) && !SENSITIVE_DIRECTORY_NAMES.has(entry.name)) {
           queue.push(fullPath);
         }
         continue;
@@ -1990,7 +1982,6 @@ async function buildCatalogCompanyImportSource(
   companyId: string,
   options: {
     allowImported?: boolean;
-    paperclipApiBase?: string | null;
   } = {}
 ): Promise<CatalogPreparedCompanyImport> {
   const state = await loadCatalogState(ctx);
@@ -2039,12 +2030,7 @@ async function buildCatalogCompanyImportSource(
     files[filePath] = fileEntry.entry;
   }
 
-  const iconAugmentation = await applyPaperclipAgentIconsToPortableFiles(
-    ctx,
-    companyRoot,
-    files,
-    options.paperclipApiBase ?? null
-  );
+  const iconAugmentation = await applyPaperclipAgentIconsToPortableFiles(ctx, companyRoot, files);
   const portableFileSummary = summarizePortableCatalogFiles(iconAugmentation.files);
   totalSourceBytes += iconAugmentation.sourceByteDelta;
 
@@ -2088,7 +2074,7 @@ async function executeDefaultSyncImport(
   _ctx: PluginContext,
   input: SyncImportRequest
 ): Promise<PaperclipCompanyImportResult> {
-  const connection = await resolvePaperclipApiConnection(input.paperclipApiBase);
+  const connection = await resolvePaperclipApiConnection();
   const requestUrl = `${connection.apiBase}/api/companies/import`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -2249,16 +2235,14 @@ async function runCatalogCompanySync(
       }
 
       const preparedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId, {
-        allowImported: true,
-        paperclipApiBase: currentState.paperclipApiBase
+        allowImported: true
       });
       const importResult = await options.syncImport(ctx, {
         sourceCompanyId,
         sourceCompanyName: refreshedMatch.company.name,
         importedCompanyId: importedCompany.importedCompanyId,
         collisionStrategy: importedCompany.syncCollisionStrategy,
-        preparedImport,
-        paperclipApiBase: currentState.paperclipApiBase
+        preparedImport
       });
       const syncedAt = options.now();
       const latestState = await loadCatalogState(ctx);
@@ -2428,10 +2412,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
       ctx.actions.register("catalog.prepare-company-import", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = getRequiredString(params, "companyId");
-        const paperclipApiBase = asNonEmptyString(params.paperclipApiBase);
-        return buildCatalogCompanyImportSource(ctx, companyId, {
-          paperclipApiBase
-        });
+        return buildCatalogCompanyImportSource(ctx, companyId);
       });
 
       ctx.actions.register("catalog.record-company-import", async (rawParams) => {
@@ -2440,7 +2421,6 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const importedCompanyId = getRequiredString(params, "importedCompanyId");
         const importedCompanyName = getRequiredString(params, "importedCompanyName");
         const importedCompanyIssuePrefix = asNonEmptyString(params.importedCompanyIssuePrefix);
-        const paperclipApiBase = asNonEmptyString(params.paperclipApiBase);
         const timestamp = now();
         const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
         const match = findRepositoryCompany(currentState, sourceCompanyId);
@@ -2458,7 +2438,6 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           ctx,
           {
             ...currentState,
-            paperclipApiBase: paperclipApiBase ?? currentState.paperclipApiBase,
             importedCompanies: [
               ...currentState.importedCompanies.filter(
                 (candidate) => candidate.sourceCompanyId !== sourceCompanyId
@@ -2520,22 +2499,6 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
       ctx.actions.register("catalog.sync-company", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = getRequiredString(params, "companyId");
-        const paperclipApiBase = asNonEmptyString(params.paperclipApiBase);
-
-        if (paperclipApiBase) {
-          const timestamp = now();
-          const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
-          if (currentState.paperclipApiBase !== paperclipApiBase) {
-            await persistCatalogState(
-              ctx,
-              {
-                ...currentState,
-                paperclipApiBase
-              },
-              timestamp
-            );
-          }
-        }
 
         return runCatalogCompanySync(ctx, companyId, {
           now,
