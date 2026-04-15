@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { parse as parseYaml } from "yaml";
 import manifest from "../src/manifest.js";
 import {
   AGENT_COMPANIES_SCHEMA,
@@ -218,6 +219,66 @@ ${companyName} fixture company.
   );
 }
 
+async function addPaperclipAgentIconFixture(repositoryRoot: string): Promise<void> {
+  await writeFile(
+    join(repositoryRoot, "alpha", ".paperclip.yaml"),
+    `schema: paperclip/v1
+agents:
+  ceo:
+    adapter:
+      type: codex_local
+      config:
+        model: gpt-5.4
+  reviewer:
+    icon: bot
+    adapter:
+      type: codex_local
+`
+  );
+
+  await writeFile(
+    join(repositoryRoot, "alpha", "agents", "ceo", "AGENTS.md"),
+    `---
+name: Alpha CEO
+title: Chief Executive Officer
+metadata:
+  paperclip:
+    agentIcon: crown
+---
+
+Lead Alpha Labs and coordinate the delivery pipeline.
+`
+  );
+
+  await mkdir(join(repositoryRoot, "alpha", "agents", "reviewer"), { recursive: true });
+  await writeFile(
+    join(repositoryRoot, "alpha", "agents", "reviewer", "AGENTS.md"),
+    `---
+name: Alpha Reviewer
+metadata:
+  paperclip:
+    agentIcon: crown
+---
+
+Review the work before it ships.
+`
+  );
+
+  await mkdir(join(repositoryRoot, "alpha", "agents", "architect"), { recursive: true });
+  await writeFile(
+    join(repositoryRoot, "alpha", "agents", "architect", "AGENTS.md"),
+    `---
+name: Alpha Architect
+metadata:
+  paperclip:
+    agentIcon: search-check
+---
+
+Design the next iteration of the platform.
+`
+  );
+}
+
 describe("agent companies plugin", () => {
   it("declares the custom settings surface and required capabilities", () => {
     expect(manifest.description).toContain("Discover Agent Companies packages");
@@ -364,7 +425,8 @@ describe("agent companies plugin", () => {
                 agents: [
                   {
                     name: "Alpha CEO",
-                    path: "agents/ceo/AGENTS.md"
+                    path: "agents/ceo/AGENTS.md",
+                    paperclipAgentIcon: "crown"
                   },
                   {
                     name: "Unsafe parent traversal",
@@ -389,7 +451,58 @@ describe("agent companies plugin", () => {
     expect(state.repositories[0]?.companies[0]?.contents.agents).toEqual([
       {
         name: "Alpha CEO",
-        path: "agents/ceo/AGENTS.md"
+        path: "agents/ceo/AGENTS.md",
+        paperclipAgentIcon: "crown"
+      }
+    ]);
+  });
+
+  it("surfaces metadata.paperclip.agentIcon in discovered agent contents", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addPaperclipAgentIconFixture(repositoryPath);
+
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:20:00.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    expect(
+      company?.contents.agents.map((item) => ({
+        name: item.name,
+        path: item.path,
+        paperclipAgentIcon: item.paperclipAgentIcon ?? null
+      }))
+    ).toEqual([
+      {
+        name: "Alpha Architect",
+        path: "agents/architect/AGENTS.md",
+        paperclipAgentIcon: "search-check"
+      },
+      {
+        name: "Alpha CEO",
+        path: "agents/ceo/AGENTS.md",
+        paperclipAgentIcon: "crown"
+      },
+      {
+        name: "Alpha Reviewer",
+        path: "agents/reviewer/AGENTS.md",
+        paperclipAgentIcon: "crown"
       }
     ]);
   });
@@ -482,6 +595,49 @@ describe("agent companies plugin", () => {
     ]);
     expect(typeof prepared.source.files["COMPANY.md"]).toBe("string");
     expect(typeof prepared.source.files["skills/repo-audit/assets/icon.svg"]).toBe("string");
+  });
+
+  it("merges metadata.paperclip.agentIcon into the inline Paperclip extension", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addPaperclipAgentIconFixture(repositoryPath);
+
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:15.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id
+      }
+    );
+    const extensionYaml = prepared.source.files[".paperclip.yaml"];
+    const extension = parseYaml(typeof extensionYaml === "string" ? extensionYaml : "") as {
+      schema?: string;
+      agents?: Record<string, { icon?: string; adapter?: { type?: string } }>;
+    };
+
+    expect(extension.schema).toBe("paperclip/v1");
+    expect(extension.agents?.ceo?.icon).toBe("crown");
+    expect(extension.agents?.ceo?.adapter?.type).toBe("codex_local");
+    expect(extension.agents?.reviewer?.icon).toBe("bot");
+    expect(extension.agents?.architect?.icon).toBeUndefined();
   });
 
   it("rejects inline import sources with oversized files", async () => {
@@ -729,6 +885,72 @@ describe("agent companies plugin", () => {
     expect(importedCompany?.importedCompany?.latestSourceVersion).toBe("1.1.0");
     expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
     expect(importedCompany?.importedCompany?.isUpToDate).toBe(true);
+  });
+
+  it("applies metadata.paperclip.agentIcon when preparing sync imports", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addPaperclipAgentIconFixture(repositoryPath);
+
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    let syncedExtension: {
+      schema?: string;
+      agents?: Record<string, { icon?: string }>;
+    } | undefined;
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null,
+      syncImport: async (_ctx, input) => {
+        const extensionYaml = input.preparedImport.source.files[".paperclip.yaml"];
+        syncedExtension = parseYaml(typeof extensionYaml === "string" ? extensionYaml : "") as {
+          schema?: string;
+          agents?: Record<string, { icon?: string }>;
+        };
+
+        return {
+          company: {
+            id: input.importedCompanyId,
+            name: "Alpha Labs Imported",
+            action: "updated"
+          }
+        };
+      }
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+    currentTime = "2026-04-15T10:00:00.000Z";
+
+    await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+      companyId: company?.id
+    });
+
+    expect(syncedExtension?.schema).toBe("paperclip/v1");
+    expect(syncedExtension?.agents?.ceo?.icon).toBe("crown");
+    expect(syncedExtension?.agents?.reviewer?.icon).toBe("bot");
+    expect(syncedExtension?.agents?.architect?.icon).toBeUndefined();
   });
 
   it("returns an up-to-date sync result without re-importing current companies", async () => {

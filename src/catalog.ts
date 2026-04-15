@@ -17,6 +17,7 @@ export type RepositoryScanStatus = "idle" | "ready" | "error";
 export interface CompanyContentItem {
   name: string;
   path: string;
+  paperclipAgentIcon?: string | null;
 }
 
 export interface CompanyContents {
@@ -398,9 +399,12 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
     return null;
   }
 
+  const paperclipAgentIcon = asNonEmptyString(value.paperclipAgentIcon);
+
   return {
     name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),
-    path
+    path,
+    ...(paperclipAgentIcon ? { paperclipAgentIcon } : {})
   };
 }
 
