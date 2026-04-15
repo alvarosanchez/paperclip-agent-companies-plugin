@@ -1,6 +1,7 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
@@ -26,7 +27,8 @@ import {
   clearRepositoryCheckoutCacheEntry,
   createAgentCompaniesPlugin,
   resolveRepositoryContentRoot,
-  scanRepositoryForAgentCompanies
+  scanRepositoryForAgentCompanies,
+  shouldStartWorkerHost
 } from "../src/worker.js";
 
 const tempDirectories: string[] = [];
@@ -307,6 +309,36 @@ describe("agent companies plugin", () => {
         exportName: "AgentCompaniesSettingsPage"
       }
     ]);
+  });
+
+  it("matches symlinked worker entrypoints to the real worker file", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "paperclip-agent-companies-plugin-worker-path-"));
+    const realWorkerPath = join(tempDir, "worker.js");
+    const symlinkWorkerPath = join(tempDir, "worker-symlink.js");
+
+    try {
+      await writeFile(realWorkerPath, "// test worker entrypoint\n");
+      await symlink(realWorkerPath, symlinkWorkerPath);
+
+      expect(shouldStartWorkerHost(pathToFileURL(realWorkerPath).href, symlinkWorkerPath)).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unrelated worker entrypoints", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "paperclip-agent-companies-plugin-worker-path-"));
+    const realWorkerPath = join(tempDir, "worker.js");
+    const unrelatedWorkerPath = join(tempDir, "other-worker.js");
+
+    try {
+      await writeFile(realWorkerPath, "// test worker entrypoint\n");
+      await writeFile(unrelatedWorkerPath, "// different worker entrypoint\n");
+
+      expect(shouldStartWorkerHost(pathToFileURL(realWorkerPath).href, unrelatedWorkerPath)).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("seeds and auto-scans the predefined repository on catalog.read", async () => {
