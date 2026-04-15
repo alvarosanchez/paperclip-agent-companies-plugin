@@ -64,6 +64,8 @@ pnpm test
 pnpm build
 ```
 
+GitHub Actions runs the same verification sequence on pushes to `main` and on pull requests.
+
 Use these when the hosted flow changes:
 
 - `pnpm test:e2e`
