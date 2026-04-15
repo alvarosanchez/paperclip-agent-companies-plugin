@@ -52,6 +52,20 @@ const IGNORED_DIRECTORY_NAMES = new Set([
   "dist",
   "node_modules"
 ]);
+const SENSITIVE_DIRECTORY_NAMES = new Set([".aws", ".gnupg", ".ssh"]);
+const IGNORED_PORTABLE_FILE_NAMES = new Set([".ds_store", "thumbs.db"]);
+const SENSITIVE_PORTABLE_FILE_NAMES = new Set([
+  ".git-credentials",
+  ".netrc",
+  ".npmrc",
+  ".pypirc",
+  ".terraformrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  "terraform.rc"
+]);
+const SENSITIVE_PORTABLE_FILE_EXTENSIONS = new Set([".key", ".kdbx", ".p12", ".pem", ".pfx"]);
+const SENSITIVE_PORTABLE_FILE_PATTERNS = [/^\.env(?:\..+)?$/iu, /^id_(?:rsa|dsa|ecdsa|ed25519)$/iu];
 
 const FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
 const COMPANY_CONTENT_FILE_NAMES = new Set(["AGENTS.md", "PROJECT.md", "TASK.md", "ISSUE.md", "SKILL.md"]);
@@ -399,11 +413,11 @@ async function readStoredBoardCredential(apiBase: string): Promise<StoredBoardCr
 }
 
 async function resolvePaperclipApiConnection(preferredApiBase: string | null = null): Promise<PaperclipApiConnection> {
+  void preferredApiBase;
   const explicitApiBase = process.env.PAPERCLIP_API_URL?.trim();
   const configPath = resolvePaperclipConfigPath();
-  const apiBase = normalizeApiBase(
-    explicitApiBase || preferredApiBase || (await inferPaperclipApiBaseFromConfig(configPath))
-  );
+  // Do not let action payloads retarget authenticated worker-side Paperclip requests.
+  const apiBase = normalizeApiBase(explicitApiBase || (await inferPaperclipApiBaseFromConfig(configPath)));
   const apiKey = process.env.PAPERCLIP_API_KEY?.trim() || (await readStoredBoardCredential(apiBase))?.token || null;
 
   return {
@@ -660,6 +674,26 @@ function inferPortableFileContentType(filePath: string): string | null {
   return PORTABLE_FILE_CONTENT_TYPES.get(extname(normalizedPath)) ?? null;
 }
 
+function shouldSkipPortableCompanyFilePath(filePath: string): boolean {
+  const normalizedPath = toPosixPath(filePath).toLowerCase();
+  const segments = normalizedPath.split("/").filter(Boolean);
+  const fileName = segments.at(-1) ?? normalizedPath;
+
+  if (segments.slice(0, -1).some((segment) => SENSITIVE_DIRECTORY_NAMES.has(segment))) {
+    return true;
+  }
+
+  if (IGNORED_PORTABLE_FILE_NAMES.has(fileName) || SENSITIVE_PORTABLE_FILE_NAMES.has(fileName)) {
+    return true;
+  }
+
+  if (SENSITIVE_PORTABLE_FILE_PATTERNS.some((pattern) => pattern.test(fileName))) {
+    return true;
+  }
+
+  return SENSITIVE_PORTABLE_FILE_EXTENSIONS.has(extname(fileName));
+}
+
 function formatByteCount(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -825,14 +859,10 @@ async function resolveSupportedPaperclipAgentIcons(
   preferredApiBase: string | null
 ): Promise<Set<string>> {
   const fallbackIcons = new Set(DEFAULT_SUPPORTED_PAPERCLIP_AGENT_ICONS);
-  const apiBase = preferredApiBase?.trim() || process.env.PAPERCLIP_API_URL?.trim() || null;
-
-  if (!apiBase) {
-    return fallbackIcons;
-  }
+  void preferredApiBase;
 
   try {
-    const connection = await resolvePaperclipApiConnection(apiBase);
+    const connection = await resolvePaperclipApiConnection();
     const headers: Record<string, string> = {
       accept: "text/plain"
     };
@@ -1429,7 +1459,7 @@ async function findCompanyManifestPaths(repositoryRoot: string): Promise<string[
       }
 
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORY_NAMES.has(entry.name)) {
+        if (!IGNORED_DIRECTORY_NAMES.has(entry.name) && !SENSITIVE_DIRECTORY_NAMES.has(entry.name)) {
           queue.push(fullPath);
         }
         continue;
@@ -1903,7 +1933,7 @@ async function findPortableCompanyFilePaths(companyRoot: string): Promise<string
       }
 
       const relativePath = normalizeCompanyContentPath(toPosixPath(relative(companyRoot, fullPath)));
-      if (relativePath) {
+      if (relativePath && !shouldSkipPortableCompanyFilePath(relativePath)) {
         filePaths.push(relativePath);
       }
     }
