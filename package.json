@@ -2,13 +2,32 @@
   "name": "paperclip-agent-companies-plugin",
   "version": "0.1.0",
   "type": "module",
-  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
   "description": "Discover Agent Companies packages inside git repositories and import selected companies into Paperclip.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alvarosanchez/paperclip-agent-companies-plugin.git"
+  },
+  "homepage": "https://github.com/alvarosanchez/paperclip-agent-companies-plugin#readme",
+  "bugs": {
+    "url": "https://github.com/alvarosanchez/paperclip-agent-companies-plugin/issues"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node ./esbuild.config.mjs",
     "build:rollup": "rollup -c",
     "dev": "node ./esbuild.config.mjs --watch",
     "dev:ui": "paperclip-plugin-dev-server --root . --ui-dir dist/ui --port 4177",
+    "prepack": "pnpm build",
     "test": "vitest run --config ./vitest.config.ts",
     "test:e2e": "pnpm build && pnpm exec playwright install chromium && node ./scripts/e2e/run-paperclip-smoke.mjs",
     "typecheck": "tsc --noEmit",

@@ -65,6 +65,7 @@ pnpm build
 ```
 
 GitHub Actions runs the same verification sequence on pushes to `main` and on pull requests.
+Publishing a GitHub release with a semver tag such as `v0.1.0` runs the npm release workflow and stamps the published package version from that tag.
 
 Use these when the hosted flow changes:
 
