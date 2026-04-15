@@ -1166,10 +1166,6 @@ function getErrorMessage(error: unknown): string {
   return "Something went wrong.";
 }
 
-function getPaperclipApiBase(): string | null {
-  return typeof window !== "undefined" && window.location?.origin ? window.location.origin : null;
-}
-
 function getApiErrorMessage(payload: unknown): string | null {
   if (!isRecord(payload)) {
     return null;
@@ -2481,8 +2477,7 @@ export function AgentCompaniesSettingsPage({
 
     try {
       const preparedImport = await prepareCompanyImport({
-        companyId: importCompany.id,
-        paperclipApiBase: getPaperclipApiBase()
+        companyId: importCompany.id
       }) as CatalogPreparedCompanyImport;
 
       setImportState({
@@ -2530,8 +2525,7 @@ export function AgentCompaniesSettingsPage({
             sourceCompanyId: importCompany.id,
             importedCompanyId,
             importedCompanyName,
-            importedCompanyIssuePrefix,
-            paperclipApiBase: getPaperclipApiBase()
+            importedCompanyIssuePrefix
           });
           refresh();
         } catch (recordError) {
@@ -2658,8 +2652,7 @@ export function AgentCompaniesSettingsPage({
 
     try {
       const syncResult = await syncCompany({
-        companyId,
-        paperclipApiBase: getPaperclipApiBase()
+        companyId
       }) as CatalogCompanySyncResult;
       const visibleWarningDetails = getVisibleSyncWarningDetails(syncResult);
       const warningCount = visibleWarningDetails.length;

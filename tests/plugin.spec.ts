@@ -633,10 +633,12 @@ describe("agent companies plugin", () => {
 
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+    const companyId = company?.id;
+    expect(companyId).toBeTruthy();
     const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
       "catalog.prepare-company-import",
       {
-        companyId: company?.id
+        companyId: companyId!
       }
     );
     const filePaths = Object.keys(prepared.source.files).sort();
@@ -740,9 +742,12 @@ describe("agent companies plugin", () => {
 
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+      const companyId = company?.id;
+
+      expect(companyId).toBeTruthy();
 
       await harness.performAction<CatalogPreparedCompanyImport>("catalog.prepare-company-import", {
-        companyId: company?.id,
+        companyId: companyId!,
         paperclipApiBase: "https://evil.example"
       });
 
