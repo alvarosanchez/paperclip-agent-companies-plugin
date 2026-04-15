@@ -1,119 +1,123 @@
 # Agent Companies Plugin
 
-Paperclip plugin for discovering Agent Companies packages inside git repositories, importing selected companies into Paperclip, and keeping imported companies in sync.
+[![CI](https://img.shields.io/github/actions/workflow/status/alvarosanchez/paperclip-agent-companies-plugin/ci.yml?branch=main&label=ci)](https://github.com/alvarosanchez/paperclip-agent-companies-plugin/actions/workflows/ci.yml)
+[![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![pnpm 10](https://img.shields.io/badge/pnpm-10-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-## MVP Scope
+Discover Agent Company packages in git repositories, inspect their contents inside Paperclip, import them into new Paperclip companies, and keep imported companies in sync over time.
 
-This version focuses on repository discovery, import, and post-import sync:
+## What You Get
 
-- preloads `https://github.com/paperclipai/companies`
-- lets operators add more public repos with either `owner/repo` shorthand or full URLs, plus local git checkouts
-- scans each repository for `COMPANY.md` manifests with `schema: agentcompanies/v1`
-- inventories each discovered company's `agents`, `projects`, `tasks`, `issues`, and `skills`
-- lists every discovered company with its source repository and relative manifest path
-- opens a modal from each company row so operators can inspect the discovered contents without crowding the settings page, using a left-hand item navigator and a right-hand rendered markdown preview with its own scroll region
-- lets operators import one discovered company at a time into a new Paperclip company after entering the target company name in a compact modal
-- reads optional `metadata.paperclip.agentIcon` hints from agent `AGENTS.md` frontmatter and merges supported icons into the inline Paperclip extension payload before import or sync, while falling back to the host default for unknown icon ids
-- tracks which discovered companies have already been imported so the same source package syncs back into the existing Paperclip company instead of creating duplicates
-- enables daily auto-sync by default after import, persists the last sync timestamps in plugin state, and re-checks overdue imports after scheduled runs or instance restarts
-- lets operators run `Sync now` manually and disable or re-enable daily auto-sync per imported company
-- syncs imported companies back into Paperclip by overwriting existing content by default
-- persists the shared discovery catalog across Paperclip restarts until an operator rescans
-- lets operators remove any source, including the preloaded default repository
+- Repository discovery from GitHub shorthand (`owner/repo`), full git URLs, or local checkouts
+- Automatic detection of `COMPANY.md` manifests with `schema: agentcompanies/v1`
+- A hosted Paperclip settings page for browsing repositories and discovered companies
+- Inline company import into a new Paperclip company
+- Manual sync plus daily background auto-sync for imported companies
+- Optional `metadata.paperclip.agentIcon` support for agent icon hints
+- A preloaded default catalog source: `https://github.com/paperclipai/companies`
 
-## Plugin Surface
+## Requirements
 
-- `src/manifest.ts`
-  - registers a custom `settingsPage`
-  - declares `instance.settings.register`, `plugin.state.read`, `plugin.state.write`, `jobs.schedule`, `http.outbound`, and `ui.page.register`
-  - schedules a daily `catalog-auto-sync` job that checks imported companies for overdue sync runs
-- `src/worker.ts`
-  - stores the shared catalog in instance-scoped plugin state
-  - auto-scans the preloaded repo only on the first read of a brand-new instance catalog
-  - scans newly added repos immediately
-  - inventories structured company manifests for `agents`, `projects`, `tasks`, `issues`, and `skills`
-  - packages any discovered company into an inline Paperclip portability source so imports work for both GitHub repositories and local git checkouts
-  - translates supported `metadata.paperclip.agentIcon` hints from agent `AGENTS.md` frontmatter into the inline `.paperclip.yaml` portability extension, without overwriting any explicit extension icon already present
-  - tracks imported companies, their last sync timestamps, current sync status, auto-sync preference, and default overwrite collision strategy in persisted plugin state
-  - bounds inline import payloads by file count, per-file size, and encoded payload size so oversized packages fail with actionable errors instead of overwhelming the bridge
-  - keeps persisted discoveries across restarts and only rescans when an operator triggers `Scan` or `Scan all`
-  - reuses the local OS user's git config and credential helpers when the worker clones a repository
-  - syncs imported companies back into their existing Paperclip company by rescanning the source package, rebuilding an inline import payload, and calling the full Paperclip company import route with overwrite collisions
-  - runs due auto-syncs from the daily job and from a short delayed startup sweep so frequently restarted instances still respect the once-per-day cadence
-  - preserves per-repository scan errors inline instead of failing the whole catalog
-- `src/ui/index.tsx`
-  - renders the hosted settings page for source management and company listing
-  - opens a company-details modal with per-section counts, a left-hand item navigator that shows any discovered agent icon hints, and a rendered markdown preview for the selected file
-  - opens an import modal from the company list or details view, collects the new company name, and submits the import through the Paperclip host API
-  - switches imported companies from `Import` to `Sync now`, shows per-company sync summaries and failures, and surfaces a daily auto-sync checkbox with overwrite-mode messaging
+- Node.js 20 or newer
+- A Paperclip instance with plugin support
+- `git` available in the plugin worker environment for remote repositories
+- Access to any private repositories you want to scan
+
+## Install
+
+Install the published package into Paperclip:
+
+```bash
+paperclipai plugin install paperclip-agent-companies-plugin
+```
+
+Pin a specific npm version if needed:
+
+```bash
+paperclipai plugin install paperclip-agent-companies-plugin --version <version>
+```
+
+Install from a local checkout during development:
+
+```bash
+paperclipai plugin install --local .
+```
+
+## Quick Start
+
+1. Open **Installed Plugins** in Paperclip.
+2. Open **Agent Companies Plugin**.
+3. Add a repository source with `owner/repo`, a full repository URL, or a local checkout path.
+4. Review discovered companies and open **View contents** to inspect agents, projects, tasks, issues, and skills.
+5. Click **Import** to create a new Paperclip company from a discovered package.
+6. Use **Sync now** when the source changes, or leave **Daily auto-sync** enabled to keep imports current.
+
+## Package Expectations
+
+A repository becomes discoverable when it contains a `COMPANY.md` manifest whose frontmatter includes:
+
+```yaml
+schema: agentcompanies/v1
+name: Example Company
+slug: example-company
+version: 1.0.0
+```
+
+The plugin inventories structured content from these conventional locations when present:
+
+- `agents/`
+- `projects/`
+- `tasks/`
+- `issues/`
+- `skills/`
+
+During import, the plugin packages the company directory as an inline Paperclip source with these guardrails:
+
+- Maximum 250 files per imported company
+- Maximum 1 MiB per file
+- Maximum 8 MiB total encoded payload
+
+## Sync Behavior
+
+- The plugin records the imported source version from `COMPANY.md`.
+- Imported companies default to daily auto-sync.
+- Manual sync is available whenever the source version changes or cannot be compared safely.
+- Sync uses overwrite mode by default so the imported Paperclip company stays aligned with the source package.
+
+## Security And Privacy
+
+- Remote repositories are cloned with `git` into temporary checkouts.
+- For private repositories, the worker reuses your existing local git credential helpers when available.
+- Local checkout paths are read from the Paperclip host machine, so only trusted operators should add local paths.
+- Inline imports intentionally skip common secret-bearing files such as `.env*`, `.npmrc`, `.git-credentials`, `.netrc`, and files inside `.ssh/`, `.aws/`, or `.gnupg/`.
+- The plugin stores catalog and sync metadata in Paperclip plugin state.
+
+The manifest currently requests these Paperclip capabilities:
+
+- `instance.settings.register`
+- `plugin.state.read`
+- `plugin.state.write`
+- `jobs.schedule`
+- `http.outbound`
+- `ui.page.register`
 
 ## Development
 
+From the repository root:
+
 ```bash
 pnpm install
-pnpm dev
-pnpm dev:ui
-pnpm test
-pnpm test:e2e
-```
-
-## Install Into Paperclip
-
-```bash
-curl -X POST http://127.0.0.1:3100/api/plugins/install \
-  -H "Content-Type: application/json" \
-  -d '{"packageName":"/Users/alvaro/Dev/alvarosanchez/paperclip-agent-companies-plugin","isLocalPath":true}'
-```
-
-## Verification
-
-Run the smallest relevant scope first:
-
-```bash
 pnpm typecheck
 pnpm test
 pnpm build
 ```
 
-GitHub Actions runs the same verification sequence on pushes to `main` and on pull requests.
-Publishing a GitHub release with a semver tag such as `v0.1.0` runs the npm release workflow and stamps the published package version from that tag.
+Additional verification commands:
 
-Use these when the hosted flow changes:
+- `pnpm test:e2e` for the hosted Paperclip smoke flow
+- `pnpm verify:manual` for an interactive local verification run
 
-- `pnpm test:e2e`
-  - builds the plugin
-  - boots a disposable Paperclip instance
-  - installs the plugin
-  - opens Installed Plugins, enters the plugin settings surface, checks the Add repository button contrast, adds a disposable local fixture repo, imports the discovered company into a new Paperclip company, verifies the imported row starts in an `Up to date` state with daily auto-sync enabled, bumps the source version and rescans until `Sync now` becomes available, runs a manual sync, and confirms the company-details modal renders the item navigator, agent icons, markdown preview, and independent preview scrolling
-- `pnpm verify:manual`
-  - builds the plugin
-  - boots a disposable or persistent Paperclip instance
-  - installs the plugin
-  - preconfigures the manual catalog with `https://github.com/alvarosanchez/micronaut-agent-company` instead of the default `paperclipai/companies` source
-  - opens Installed Plugins in your browser for visual inspection of import plus sync controls
+## License
 
-The smoke test writes the latest screenshot and page snapshot metadata to `tests/e2e/results/`.
-
-## Manual Verification Checklist
-
-After `pnpm verify:manual`:
-
-1. Open the installed plugin entry for `Agent Companies Plugin`.
-2. Confirm the preloaded `https://github.com/alvarosanchez/micronaut-agent-company` source is visible.
-3. Confirm the settings page lists discovered companies from that source.
-4. Add another repository with `owner/repo`, a full repository URL, or a local git checkout and verify it scans immediately.
-   GitHub repositories that your local git setup can already access should scan without an auth prompt; inaccessible repos should keep the error inline on the source card.
-   Confirm the `Add repository` button keeps readable contrast when focused or hovered.
-5. Click `Import` on a discovered company, enter a new Paperclip company name in the modal, submit it, and confirm the success message summarizes the import outcome, offers an `Open dashboard` link for the new company, and notes that daily auto-sync is enabled with overwrite mode.
-6. Confirm the imported company now shows a disabled `Up to date` action, a checked `Daily auto-sync` toggle, and an up-to-date summary instead of another import action.
-7. Bump the source company version, use `Scan`, `Rescan`, or `Scan all`, and confirm the action switches to `Sync now`.
-8. Click `Sync now` and confirm the success message summarizes the sync outcome for the existing Paperclip company without listing overwrite-mode warnings for replaced agents, skills, or projects.
-9. Toggle `Daily auto-sync` off and back on again, confirming the checkbox state and status summary update immediately.
-10. Confirm the imported company appears in Paperclip with the expected agents, skills, projects, and issues from the source package.
-11. Open `View contents` on a discovered company and confirm the modal shows the expected `agents`, `projects`, `tasks`, `issues`, and `skills` sections in the left column, including any discovered agent icon hints beside agent names, then click an item and confirm the rendered markdown preview updates on the right while the preview pane scrolls independently from the dialog shell.
-12. Restart the same Paperclip state directory and confirm the discovered catalog and imported sync settings return without a fresh scan. If an imported company has gone more than a day without syncing, confirm a restart still allows the worker to pick up the overdue auto-sync sweep.
-13. Use `Scan`, `Rescan`, or `Scan all` to pull source updates manually.
-14. Remove a source and confirm it disappears without reappearing on reload.
-
-Set `PAPERCLIP_E2E_PORT` or `PAPERCLIP_E2E_DB_PORT` if you need fixed ports for disposable runs.
-Set `PAPERCLIP_E2E_STATE_DIR` before `pnpm verify:manual` if you want to preserve the Paperclip state directory between runs.
+[MIT](./LICENSE)

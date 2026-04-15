@@ -6,8 +6,19 @@ const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
 
 function withPlugins(config) {
   if (!config) return null;
+  const output = Array.isArray(config.output)
+    ? config.output.map((entry) => ({
+        ...entry,
+        sourcemap: false
+      }))
+    : {
+        ...(config.output ?? {}),
+        sourcemap: false
+      };
+
   return {
     ...config,
+    output,
     plugins: [
       nodeResolve({
         extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs"]
@@ -26,8 +37,7 @@ export default [
     input: "src/catalog.ts",
     output: {
       file: "dist/catalog.js",
-      format: "es",
-      sourcemap: true
+      format: "es"
     }
   }),
   withPlugins(presets.rollup.manifest),

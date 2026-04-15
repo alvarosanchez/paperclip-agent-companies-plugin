@@ -597,6 +597,57 @@ describe("agent companies plugin", () => {
     expect(typeof prepared.source.files["skills/repo-audit/assets/icon.svg"]).toBe("string");
   });
 
+  it("omits common secret-bearing files from inline import sources", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await mkdir(join(repositoryPath, "alpha", "docs"), { recursive: true });
+    await mkdir(join(repositoryPath, "alpha", ".ssh"), { recursive: true });
+    await writeFile(join(repositoryPath, "alpha", "docs", "overview.md"), "# Overview\n");
+    await writeFile(join(repositoryPath, "alpha", ".env.production"), "TOKEN=top-secret\n");
+    await writeFile(
+      join(repositoryPath, "alpha", ".git-credentials"),
+      "https://token:x-oauth-basic@github.com\n"
+    );
+    await writeFile(
+      join(repositoryPath, "alpha", ".npmrc"),
+      "//registry.npmjs.org/:_authToken=top-secret\n"
+    );
+    await writeFile(join(repositoryPath, "alpha", ".ssh", "id_ed25519"), "PRIVATE KEY\n");
+
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:10.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id
+      }
+    );
+    const filePaths = Object.keys(prepared.source.files).sort();
+
+    expect(filePaths).toContain("docs/overview.md");
+    expect(filePaths).not.toContain(".env.production");
+    expect(filePaths).not.toContain(".git-credentials");
+    expect(filePaths).not.toContain(".npmrc");
+    expect(filePaths).not.toContain(".ssh/id_ed25519");
+  });
+
   it("merges metadata.paperclip.agentIcon into the inline Paperclip extension", async () => {
     const repositoryPath = await createRepositoryFixture();
     await addPaperclipAgentIconFixture(repositoryPath);
@@ -638,6 +689,80 @@ describe("agent companies plugin", () => {
     expect(extension.agents?.ceo?.adapter?.type).toBe("codex_local");
     expect(extension.agents?.reviewer?.icon).toBe("bot");
     expect(extension.agents?.architect?.icon).toBeUndefined();
+  });
+
+  it("does not retarget authenticated Paperclip requests from action payload api bases", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addPaperclipAgentIconFixture(repositoryPath);
+
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; authorization: string | null }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-secret";
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const headers = new Headers(init?.headers);
+      fetchRequests.push({
+        url,
+        authorization: headers.get("authorization")
+      });
+
+      return new Response("- crown\n- bot\n", {
+        status: 200,
+        headers: {
+          "content-type": "text/plain"
+        }
+      });
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:22:20.000Z"
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction<CatalogPreparedCompanyImport>("catalog.prepare-company-import", {
+        companyId: company?.id,
+        paperclipApiBase: "https://evil.example"
+      });
+
+      expect(fetchRequests).toHaveLength(1);
+      expect(fetchRequests[0]?.url).toBe("http://127.0.0.1:3210/llms/agent-icons.txt");
+      expect(fetchRequests[0]?.authorization).toBe("Bearer paperclip-secret");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
   });
 
   it("rejects inline import sources with oversized files", async () => {

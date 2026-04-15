@@ -4,6 +4,7 @@ import { createPluginBundlerPresets } from "@paperclipai/plugin-sdk/bundlers";
 
 const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
 const watch = process.argv.includes("--watch");
+const sourcemap = watch;
 const yamlBrowserEntry = fileURLToPath(new URL("./node_modules/yaml/browser/index.js", import.meta.url));
 
 const catalogCtx = await esbuild.context({
@@ -12,19 +13,26 @@ const catalogCtx = await esbuild.context({
   format: "esm",
   platform: "neutral",
   target: "es2022",
-  sourcemap: true,
+  sourcemap,
   bundle: false,
   tsconfig: "./tsconfig.json"
 });
 const workerCtx = await esbuild.context({
   ...presets.esbuild.worker,
+  sourcemap,
   alias: {
     ...(presets.esbuild.worker.alias ?? {}),
     yaml: yamlBrowserEntry
   }
 });
-const manifestCtx = await esbuild.context(presets.esbuild.manifest);
-const uiCtx = await esbuild.context(presets.esbuild.ui);
+const manifestCtx = await esbuild.context({
+  ...presets.esbuild.manifest,
+  sourcemap
+});
+const uiCtx = await esbuild.context({
+  ...presets.esbuild.ui,
+  sourcemap
+});
 
 if (watch) {
   await Promise.all([catalogCtx.watch(), workerCtx.watch(), manifestCtx.watch(), uiCtx.watch()]);
