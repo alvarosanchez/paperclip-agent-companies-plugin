@@ -4,6 +4,7 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { definePlugin, runWorker, type PluginContext, type ScopeKey } from "@paperclipai/plugin-sdk";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   AGENT_COMPANIES_SCHEMA,
   buildCatalogSnapshot,
@@ -104,6 +105,52 @@ const MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const AUTO_SYNC_JOB_KEY = "catalog-auto-sync";
 const DEFAULT_STARTUP_AUTO_SYNC_DELAY_MS = 5000;
 const STALE_SYNC_TIMEOUT_MS = 30 * 60 * 1000;
+const PAPERCLIP_EXTENSION_SCHEMA = "paperclip/v1";
+const PAPERCLIP_AGENT_ICONS_ROUTE = "/llms/agent-icons.txt";
+const PAPERCLIP_EXTENSION_FILE_NAMES = [".paperclip.yaml", ".paperclip.yml"] as const;
+const DEFAULT_SUPPORTED_PAPERCLIP_AGENT_ICONS = new Set([
+  "atom",
+  "bot",
+  "brain",
+  "bug",
+  "circuit-board",
+  "code",
+  "cog",
+  "cpu",
+  "crown",
+  "database",
+  "eye",
+  "file-code",
+  "fingerprint",
+  "flame",
+  "gem",
+  "git-branch",
+  "globe",
+  "hammer",
+  "heart",
+  "hexagon",
+  "lightbulb",
+  "lock",
+  "mail",
+  "message-square",
+  "microscope",
+  "package",
+  "pentagon",
+  "puzzle",
+  "radar",
+  "rocket",
+  "search",
+  "shield",
+  "sparkles",
+  "star",
+  "swords",
+  "target",
+  "telescope",
+  "terminal",
+  "wand",
+  "wrench",
+  "zap"
+]);
 
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
 type SyncImportExecutor = (
@@ -143,6 +190,18 @@ interface PortableCatalogFileBuildResult {
   entry: PortableCatalogFileEntry;
   sourceBytes: number;
   payloadBytes: number;
+}
+
+interface PortableCatalogFileSummary {
+  fileCount: number;
+  textFileCount: number;
+  binaryFileCount: number;
+  totalPayloadBytes: number;
+}
+
+interface PortableCatalogFileAugmentationResult {
+  files: Record<string, PortableCatalogFileEntry>;
+  sourceByteDelta: number;
 }
 
 interface SyncImportRequest {
@@ -688,6 +747,280 @@ function splitMarkdownDocument(content: string): {
   };
 }
 
+function parseYamlObject(content: string): Record<string, unknown> | null {
+  try {
+    const parsed = parseYaml(content);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function getPaperclipAgentIconHint(frontmatter: Record<string, unknown> | null): string | null {
+  if (!frontmatter) {
+    return null;
+  }
+
+  const metadata = isRecord(frontmatter.metadata) ? frontmatter.metadata : null;
+  const paperclip = metadata && isRecord(metadata.paperclip) ? metadata.paperclip : null;
+  return asNonEmptyString(paperclip?.agentIcon);
+}
+
+function normalizePaperclipAgentSlug(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+
+  return normalized || null;
+}
+
+function summarizePortableCatalogFiles(
+  files: Record<string, PortableCatalogFileEntry>
+): PortableCatalogFileSummary {
+  let textFileCount = 0;
+  let binaryFileCount = 0;
+  let totalPayloadBytes = 0;
+
+  for (const entry of Object.values(files)) {
+    if (typeof entry === "string") {
+      textFileCount += 1;
+      totalPayloadBytes += Buffer.byteLength(entry, "utf8");
+      continue;
+    }
+
+    binaryFileCount += 1;
+    totalPayloadBytes += Buffer.byteLength(entry.data, "utf8");
+  }
+
+  return {
+    fileCount: Object.keys(files).length,
+    textFileCount,
+    binaryFileCount,
+    totalPayloadBytes
+  };
+}
+
+function parseSupportedPaperclipAgentIcons(content: string): Set<string> {
+  const icons = new Set<string>();
+
+  for (const line of content.split(/\r?\n/u)) {
+    const match = /^\s*-\s+([A-Za-z0-9-]+)\s*$/u.exec(line);
+    if (!match?.[1]) {
+      continue;
+    }
+
+    icons.add(match[1]);
+  }
+
+  return icons;
+}
+
+async function resolveSupportedPaperclipAgentIcons(
+  preferredApiBase: string | null
+): Promise<Set<string>> {
+  const fallbackIcons = new Set(DEFAULT_SUPPORTED_PAPERCLIP_AGENT_ICONS);
+  const apiBase = preferredApiBase?.trim() || process.env.PAPERCLIP_API_URL?.trim() || null;
+
+  if (!apiBase) {
+    return fallbackIcons;
+  }
+
+  try {
+    const connection = await resolvePaperclipApiConnection(apiBase);
+    const headers: Record<string, string> = {
+      accept: "text/plain"
+    };
+
+    if (connection.apiKey) {
+      headers.authorization = `Bearer ${connection.apiKey}`;
+    }
+
+    const response = await fetch(`${connection.apiBase}${PAPERCLIP_AGENT_ICONS_ROUTE}`, {
+      headers
+    });
+    if (!response.ok) {
+      return fallbackIcons;
+    }
+
+    const icons = parseSupportedPaperclipAgentIcons(await response.text());
+    return icons.size > 0 ? icons : fallbackIcons;
+  } catch {
+    return fallbackIcons;
+  }
+}
+
+function findPortablePaperclipExtensionPath(
+  files: Record<string, PortableCatalogFileEntry>
+): string | null {
+  for (const fileName of PAPERCLIP_EXTENSION_FILE_NAMES) {
+    if (typeof files[fileName] === "string") {
+      return fileName;
+    }
+  }
+
+  for (const fileName of PAPERCLIP_EXTENSION_FILE_NAMES) {
+    if (fileName in files) {
+      return fileName;
+    }
+  }
+
+  return null;
+}
+
+async function discoverPaperclipAgentIcons(
+  companyRoot: string
+): Promise<Map<string, { icon: string; path: string }>> {
+  const icons = new Map<string, { icon: string; path: string }>();
+  const manifestPaths = await findCompanyContentManifestPaths(companyRoot);
+
+  for (const manifestPath of manifestPaths) {
+    const relativePath = normalizeCompanyContentPath(toPosixPath(relative(companyRoot, manifestPath)));
+    if (!relativePath || classifyCompanyContentPath(relativePath) !== "agents") {
+      continue;
+    }
+
+    let content;
+    try {
+      content = await readFile(manifestPath, "utf8");
+    } catch (error) {
+      if (
+        isRecord(error) &&
+        (error.code === "ENOENT" || error.code === "EISDIR" || error.code === "EACCES")
+      ) {
+        continue;
+      }
+
+      throw error;
+    }
+
+    const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
+    if (!frontmatterMatch) {
+      continue;
+    }
+
+    const frontmatter = parseYamlObject(frontmatterMatch[1] ?? "");
+    if (!frontmatter) {
+      continue;
+    }
+
+    const icon = getPaperclipAgentIconHint(frontmatter);
+    const slug =
+      normalizePaperclipAgentSlug(frontmatter.slug) ??
+      normalizePaperclipAgentSlug(relativePath.split("/").filter(Boolean).at(-2));
+
+    if (!slug || !icon) {
+      continue;
+    }
+
+    icons.set(slug, {
+      icon,
+      path: relativePath
+    });
+  }
+
+  return icons;
+}
+
+async function applyPaperclipAgentIconsToPortableFiles(
+  ctx: PluginContext,
+  companyRoot: string,
+  files: Record<string, PortableCatalogFileEntry>,
+  paperclipApiBase: string | null
+): Promise<PortableCatalogFileAugmentationResult> {
+  const requestedIcons = await discoverPaperclipAgentIcons(companyRoot);
+  if (requestedIcons.size === 0) {
+    return {
+      files,
+      sourceByteDelta: 0
+    };
+  }
+
+  const supportedIcons = await resolveSupportedPaperclipAgentIcons(paperclipApiBase);
+  const extensionPath = findPortablePaperclipExtensionPath(files) ?? PAPERCLIP_EXTENSION_FILE_NAMES[0];
+  const existingExtensionEntry = files[extensionPath];
+
+  if (existingExtensionEntry && typeof existingExtensionEntry !== "string") {
+    ctx.logger.warn("Skipped Paperclip agent icon metadata because the extension file is not text", {
+      extensionPath
+    });
+    return {
+      files,
+      sourceByteDelta: 0
+    };
+  }
+
+  const existingExtension =
+    typeof existingExtensionEntry === "string"
+      ? parseYamlObject(existingExtensionEntry)
+      : {};
+  if (typeof existingExtensionEntry === "string" && !existingExtension) {
+    ctx.logger.warn("Skipped Paperclip agent icon metadata because the extension file is not valid YAML", {
+      extensionPath
+    });
+    return {
+      files,
+      sourceByteDelta: 0
+    };
+  }
+
+  const nextExtension: Record<string, unknown> = {
+    ...(existingExtension ?? {})
+  };
+  const nextAgents = isRecord(nextExtension.agents) ? { ...nextExtension.agents } : {};
+  let didUpdate = false;
+
+  for (const [slug, request] of requestedIcons.entries()) {
+    if (!supportedIcons.has(request.icon)) {
+      ctx.logger.info("Skipped unsupported Paperclip agent icon from company metadata", {
+        agentSlug: slug,
+        agentPath: request.path,
+        requestedIcon: request.icon
+      });
+      continue;
+    }
+
+    const existingAgent = isRecord(nextAgents[slug]) ? { ...nextAgents[slug] } : {};
+    if (asNonEmptyString(existingAgent.icon)) {
+      continue;
+    }
+
+    existingAgent.icon = request.icon;
+    nextAgents[slug] = existingAgent;
+    didUpdate = true;
+  }
+
+  if (!didUpdate) {
+    return {
+      files,
+      sourceByteDelta: 0
+    };
+  }
+
+  if (!asNonEmptyString(nextExtension.schema)) {
+    nextExtension.schema = PAPERCLIP_EXTENSION_SCHEMA;
+  }
+  nextExtension.agents = nextAgents;
+
+  const nextExtensionContent = `${stringifyYaml(nextExtension).trimEnd()}\n`;
+  const nextFiles = {
+    ...files,
+    [extensionPath]: nextExtensionContent
+  };
+  const previousSourceBytes =
+    typeof existingExtensionEntry === "string" ? Buffer.byteLength(existingExtensionEntry, "utf8") : 0;
+
+  return {
+    files: nextFiles,
+    sourceByteDelta: Buffer.byteLength(nextExtensionContent, "utf8") - previousSourceBytes
+  };
+}
+
 function resolveRepositoryRelativePath(repositoryRoot: string, relativePath: string): string {
   const normalizedPath = normalizeCompanyContentPath(relativePath);
   if (!normalizedPath) {
@@ -1228,16 +1561,22 @@ async function parseCompanyContentItem(
 
   const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
   const frontmatter = frontmatterMatch?.[1] ?? null;
+  const parsedFrontmatter = frontmatter ? parseYamlObject(frontmatter) : null;
   const name =
+    asNonEmptyString(parsedFrontmatter?.name) ??
+    asNonEmptyString(parsedFrontmatter?.title) ??
     (frontmatter ? getTopLevelScalar(frontmatter, "name") : null) ??
     (frontmatter ? getTopLevelScalar(frontmatter, "title") : null) ??
     deriveCompanyContentName(relativePath);
+  const paperclipAgentIcon =
+    kind === "agents" ? getPaperclipAgentIconHint(parsedFrontmatter) : null;
 
   return {
     kind,
     item: {
       name,
-      path: relativePath
+      path: relativePath,
+      ...(paperclipAgentIcon ? { paperclipAgentIcon } : {})
     }
   };
 }
@@ -1621,6 +1960,7 @@ async function buildCatalogCompanyImportSource(
   companyId: string,
   options: {
     allowImported?: boolean;
+    paperclipApiBase?: string | null;
   } = {}
 ): Promise<CatalogPreparedCompanyImport> {
   const state = await loadCatalogState(ctx);
@@ -1651,8 +1991,6 @@ async function buildCatalogCompanyImportSource(
   }
 
   const files: Record<string, PortableCatalogFileEntry> = {};
-  let textFileCount = 0;
-  let binaryFileCount = 0;
   let totalSourceBytes = 0;
   let totalPayloadBytes = 0;
 
@@ -1669,21 +2007,36 @@ async function buildCatalogCompanyImportSource(
     totalSourceBytes += fileEntry.sourceBytes;
     totalPayloadBytes = nextTotalPayloadBytes;
     files[filePath] = fileEntry.entry;
+  }
 
-    if (typeof fileEntry.entry === "string") {
-      textFileCount += 1;
-    } else {
-      binaryFileCount += 1;
-    }
+  const iconAugmentation = await applyPaperclipAgentIconsToPortableFiles(
+    ctx,
+    companyRoot,
+    files,
+    options.paperclipApiBase ?? null
+  );
+  const portableFileSummary = summarizePortableCatalogFiles(iconAugmentation.files);
+  totalSourceBytes += iconAugmentation.sourceByteDelta;
+
+  if (portableFileSummary.fileCount > MAX_INLINE_IMPORT_FILES) {
+    throw new Error(
+      `"${match.company.name}" exceeds the inline import file limit of ${MAX_INLINE_IMPORT_FILES} files once Paperclip metadata is included (${portableFileSummary.fileCount} prepared). Remove extra files or trim the package before importing.`
+    );
+  }
+
+  if (portableFileSummary.totalPayloadBytes > MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES) {
+    throw new Error(
+      `"${match.company.name}" exceeds the inline import payload limit of ${formatByteCount(MAX_INLINE_IMPORT_TOTAL_PAYLOAD_BYTES)} once Paperclip metadata is included (${formatByteCount(portableFileSummary.totalPayloadBytes)} after encoding). Remove large assets or trim the package before importing.`
+    );
   }
 
   ctx.logger.info("Prepared inline company import source", {
     companyId: match.company.id,
     companyName: match.company.name,
     repositoryId: match.repository.id,
-    fileCount: filePaths.length,
+    fileCount: portableFileSummary.fileCount,
     totalSourceBytes,
-    totalPayloadBytes
+    totalPayloadBytes: portableFileSummary.totalPayloadBytes
   });
 
   return {
@@ -1691,12 +2044,12 @@ async function buildCatalogCompanyImportSource(
     companyName: match.company.name,
     source: {
       type: "inline",
-      files
+      files: iconAugmentation.files
     },
     stats: {
-      fileCount: filePaths.length,
-      textFileCount,
-      binaryFileCount
+      fileCount: portableFileSummary.fileCount,
+      textFileCount: portableFileSummary.textFileCount,
+      binaryFileCount: portableFileSummary.binaryFileCount
     }
   };
 }
@@ -1866,7 +2219,8 @@ async function runCatalogCompanySync(
       }
 
       const preparedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId, {
-        allowImported: true
+        allowImported: true,
+        paperclipApiBase: currentState.paperclipApiBase
       });
       const importResult = await options.syncImport(ctx, {
         sourceCompanyId,
@@ -2044,7 +2398,10 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
       ctx.actions.register("catalog.prepare-company-import", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = getRequiredString(params, "companyId");
-        return buildCatalogCompanyImportSource(ctx, companyId);
+        const paperclipApiBase = asNonEmptyString(params.paperclipApiBase);
+        return buildCatalogCompanyImportSource(ctx, companyId, {
+          paperclipApiBase
+        });
       });
 
       ctx.actions.register("catalog.record-company-import", async (rawParams) => {

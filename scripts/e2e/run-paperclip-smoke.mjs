@@ -361,6 +361,9 @@ Fixture company for Paperclip smoke verification.
     `---
 name: CEO
 title: Chief Executive Officer
+metadata:
+  paperclip:
+    agentIcon: crown
 ---
 
 Lead the import effort and coordinate the team.
@@ -707,6 +710,10 @@ async function main() {
     const detailsNav = detailsModal.locator('[data-testid="company-details-nav"]');
 
     await detailsModal.getByText('Modal Demo Company', { exact: true }).waitFor({ timeout: 120000 });
+    await detailsNav
+      .locator('[data-testid="company-details-item-icon"][data-icon-name="crown"]')
+      .first()
+      .waitFor({ timeout: 120000 });
     await detailsPreview.getByRole('heading', { name: 'CEO', exact: true }).waitFor({ timeout: 120000 });
     await detailsPreview.getByText('Lead the import effort and coordinate the team.', { exact: true }).waitFor({ timeout: 120000 });
 

@@ -13,6 +13,7 @@ This version focuses on repository discovery, import, and post-import sync:
 - lists every discovered company with its source repository and relative manifest path
 - opens a modal from each company row so operators can inspect the discovered contents without crowding the settings page, using a left-hand item navigator and a right-hand rendered markdown preview with its own scroll region
 - lets operators import one discovered company at a time into a new Paperclip company after entering the target company name in a compact modal
+- reads optional `metadata.paperclip.agentIcon` hints from agent `AGENTS.md` frontmatter and merges supported icons into the inline Paperclip extension payload before import or sync, while falling back to the host default for unknown icon ids
 - tracks which discovered companies have already been imported so the same source package syncs back into the existing Paperclip company instead of creating duplicates
 - enables daily auto-sync by default after import, persists the last sync timestamps in plugin state, and re-checks overdue imports after scheduled runs or instance restarts
 - lets operators run `Sync now` manually and disable or re-enable daily auto-sync per imported company
@@ -32,6 +33,7 @@ This version focuses on repository discovery, import, and post-import sync:
   - scans newly added repos immediately
   - inventories structured company manifests for `agents`, `projects`, `tasks`, `issues`, and `skills`
   - packages any discovered company into an inline Paperclip portability source so imports work for both GitHub repositories and local git checkouts
+  - translates supported `metadata.paperclip.agentIcon` hints from agent `AGENTS.md` frontmatter into the inline `.paperclip.yaml` portability extension, without overwriting any explicit extension icon already present
   - tracks imported companies, their last sync timestamps, current sync status, auto-sync preference, and default overwrite collision strategy in persisted plugin state
   - bounds inline import payloads by file count, per-file size, and encoded payload size so oversized packages fail with actionable errors instead of overwhelming the bridge
   - keeps persisted discoveries across restarts and only rescans when an operator triggers `Scan` or `Scan all`
@@ -41,7 +43,7 @@ This version focuses on repository discovery, import, and post-import sync:
   - preserves per-repository scan errors inline instead of failing the whole catalog
 - `src/ui/index.tsx`
   - renders the hosted settings page for source management and company listing
-  - opens a company-details modal with per-section counts, a left-hand item navigator, and a rendered markdown preview for the selected file
+  - opens a company-details modal with per-section counts, a left-hand item navigator that shows any discovered agent icon hints, and a rendered markdown preview for the selected file
   - opens an import modal from the company list or details view, collects the new company name, and submits the import through the Paperclip host API
   - switches imported companies from `Import` to `Sync now`, shows per-company sync summaries and failures, and surfaces a daily auto-sync checkbox with overwrite-mode messaging
 
@@ -82,7 +84,7 @@ Use these when the hosted flow changes:
   - builds the plugin
   - boots a disposable Paperclip instance
   - installs the plugin
-  - opens Installed Plugins, enters the plugin settings surface, checks the Add repository button contrast, adds a disposable local fixture repo, imports the discovered company into a new Paperclip company, verifies the imported row starts in an `Up to date` state with daily auto-sync enabled, bumps the source version and rescans until `Sync now` becomes available, runs a manual sync, and confirms the company-details modal renders the item navigator, markdown preview, and independent preview scrolling
+  - opens Installed Plugins, enters the plugin settings surface, checks the Add repository button contrast, adds a disposable local fixture repo, imports the discovered company into a new Paperclip company, verifies the imported row starts in an `Up to date` state with daily auto-sync enabled, bumps the source version and rescans until `Sync now` becomes available, runs a manual sync, and confirms the company-details modal renders the item navigator, agent icons, markdown preview, and independent preview scrolling
 - `pnpm verify:manual`
   - builds the plugin
   - boots a disposable or persistent Paperclip instance
@@ -108,7 +110,7 @@ After `pnpm verify:manual`:
 8. Click `Sync now` and confirm the success message summarizes the sync outcome for the existing Paperclip company without listing overwrite-mode warnings for replaced agents, skills, or projects.
 9. Toggle `Daily auto-sync` off and back on again, confirming the checkbox state and status summary update immediately.
 10. Confirm the imported company appears in Paperclip with the expected agents, skills, projects, and issues from the source package.
-11. Open `View contents` on a discovered company and confirm the modal shows the expected `agents`, `projects`, `tasks`, `issues`, and `skills` sections in the left column, then click an item and confirm the rendered markdown preview updates on the right while the preview pane scrolls independently from the dialog shell.
+11. Open `View contents` on a discovered company and confirm the modal shows the expected `agents`, `projects`, `tasks`, `issues`, and `skills` sections in the left column, including any discovered agent icon hints beside agent names, then click an item and confirm the rendered markdown preview updates on the right while the preview pane scrolls independently from the dialog shell.
 12. Restart the same Paperclip state directory and confirm the discovered catalog and imported sync settings return without a fresh scan. If an imported company has gone more than a day without syncing, confirm a restart still allows the worker to pick up the overdue auto-sync sweep.
 13. Use `Scan`, `Rescan`, or `Scan all` to pull source updates manually.
 14. Remove a source and confirm it disappears without reappearing on reload.

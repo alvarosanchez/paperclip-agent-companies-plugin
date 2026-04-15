@@ -2,6 +2,54 @@ import { useEffect, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  Atom,
+  Bot,
+  Brain,
+  Bug,
+  CircuitBoard,
+  CircleHelp,
+  ClipboardCheck,
+  Code,
+  Cog,
+  Compass,
+  Cpu,
+  Crown,
+  Database,
+  Eye,
+  FileCode,
+  FileText,
+  Fingerprint,
+  Flame,
+  Gem,
+  GitBranch,
+  Globe,
+  Hammer,
+  Heart,
+  Hexagon,
+  Lightbulb,
+  Lock,
+  Mail,
+  MessageSquare,
+  Microscope,
+  Package,
+  Pentagon,
+  Puzzle,
+  Radar,
+  Rocket,
+  Search,
+  SearchCheck,
+  Shield,
+  ShieldCheck,
+  Sparkles,
+  Star,
+  Swords,
+  Target,
+  Telescope,
+  Terminal,
+  Wand,
+  Wrench
+} from "lucide-react";
+import {
   usePluginAction,
   usePluginData,
   type PluginSettingsPageProps
@@ -702,7 +750,35 @@ const PAGE_STYLES = `
   background: var(--ac-info-soft);
 }
 
+.agent-companies-settings__dialog-nav-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-companies-settings__dialog-nav-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: color-mix(in oklab, var(--ac-text-muted) 72%, var(--ac-text));
+}
+
+.agent-companies-settings__dialog-nav-item-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.agent-companies-settings__dialog-nav-button[aria-pressed="true"] .agent-companies-settings__dialog-nav-item-icon {
+  color: color-mix(in oklab, var(--ac-info) 70%, var(--ac-text));
+}
+
 .agent-companies-settings__dialog-nav-item-name {
+  min-width: 0;
   font-size: 12px;
   line-height: 1.4;
   font-weight: 600;
@@ -1016,6 +1092,56 @@ const COMPANY_CONTENT_SECTIONS: Array<{
     plural: "skills"
   }
 ];
+
+type PaperclipAgentIconComponent = typeof Bot;
+
+const PAPERCLIP_AGENT_ICON_COMPONENTS: Record<string, PaperclipAgentIconComponent> = {
+  atom: Atom,
+  bot: Bot,
+  brain: Brain,
+  bug: Bug,
+  "circuit-board": CircuitBoard,
+  "clipboard-check": ClipboardCheck,
+  code: Code,
+  cog: Cog,
+  compass: Compass,
+  cpu: Cpu,
+  crown: Crown,
+  database: Database,
+  eye: Eye,
+  "file-code": FileCode,
+  "file-text": FileText,
+  fingerprint: Fingerprint,
+  flame: Flame,
+  gem: Gem,
+  "git-branch": GitBranch,
+  globe: Globe,
+  hammer: Hammer,
+  heart: Heart,
+  hexagon: Hexagon,
+  lightbulb: Lightbulb,
+  lock: Lock,
+  mail: Mail,
+  "message-square": MessageSquare,
+  microscope: Microscope,
+  package: Package,
+  pentagon: Pentagon,
+  puzzle: Puzzle,
+  radar: Radar,
+  rocket: Rocket,
+  search: Search,
+  "search-check": SearchCheck,
+  shield: Shield,
+  "shield-check": ShieldCheck,
+  sparkles: Sparkles,
+  star: Star,
+  swords: Swords,
+  target: Target,
+  telescope: Telescope,
+  terminal: Terminal,
+  wand: Wand,
+  wrench: Wrench
+};
 
 interface CompanyContentSelection {
   kind: CompanyContentKey;
@@ -1406,6 +1532,35 @@ function findCompanyContentSelection(
   }
 
   return getDefaultCompanyContentSelection(company);
+}
+
+function renderCompanyContentItemIcon(
+  item: CompanyContentItem,
+  kind: CompanyContentKey
+): React.JSX.Element | null {
+  if (kind !== "agents") {
+    return null;
+  }
+
+  const iconName = item.paperclipAgentIcon?.trim().toLowerCase();
+  if (!iconName) {
+    return null;
+  }
+
+  const Icon = PAPERCLIP_AGENT_ICON_COMPONENTS[iconName] ?? CircleHelp;
+
+  return (
+    <span
+      aria-hidden="true"
+      className="agent-companies-settings__dialog-nav-item-icon"
+      data-icon-name={iconName}
+      data-supported={PAPERCLIP_AGENT_ICON_COMPONENTS[iconName] ? "true" : "false"}
+      data-testid="company-details-item-icon"
+      title={iconName}
+    >
+      <Icon aria-hidden="true" size={16} strokeWidth={1.9} />
+    </span>
+  );
 }
 
 function matchesCompanyQuery(company: CatalogCompanySummary, query: string): boolean {
@@ -1869,9 +2024,12 @@ function CompanyDetailsDialog(props: {
                               onClick={() => setSelectedItemPath(item.path)}
                               type="button"
                             >
-                              <span className="agent-companies-settings__dialog-nav-item-name">
-                                {item.name}
-                              </span>
+                              <div className="agent-companies-settings__dialog-nav-item-head">
+                                {renderCompanyContentItemIcon(item, section.key)}
+                                <span className="agent-companies-settings__dialog-nav-item-name">
+                                  {item.name}
+                                </span>
+                              </div>
                               <span className="agent-companies-settings__dialog-nav-item-path">
                                 {item.path}
                               </span>
@@ -2323,7 +2481,8 @@ export function AgentCompaniesSettingsPage({
 
     try {
       const preparedImport = await prepareCompanyImport({
-        companyId: importCompany.id
+        companyId: importCompany.id,
+        paperclipApiBase: getPaperclipApiBase()
       }) as CatalogPreparedCompanyImport;
 
       setImportState({
