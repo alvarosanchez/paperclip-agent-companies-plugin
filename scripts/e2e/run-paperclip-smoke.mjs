@@ -613,6 +613,59 @@ async function main() {
       hasText: 'Modal Demo Company'
     });
     await fixtureCompanyCard.first().waitFor({ timeout: 120000 });
+    const importedCompanyName = 'Imported Modal Demo Company';
+
+    await fixtureCompanyCard.locator('[data-testid="company-import-trigger"]').click();
+
+    const importModal = page.locator('[data-testid="company-import-modal"]');
+    await importModal.waitFor({ timeout: 120000 });
+    await importModal.locator('[data-testid="company-import-name-input"]').fill(importedCompanyName);
+    await importModal.locator('[data-testid="company-import-submit"]').click();
+
+    await page.getByText('Company imported', { exact: true }).waitFor({ timeout: 120000 });
+    await page
+      .getByText(`Imported "Modal Demo Company" as "${importedCompanyName}".`, { exact: true })
+      .waitFor({ timeout: 120000 });
+
+    const companiesAfterImport = await fetchJson(new URL('/api/companies', baseUrl).toString());
+    const importedCompany = Array.isArray(companiesAfterImport)
+      ? companiesAfterImport.find((company) => company?.name === importedCompanyName) ?? null
+      : null;
+    if (!importedCompany) {
+      throw new Error(`Expected imported company "${importedCompanyName}" to exist after import.`);
+    }
+
+    const openDashboardLink = page.locator('[data-testid="import-success-dashboard-link"]');
+    await openDashboardLink.waitFor({ timeout: 120000 });
+    const openDashboardHref = await openDashboardLink.getAttribute('href');
+    if (openDashboardHref !== `/${importedCompany.issuePrefix}/dashboard`) {
+      throw new Error(
+        `Expected imported dashboard link to target /${importedCompany.issuePrefix}/dashboard, received ${openDashboardHref ?? 'null'}.`
+      );
+    }
+
+    const importTrigger = fixtureCompanyCard.locator('[data-testid="company-import-trigger"]');
+    const importTriggerDeadline = Date.now() + 120000;
+    let importTriggerIsDisabled = false;
+    let importTriggerLabel = '';
+
+    while (Date.now() < importTriggerDeadline) {
+      importTriggerLabel = (await importTrigger.textContent())?.trim() ?? '';
+      importTriggerIsDisabled = await importTrigger.isDisabled();
+
+      if (importTriggerIsDisabled && importTriggerLabel === 'Imported') {
+        break;
+      }
+
+      await page.waitForTimeout(250);
+    }
+
+    if (!importTriggerIsDisabled || importTriggerLabel !== 'Imported') {
+      throw new Error(
+        `Expected imported company action to become a disabled "Imported" button, received label "${importTriggerLabel}" (disabled=${importTriggerIsDisabled}).`
+      );
+    }
+
     await fixtureCompanyCard.getByRole('button', { name: 'View contents' }).click();
 
     const detailsModal = page.locator('[data-testid="company-details-modal"]');

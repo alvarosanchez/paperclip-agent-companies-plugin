@@ -15,9 +15,12 @@ const stateRoot = persistentStateRoot ?? await mkdtemp(join(tmpdir(), 'paperclip
 const paperclipHome = join(stateRoot, 'paperclip-home');
 const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-agent-companies-plugin-manual';
+const pluginId = 'paperclip-agent-companies-plugin';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
 const settingsPageHeading = 'Repository Sources';
+const defaultRepositoryUrl = 'https://github.com/paperclipai/companies';
+const manualVerificationRepositoryUrl = 'https://github.com/alvarosanchez/micronaut-agent-company';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const env = {
@@ -147,6 +150,117 @@ async function fetchJson(url, init = {}) {
   }
 
   return body;
+}
+
+function normalizeRepositoryReference(input) {
+  const parsedUrl = new URL(input.trim());
+  parsedUrl.username = '';
+  parsedUrl.password = '';
+  parsedUrl.search = '';
+  parsedUrl.hash = '';
+  parsedUrl.pathname = parsedUrl.pathname.replace(/\/+$/u, '').replace(/\.git$/iu, '');
+  return parsedUrl.toString();
+}
+
+function createRepositoryId(normalizedUrl) {
+  let hash = 2166136261;
+
+  for (let index = 0; index < normalizedUrl.length; index += 1) {
+    hash ^= normalizedUrl.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return `repo-${Math.abs(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+async function waitForPluginReady(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const pluginUrl = new URL(`/api/plugins/${encodeURIComponent(pluginId)}`, baseUrl).toString();
+  let lastError = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const plugin = await fetchJson(pluginUrl);
+      if (plugin?.status === 'ready') {
+        return plugin;
+      }
+
+      if (plugin?.status === 'error') {
+        throw new Error(`Plugin entered error status: ${plugin.error ?? 'unknown error'}`);
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+  }
+
+  const suffix = lastError instanceof Error ? ` ${lastError.message}` : '';
+  throw new Error(`Timed out waiting for plugin ${pluginId} to become ready.${suffix}`);
+}
+
+async function invokePluginBridge(kind, key, params = {}) {
+  const bridgeUrl = new URL(`/api/plugins/${encodeURIComponent(pluginId)}/bridge/${kind}`, baseUrl).toString();
+  const body = await fetchJson(bridgeUrl, {
+    method: 'POST',
+    body: JSON.stringify({
+      key,
+      params
+    })
+  });
+
+  return body?.data ?? null;
+}
+
+async function ensureManualVerificationRepositoryConfigured() {
+  await waitForPluginReady(120000);
+
+  try {
+    await invokePluginBridge('action', 'catalog.add-repository', {
+      url: manualVerificationRepositoryUrl
+    });
+    log(`Added ${manualVerificationRepositoryUrl} to the manual verification catalog.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('That repository has already been added.')) {
+      log(`Manual verification catalog already includes ${manualVerificationRepositoryUrl}.`);
+    } else {
+      throw error;
+    }
+  }
+
+  try {
+    await invokePluginBridge('action', 'catalog.remove-repository', {
+      repositoryId: createRepositoryId(normalizeRepositoryReference(defaultRepositoryUrl))
+    });
+    log(`Removed the default ${defaultRepositoryUrl} source from the manual verification catalog.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('Repository not found.')) {
+      log(`Default ${defaultRepositoryUrl} source was already absent from the manual verification catalog.`);
+    } else {
+      throw error;
+    }
+  }
+
+  const catalog = await invokePluginBridge('data', 'catalog.read');
+  const repositories = Array.isArray(catalog?.repositories) ? catalog.repositories : [];
+  const preferredRepositoryPresent = repositories.some(
+    (repository) => repository?.normalizedUrl === normalizeRepositoryReference(manualVerificationRepositoryUrl)
+  );
+  const defaultRepositoryPresent = repositories.some(
+    (repository) => repository?.normalizedUrl === normalizeRepositoryReference(defaultRepositoryUrl)
+  );
+
+  if (!preferredRepositoryPresent) {
+    throw new Error(`Manual verification repository ${manualVerificationRepositoryUrl} was not present after configuration.`);
+  }
+
+  if (defaultRepositoryPresent) {
+    throw new Error(`Default repository ${defaultRepositoryUrl} is still present after manual verification configuration.`);
+  }
+
+  log(`Manual verification catalog is ready with ${manualVerificationRepositoryUrl}.`);
 }
 
 async function ensureStateRoot() {
@@ -383,6 +497,7 @@ async function main() {
 
   const company = await ensureCompanySeeded();
   await ensurePluginInstalled(configPath);
+  await ensureManualVerificationRepositoryConfigured();
   const manualUrl = new URL(settingsIndexPath, baseUrl).toString();
   await runCommand('open', [manualUrl], { stdio: 'ignore' });
 
@@ -400,8 +515,10 @@ async function main() {
   }
   console.log('The URL has been opened in your default browser.');
   console.log(`Open ${pluginDisplayName} from the installed plugins list.`);
-  console.log(`Confirm that the ${settingsPageHeading} settings page shows the preloaded paperclipai/companies source.`);
-  console.log('Confirm that discovered companies are listed, open View contents on a company, click an item in the left column, and confirm the rendered markdown updates on the right.');
+  console.log(`Confirm that the ${settingsPageHeading} settings page shows the preloaded ${manualVerificationRepositoryUrl} source.`);
+  console.log('Confirm that discovered companies are listed, click Import on one company, enter a new Paperclip company name, and verify the success message summarizes the import, offers an Open dashboard link, and changes the source action to a disabled Imported state.');
+  console.log('Confirm that the imported company appears in Paperclip with the expected agents, skills, projects, and issues.');
+  console.log('Open View contents on a company, click an item in the left column, and confirm the rendered markdown updates on the right.');
   console.log('Press Ctrl+C when you are done inspecting the instance.');
   console.log('');
 
