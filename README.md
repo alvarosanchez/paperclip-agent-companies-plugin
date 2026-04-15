@@ -118,6 +118,10 @@ Additional verification commands:
 - `pnpm test:e2e` for the hosted Paperclip smoke flow
 - `pnpm verify:manual` for an interactive local verification run
 
+## Release Versioning
+
+GitHub release tags are the source of truth for published package versions. The release workflow strips a leading `v`, stamps `package.json` before verification and publish, and then syncs that checked-in version back to the release target branch so repository metadata stays aligned with the published package.
+
 ## License
 
 [MIT](./LICENSE)
