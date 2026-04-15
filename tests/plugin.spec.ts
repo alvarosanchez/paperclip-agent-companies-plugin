@@ -7,10 +7,12 @@ import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import {
   AGENT_COMPANIES_SCHEMA,
+  DEFAULT_SYNC_COLLISION_STRATEGY,
   CATALOG_STATE_KEY,
   DEFAULT_REPOSITORY_URL,
   type CatalogCompanyContentDetail,
   type CatalogPreparedCompanyImport,
+  type CatalogCompanySyncResult,
   createRepositorySource,
   createEmptyCompanyContents,
   normalizeCatalogState,
@@ -196,6 +198,26 @@ Ignored fixture company.
   return root;
 }
 
+async function setFixtureRepositoryVersion(
+  repositoryRoot: string,
+  version: string,
+  companyName = "Alpha Labs"
+): Promise<void> {
+  await writeFile(
+    join(repositoryRoot, "alpha", "COMPANY.md"),
+    `---
+name: ${companyName}
+description: Discovery fixture for ${companyName}
+slug: alpha-labs
+schema: ${AGENT_COMPANIES_SCHEMA}
+version: ${version}
+---
+
+${companyName} fixture company.
+`
+  );
+}
+
 describe("agent companies plugin", () => {
   it("declares the custom settings surface and required capabilities", () => {
     expect(manifest.description).toContain("Discover Agent Companies packages");
@@ -203,7 +225,17 @@ describe("agent companies plugin", () => {
       "instance.settings.register",
       "plugin.state.read",
       "plugin.state.write",
+      "jobs.schedule",
+      "http.outbound",
       "ui.page.register"
+    ]);
+    expect(manifest.jobs).toEqual([
+      {
+        jobKey: "catalog-auto-sync",
+        displayName: "Daily Agent Company Auto-Sync",
+        description: "Checks imported agent companies and syncs any source that is due for its daily update.",
+        schedule: "0 3 * * *"
+      }
     ]);
     expect(manifest.entrypoints.ui).toBe("./dist/ui");
     expect(manifest.ui?.slots).toEqual([
@@ -531,14 +563,379 @@ describe("agent companies plugin", () => {
       id: "paperclip-company-123",
       name: "Alpha Labs Imported",
       issuePrefix: "ALP",
-      importedAt: "2026-04-14T09:23:00.000Z"
+      importedSourceVersion: "1.0.0",
+      latestSourceVersion: "1.0.0",
+      importedAt: "2026-04-14T09:23:00.000Z",
+      autoSyncEnabled: true,
+      syncCollisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
+      syncStatus: "succeeded",
+      lastSyncAttemptAt: "2026-04-14T09:23:00.000Z",
+      lastSyncedAt: "2026-04-14T09:23:00.000Z",
+      lastSyncError: null,
+      syncRunningSince: null,
+      isSyncAvailable: false,
+      isUpToDate: true,
+      isAutoSyncDue: false,
+      nextAutoSyncAt: "2026-04-15T09:23:00.000Z"
     });
 
     await expect(
       harness.performAction("catalog.prepare-company-import", {
         companyId: company?.id
       })
-    ).rejects.toThrow('"Alpha Labs" has already been imported as "ALP".');
+    ).rejects.toThrow(
+      '"Alpha Labs" has already been imported as "ALP". Use sync to update the existing Paperclip company.'
+    );
+  });
+
+  it("lets operators disable daily auto-sync for an imported company", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    const afterDisable = await harness.performAction<CatalogSnapshot>("catalog.set-company-auto-sync", {
+      sourceCompanyId: company?.id,
+      enabled: false
+    });
+    const importedCompany = afterDisable.companies.find((candidate) => candidate.id === company?.id);
+
+    expect(importedCompany?.importedCompany?.autoSyncEnabled).toBe(false);
+    expect(importedCompany?.importedCompany?.isAutoSyncDue).toBe(false);
+    expect(importedCompany?.importedCompany?.nextAutoSyncAt).toBeNull();
+  });
+
+  it("syncs imported companies with overwrite collisions", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    const syncCalls: Array<{
+      importedCompanyId: string;
+      collisionStrategy: string;
+      filePaths: string[];
+    }> = [];
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null,
+      syncImport: async (_ctx, input) => {
+        syncCalls.push({
+          importedCompanyId: input.importedCompanyId,
+          collisionStrategy: input.collisionStrategy,
+          filePaths: Object.keys(input.preparedImport.source.files).sort()
+        });
+
+        return {
+          company: {
+            id: input.importedCompanyId,
+            name: "Alpha Labs Imported",
+            action: "updated"
+          },
+          agents: [{ action: "updated" }],
+          projects: [{ action: "updated" }],
+          issues: [{ action: "updated" }],
+          skills: [{ action: "skipped" }],
+          warnings: []
+        };
+      }
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+    currentTime = "2026-04-15T10:00:00.000Z";
+    const syncResult = await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+      companyId: company?.id
+    });
+
+    expect(syncCalls).toEqual([
+      {
+        importedCompanyId: "paperclip-company-123",
+        collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
+        filePaths: [
+          "COMPANY.md",
+          "agents/ceo/AGENTS.md",
+          "issues/follow-up/ISSUE.md",
+          "projects/import-pipeline/PROJECT.md",
+          "projects/import-pipeline/tasks/seed-default/TASK.md",
+          "skills/repo-audit/SKILL.md",
+          "skills/repo-audit/assets/icon.svg"
+        ]
+      }
+    ]);
+    expect(syncResult.importedCompanyId).toBe("paperclip-company-123");
+    expect(syncResult.importedCompanyName).toBe("Alpha Labs Imported");
+    expect(syncResult.collisionStrategy).toBe(DEFAULT_SYNC_COLLISION_STRATEGY);
+    expect(syncResult.importedSourceVersion).toBe("1.1.0");
+    expect(syncResult.latestSourceVersion).toBe("1.1.0");
+    expect(syncResult.syncedAt).toBe("2026-04-15T10:00:00.000Z");
+    expect(syncResult.upToDate).toBe(false);
+    expect(syncResult.company?.action).toBe("updated");
+
+    const afterSync = await harness.getData<CatalogSnapshot>("catalog.read");
+    const importedCompany = afterSync.companies.find((candidate) => candidate.id === company?.id);
+
+    expect(importedCompany?.importedCompany?.syncStatus).toBe("succeeded");
+    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
+    expect(importedCompany?.importedCompany?.lastSyncError).toBeNull();
+    expect(importedCompany?.importedCompany?.importedSourceVersion).toBe("1.1.0");
+    expect(importedCompany?.importedCompany?.latestSourceVersion).toBe("1.1.0");
+    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
+    expect(importedCompany?.importedCompany?.isUpToDate).toBe(true);
+  });
+
+  it("returns an up-to-date sync result without re-importing current companies", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    let syncCount = 0;
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null,
+      syncImport: async (_ctx, input) => {
+        syncCount += 1;
+        return {
+          company: {
+            id: input.importedCompanyId,
+            name: "Alpha Labs Imported",
+            action: "updated"
+          },
+          warnings: []
+        };
+      }
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    currentTime = "2026-04-15T10:00:00.000Z";
+    const syncResult = await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+      companyId: company?.id
+    });
+
+    expect(syncCount).toBe(0);
+    expect(syncResult.company?.action).toBe("unchanged");
+    expect(syncResult.importedSourceVersion).toBe("1.0.0");
+    expect(syncResult.latestSourceVersion).toBe("1.0.0");
+    expect(syncResult.upToDate).toBe(true);
+
+    const afterSync = await harness.getData<CatalogSnapshot>("catalog.read");
+    const importedCompany = afterSync.companies.find((candidate) => candidate.id === company?.id);
+
+    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
+    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
+    expect(importedCompany?.importedCompany?.isUpToDate).toBe(true);
+  });
+
+  it("runs the daily auto-sync job for due imported companies", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    let syncCount = 0;
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null,
+      syncImport: async (_ctx, input) => {
+        syncCount += 1;
+        return {
+          company: {
+            id: input.importedCompanyId,
+            name: "Alpha Labs Imported",
+            action: "updated"
+          },
+          agents: [],
+          projects: [],
+          warnings: []
+        };
+      }
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+    currentTime = "2026-04-15T09:24:00.000Z";
+    await harness.runJob("catalog-auto-sync");
+
+    expect(syncCount).toBe(1);
+
+    const afterJob = await harness.getData<CatalogSnapshot>("catalog.read");
+    const importedCompany = afterJob.companies.find((candidate) => candidate.id === company?.id);
+
+    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T09:24:00.000Z");
+    expect(importedCompany?.importedCompany?.syncStatus).toBe("succeeded");
+    expect(importedCompany?.importedCompany?.importedSourceVersion).toBe("1.1.0");
+    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
+  });
+
+  it("runs overdue auto-sync shortly after startup so restarts do not miss the daily cadence", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const repository = createRepositorySource(repositoryPath);
+    const discoveredCompanies = await scanRepositoryForAgentCompanies(repositoryPath, repository.id);
+    const alphaCompany = discoveredCompanies.find((candidate) => candidate.slug === "alpha-labs");
+
+    expect(alphaCompany).toBeTruthy();
+
+    let currentTime = "2026-04-15T09:24:00.000Z";
+    let syncCount = 0;
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: 0,
+      syncImport: async (_ctx, input) => {
+        syncCount += 1;
+        return {
+          company: {
+            id: input.importedCompanyId,
+            name: "Alpha Labs Imported",
+            action: "updated"
+          },
+          agents: [],
+          projects: [],
+          warnings: []
+        };
+      }
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [
+        {
+          ...repository,
+          status: "ready",
+          companies: discoveredCompanies,
+          lastScannedAt: "2026-04-13T09:23:00.000Z",
+          lastScanError: null
+        }
+      ],
+      importedCompanies: [
+        {
+          sourceCompanyId: alphaCompany?.id ?? "missing-company",
+          importedCompanyId: "paperclip-company-123",
+          importedCompanyName: "Alpha Labs Imported",
+          importedCompanyIssuePrefix: "ALP",
+          importedSourceVersion: "0.9.0",
+          importedAt: "2026-04-13T09:23:00.000Z",
+          autoSyncEnabled: true,
+          syncCollisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
+          lastSyncStatus: "succeeded",
+          lastSyncAttemptAt: "2026-04-13T09:23:00.000Z",
+          lastSyncedAt: "2026-04-13T09:23:00.000Z",
+          lastSyncError: null,
+          syncRunningSince: null
+        }
+      ],
+      updatedAt: "2026-04-13T09:23:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+
+    const waitDeadline = Date.now() + 1000;
+    while (syncCount === 0 && Date.now() < waitDeadline) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+
+    expect(syncCount).toBe(1);
+
+    const afterStartupSync = await harness.getData<CatalogSnapshot>("catalog.read");
+    const importedCompany = afterStartupSync.companies.find(
+      (candidate) => candidate.id === alphaCompany?.id
+    );
+
+    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T09:24:00.000Z");
+    expect(importedCompany?.importedCompany?.syncStatus).toBe("succeeded");
+    expect(importedCompany?.importedCompany?.importedSourceVersion).toBe("1.0.0");
+    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
   });
 
   it("returns null when tampered company content paths resolve outside the repository root", async () => {

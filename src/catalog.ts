@@ -4,8 +4,13 @@ export const DEFAULT_REPOSITORY_URL = "https://github.com/paperclipai/companies"
 export const CATALOG_STATE_KEY = "agent-companies.catalog.v1";
 export const AGENT_COMPANIES_SCHEMA = "agentcompanies/v1";
 export const COMPANY_CONTENT_KEYS = ["agents", "projects", "tasks", "issues", "skills"] as const;
+export const DEFAULT_AUTO_SYNC_ENABLED = true;
+export const DEFAULT_SYNC_COLLISION_STRATEGY = "replace" as const;
+export const AUTO_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export type CompanyContentKey = (typeof COMPANY_CONTENT_KEYS)[number];
+export type CatalogSyncCollisionStrategy = "rename" | "skip" | "replace";
+export type CatalogCompanySyncStatus = "idle" | "running" | "succeeded" | "failed";
 
 export type RepositoryScanStatus = "idle" | "ready" | "error";
 
@@ -58,19 +63,74 @@ export interface CatalogPreparedCompanyImport {
   };
 }
 
+export interface CatalogImportEntityResult {
+  action?: string;
+  id?: string | null;
+  name?: string;
+  slug?: string;
+  reason?: string | null;
+}
+
+export interface PaperclipCompanyImportResult {
+  company?: {
+    id?: string;
+    name?: string;
+    action?: string;
+  } | null;
+  agents?: CatalogImportEntityResult[] | null;
+  projects?: CatalogImportEntityResult[] | null;
+  issues?: CatalogImportEntityResult[] | null;
+  skills?: CatalogImportEntityResult[] | null;
+  warnings?: unknown;
+}
+
 export interface ImportedCatalogCompanyRecord {
   sourceCompanyId: string;
   importedCompanyId: string;
   importedCompanyName: string;
   importedCompanyIssuePrefix: string | null;
+  importedSourceVersion: string | null;
   importedAt: string | null;
+  autoSyncEnabled: boolean;
+  syncCollisionStrategy: CatalogSyncCollisionStrategy;
+  lastSyncStatus: CatalogCompanySyncStatus;
+  lastSyncAttemptAt: string | null;
+  lastSyncedAt: string | null;
+  lastSyncError: string | null;
+  syncRunningSince: string | null;
 }
 
 export interface CatalogCompanyImportStatus {
   id: string;
   name: string;
   issuePrefix: string | null;
+  importedSourceVersion: string | null;
+  latestSourceVersion: string | null;
   importedAt: string | null;
+  autoSyncEnabled: boolean;
+  syncCollisionStrategy: CatalogSyncCollisionStrategy;
+  syncStatus: CatalogCompanySyncStatus;
+  lastSyncAttemptAt: string | null;
+  lastSyncedAt: string | null;
+  lastSyncError: string | null;
+  syncRunningSince: string | null;
+  isSyncAvailable: boolean;
+  isUpToDate: boolean;
+  isAutoSyncDue: boolean;
+  nextAutoSyncAt: string | null;
+}
+
+export interface CatalogCompanySyncResult extends PaperclipCompanyImportResult {
+  sourceCompanyId: string;
+  sourceCompanyName: string;
+  importedCompanyId: string;
+  importedCompanyName: string;
+  importedCompanyIssuePrefix: string | null;
+  importedSourceVersion: string | null;
+  latestSourceVersion: string | null;
+  collisionStrategy: CatalogSyncCollisionStrategy;
+  syncedAt: string;
+  upToDate: boolean;
 }
 
 export interface DiscoveredAgentCompany {
@@ -100,6 +160,7 @@ export interface RepositorySource {
 export interface CatalogState {
   repositories: RepositorySource[];
   importedCompanies: ImportedCatalogCompanyRecord[];
+  paperclipApiBase: string | null;
   updatedAt: string | null;
 }
 
@@ -141,6 +202,151 @@ function asNonEmptyString(value: unknown): string | null {
 function asIsoTimestamp(value: unknown): string | null {
   const text = asNonEmptyString(value);
   return text ?? null;
+}
+
+function normalizeCatalogSyncCollisionStrategy(value: unknown): CatalogSyncCollisionStrategy {
+  return value === "rename" || value === "skip" ? value : DEFAULT_SYNC_COLLISION_STRATEGY;
+}
+
+function normalizeCatalogCompanySyncStatus(value: unknown): CatalogCompanySyncStatus {
+  return value === "running" || value === "succeeded" || value === "failed" ? value : "idle";
+}
+
+function addMillisecondsToIso(timestamp: string, deltaMs: number): string | null {
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return new Date(parsed + deltaMs).toISOString();
+}
+
+function normalizeComparableVersion(value: string): string {
+  return value.trim().replace(/^v/iu, "");
+}
+
+function parseComparableVersion(value: string): {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: string | null;
+} | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/u.exec(normalizeComparableVersion(value));
+  if (!match) {
+    return null;
+  }
+
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? null
+  };
+}
+
+export function isCatalogCompanySyncAvailable(
+  importedSourceVersion: string | null,
+  latestSourceVersion: string | null
+): boolean {
+  const importedVersion = asNonEmptyString(importedSourceVersion);
+  const latestVersion = asNonEmptyString(latestSourceVersion);
+
+  if (!latestVersion) {
+    return true;
+  }
+
+  if (!importedVersion) {
+    return true;
+  }
+
+  if (normalizeComparableVersion(importedVersion) === normalizeComparableVersion(latestVersion)) {
+    return false;
+  }
+
+  const parsedImportedVersion = parseComparableVersion(importedVersion);
+  const parsedLatestVersion = parseComparableVersion(latestVersion);
+  if (!parsedImportedVersion || !parsedLatestVersion) {
+    return true;
+  }
+
+  if (parsedLatestVersion.major !== parsedImportedVersion.major) {
+    return parsedLatestVersion.major > parsedImportedVersion.major;
+  }
+
+  if (parsedLatestVersion.minor !== parsedImportedVersion.minor) {
+    return parsedLatestVersion.minor > parsedImportedVersion.minor;
+  }
+
+  if (parsedLatestVersion.patch !== parsedImportedVersion.patch) {
+    return parsedLatestVersion.patch > parsedImportedVersion.patch;
+  }
+
+  if (parsedImportedVersion.prerelease === parsedLatestVersion.prerelease) {
+    return false;
+  }
+
+  if (parsedImportedVersion.prerelease && !parsedLatestVersion.prerelease) {
+    return true;
+  }
+
+  if (!parsedImportedVersion.prerelease && parsedLatestVersion.prerelease) {
+    return false;
+  }
+
+  return true;
+}
+
+export function getCatalogCompanyAutoSyncReferenceAt(
+  record: Pick<ImportedCatalogCompanyRecord, "lastSyncAttemptAt" | "lastSyncedAt" | "importedAt">
+): string | null {
+  return (
+    asIsoTimestamp(record.lastSyncAttemptAt) ??
+    asIsoTimestamp(record.lastSyncedAt) ??
+    asIsoTimestamp(record.importedAt)
+  );
+}
+
+export function getCatalogCompanyNextAutoSyncAt(
+  record: Pick<
+    ImportedCatalogCompanyRecord,
+    "autoSyncEnabled" | "lastSyncAttemptAt" | "lastSyncedAt" | "importedAt"
+  >
+): string | null {
+  if (!record.autoSyncEnabled) {
+    return null;
+  }
+
+  const referenceTimestamp = getCatalogCompanyAutoSyncReferenceAt(record);
+  if (!referenceTimestamp) {
+    return null;
+  }
+
+  return addMillisecondsToIso(referenceTimestamp, AUTO_SYNC_INTERVAL_MS);
+}
+
+export function isCatalogCompanyAutoSyncDue(
+  record: Pick<
+    ImportedCatalogCompanyRecord,
+    "autoSyncEnabled" | "lastSyncAttemptAt" | "lastSyncedAt" | "importedAt" | "lastSyncStatus"
+  >,
+  now: string
+): boolean {
+  if (!record.autoSyncEnabled || record.lastSyncStatus === "running") {
+    return false;
+  }
+
+  const nextAutoSyncAt = getCatalogCompanyNextAutoSyncAt(record);
+  if (!nextAutoSyncAt) {
+    return true;
+  }
+
+  const nowTimestamp = Date.parse(now);
+  const nextTimestamp = Date.parse(nextAutoSyncAt);
+  if (!Number.isFinite(nowTimestamp) || !Number.isFinite(nextTimestamp)) {
+    return false;
+  }
+
+  return nowTimestamp >= nextTimestamp;
 }
 
 export function sortCompanyContentItems(left: CompanyContentItem, right: CompanyContentItem): number {
@@ -251,6 +457,27 @@ function normalizeDisplaySegments(url: URL): string[] {
 function maybeParseRepositoryUrl(input: string): URL | null {
   try {
     return new URL(input);
+  } catch {
+    return null;
+  }
+}
+
+function normalizePaperclipApiBase(value: unknown): string | null {
+  const input = asNonEmptyString(value);
+  if (!input) {
+    return null;
+  }
+
+  try {
+    const parsedUrl = new URL(input);
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      return null;
+    }
+
+    parsedUrl.pathname = "";
+    parsedUrl.search = "";
+    parsedUrl.hash = "";
+    return parsedUrl.toString().replace(/\/+$/u, "");
   } catch {
     return null;
   }
@@ -435,6 +662,21 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
     return null;
   }
 
+  const importedAt =
+    asIsoTimestamp(value.importedAt) ??
+    asIsoTimestamp(value.lastSyncedAt) ??
+    asIsoTimestamp(value.lastSyncAttemptAt);
+  const lastSyncedAt = asIsoTimestamp(value.lastSyncedAt) ?? importedAt;
+  const lastSyncAttemptAt = asIsoTimestamp(value.lastSyncAttemptAt) ?? lastSyncedAt ?? importedAt;
+  const initialSyncStatus = normalizeCatalogCompanySyncStatus(
+    value.lastSyncStatus ??
+      value.syncStatus ??
+      (lastSyncedAt ? "succeeded" : "idle")
+  );
+  const syncRunningSince =
+    asIsoTimestamp(value.syncRunningSince) ??
+    (initialSyncStatus === "running" ? lastSyncAttemptAt : null);
+
   return {
     sourceCompanyId,
     importedCompanyId,
@@ -446,7 +688,28 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
       asNonEmptyString(value.importedCompanyIssuePrefix) ??
       asNonEmptyString(value.paperclipCompanyIssuePrefix) ??
       asNonEmptyString(value.issuePrefix),
-    importedAt: asIsoTimestamp(value.importedAt)
+    importedSourceVersion:
+      asNonEmptyString(value.importedSourceVersion) ??
+      asNonEmptyString(value.sourceVersion) ??
+      asNonEmptyString(value.version),
+    importedAt,
+    autoSyncEnabled:
+      typeof value.autoSyncEnabled === "boolean"
+        ? value.autoSyncEnabled
+        : typeof value.syncEnabled === "boolean"
+          ? value.syncEnabled
+          : DEFAULT_AUTO_SYNC_ENABLED,
+    syncCollisionStrategy: normalizeCatalogSyncCollisionStrategy(
+      value.syncCollisionStrategy ?? value.collisionStrategy
+    ),
+    lastSyncStatus:
+      initialSyncStatus === "idle" && lastSyncedAt !== null
+        ? "succeeded"
+        : initialSyncStatus,
+    lastSyncAttemptAt,
+    lastSyncedAt,
+    lastSyncError: asNonEmptyString(value.lastSyncError),
+    syncRunningSince
   };
 }
 
@@ -519,6 +782,7 @@ export function createDefaultCatalogState(): CatalogState {
   return {
     repositories: [createRepositorySource(DEFAULT_REPOSITORY_URL)],
     importedCompanies: [],
+    paperclipApiBase: null,
     updatedAt: null
   };
 }
@@ -574,21 +838,14 @@ export function normalizeCatalogState(value: unknown): CatalogState {
   return {
     repositories: repositories.length > 0 || hadExplicitRepositories ? repositories : createDefaultCatalogState().repositories,
     importedCompanies: [...importedCompanies.values()],
+    paperclipApiBase: normalizePaperclipApiBase(value.paperclipApiBase),
     updatedAt: asIsoTimestamp(value.updatedAt)
   };
 }
 
-export function buildCatalogSnapshot(state: CatalogState): CatalogSnapshot {
-  const importedCompaniesBySourceId = new Map<string, CatalogCompanyImportStatus>(
-    state.importedCompanies.map((importedCompany) => [
-      importedCompany.sourceCompanyId,
-      {
-        id: importedCompany.importedCompanyId,
-        name: importedCompany.importedCompanyName,
-        issuePrefix: importedCompany.importedCompanyIssuePrefix,
-        importedAt: importedCompany.importedAt
-      }
-    ])
+export function buildCatalogSnapshot(state: CatalogState, now: string | null = null): CatalogSnapshot {
+  const importedCompaniesBySourceId = new Map<string, ImportedCatalogCompanyRecord>(
+    state.importedCompanies.map((importedCompany) => [importedCompany.sourceCompanyId, importedCompany])
   );
   const repositories = state.repositories.map((repository) => ({
     ...repository,
@@ -602,7 +859,39 @@ export function buildCatalogSnapshot(state: CatalogState): CatalogSnapshot {
         repositoryLabel: repository.label,
         repositoryUrl: repository.url,
         repositoryIsDefault: repository.isDefault,
-        importedCompany: importedCompaniesBySourceId.get(company.id) ?? null
+        importedCompany: (() => {
+          const importedCompany = importedCompaniesBySourceId.get(company.id);
+          if (!importedCompany) {
+            return null;
+          }
+
+          const latestSourceVersion = company.version;
+          const isSyncAvailable = isCatalogCompanySyncAvailable(
+            importedCompany.importedSourceVersion,
+            latestSourceVersion
+          );
+
+          return {
+            id: importedCompany.importedCompanyId,
+            name: importedCompany.importedCompanyName,
+            issuePrefix: importedCompany.importedCompanyIssuePrefix,
+            importedSourceVersion: importedCompany.importedSourceVersion,
+            latestSourceVersion,
+            importedAt: importedCompany.importedAt,
+            autoSyncEnabled: importedCompany.autoSyncEnabled,
+            syncCollisionStrategy: importedCompany.syncCollisionStrategy,
+            syncStatus: importedCompany.lastSyncStatus,
+            lastSyncAttemptAt: importedCompany.lastSyncAttemptAt,
+            lastSyncedAt: importedCompany.lastSyncedAt,
+            lastSyncError: importedCompany.lastSyncError,
+            syncRunningSince: importedCompany.syncRunningSince,
+            isSyncAvailable,
+            isUpToDate: !isSyncAvailable,
+            isAutoSyncDue:
+              now && isSyncAvailable ? isCatalogCompanyAutoSyncDue(importedCompany, now) : false,
+            nextAutoSyncAt: importedCompany.autoSyncEnabled ? getCatalogCompanyNextAutoSyncAt(importedCompany) : null
+          };
+        })()
       }))
     )
     .sort((left, right) =>

@@ -419,6 +419,22 @@ Review the import results after the initial run.
   return repositoryRoot;
 }
 
+async function setFixtureRepositoryVersion(repositoryRoot, version) {
+  await writeFile(
+    join(repositoryRoot, 'COMPANY.md'),
+    `---
+name: Modal Demo Company
+description: Disposable fixture used to verify the company contents modal.
+slug: modal-demo-company
+schema: agentcompanies/v1
+version: ${version}
+---
+
+Fixture company for Paperclip smoke verification.
+`
+  );
+}
+
 async function ensureCompanySeeded() {
   const companiesUrl = new URL('/api/companies', baseUrl).toString();
   const existingCompanies = await fetchJson(companiesUrl);
@@ -644,27 +660,42 @@ async function main() {
       );
     }
 
-    const importTrigger = fixtureCompanyCard.locator('[data-testid="company-import-trigger"]');
-    const importTriggerDeadline = Date.now() + 120000;
-    let importTriggerIsDisabled = false;
-    let importTriggerLabel = '';
-
-    while (Date.now() < importTriggerDeadline) {
-      importTriggerLabel = (await importTrigger.textContent())?.trim() ?? '';
-      importTriggerIsDisabled = await importTrigger.isDisabled();
-
-      if (importTriggerIsDisabled && importTriggerLabel === 'Imported') {
-        break;
-      }
-
-      await page.waitForTimeout(250);
-    }
-
-    if (!importTriggerIsDisabled || importTriggerLabel !== 'Imported') {
+    const syncTrigger = fixtureCompanyCard.locator('[data-testid="company-sync-trigger"]');
+    await syncTrigger.waitFor({ timeout: 120000 });
+    const syncLabel = (await syncTrigger.textContent())?.trim() ?? '';
+    const syncDisabled = await syncTrigger.isDisabled();
+    if (syncLabel !== 'Up to date' || !syncDisabled) {
       throw new Error(
-        `Expected imported company action to become a disabled "Imported" button, received label "${importTriggerLabel}" (disabled=${importTriggerIsDisabled}).`
+        `Expected imported company action to become a disabled "Up to date" button, received "${syncLabel}" (disabled=${syncDisabled}).`
       );
     }
+
+    const autoSyncToggle = fixtureCompanyCard.locator('[data-testid="company-auto-sync-toggle"]');
+    await autoSyncToggle.waitFor({ timeout: 120000 });
+    const autoSyncEnabled = await autoSyncToggle.isChecked();
+    if (!autoSyncEnabled) {
+      throw new Error('Expected imported company auto-sync to be enabled by default.');
+    }
+
+    await setFixtureRepositoryVersion(fixtureRepository, '1.1.0');
+    await page.locator('[data-testid="repo-card"]').filter({ hasText: fixtureRepository }).getByRole('button', {
+      name: 'Rescan'
+    }).click();
+
+    await page.waitForFunction(
+      (button) =>
+        button instanceof HTMLButtonElement &&
+        button.textContent?.trim() === 'Sync now' &&
+        button.disabled === false,
+      await syncTrigger.elementHandle(),
+      { timeout: 120000 }
+    );
+
+    await syncTrigger.click();
+    await page.getByText('Company synced', { exact: true }).waitFor({ timeout: 120000 });
+    await page
+      .getByText(`Synced "Modal Demo Company" into "${importedCompanyName}"`, { exact: false })
+      .waitFor({ timeout: 120000 });
 
     await fixtureCompanyCard.getByRole('button', { name: 'View contents' }).click();
 
