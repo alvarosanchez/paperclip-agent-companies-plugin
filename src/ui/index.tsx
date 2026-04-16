@@ -66,6 +66,11 @@ import {
   type CatalogSnapshot,
   type PaperclipCompanyImportResult
 } from "../catalog.js";
+import {
+  normalizePaperclipHealthResponse,
+  requiresPaperclipBoardAccess,
+  type PaperclipHealthResponse
+} from "../paperclip-health.js";
 
 const EMPTY_CATALOG: CatalogSnapshot = {
   repositories: [],
@@ -202,6 +207,43 @@ const PAGE_STYLES = `
   margin: 2px 0 0;
   font-size: 11px;
   line-height: 1.4;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__status-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.agent-companies-settings__status-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 10px;
+  background: var(--ac-surface-soft);
+}
+
+.agent-companies-settings__status-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-companies-settings__status-title {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 700;
+  color: var(--ac-text);
+}
+
+.agent-companies-settings__status-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--ac-text-muted);
 }
 
@@ -988,6 +1030,10 @@ const PAGE_STYLES = `
   .agent-companies-settings__dialog-layout {
     grid-template-columns: 1fr;
   }
+
+  .agent-companies-settings__status-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1154,6 +1200,42 @@ interface PaperclipCompanyRecord {
   issuePrefix?: string | null;
 }
 
+interface BoardAccessRegistration {
+  companyId: string | null;
+  configured: boolean;
+  identity: string | null;
+  updatedAt: string | null;
+}
+
+interface CliAuthChallengeResponse {
+  token?: string;
+  boardApiToken?: string;
+  approvalUrl?: string;
+  approvalPath?: string;
+  pollUrl?: string;
+  pollPath?: string;
+  expiresAt?: string;
+  suggestedPollIntervalMs?: number;
+}
+
+interface CliAuthChallengePollResponse {
+  status?: string;
+  boardApiToken?: string;
+}
+
+interface CliAuthIdentityResponse {
+  login?: string | null;
+  email?: string | null;
+  displayName?: string | null;
+  name?: string | null;
+  user?: {
+    login?: string | null;
+    email?: string | null;
+    displayName?: string | null;
+    name?: string | null;
+  } | null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -1301,11 +1383,16 @@ function formatImportResultSummary(
 
 async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  headers.set("Content-Type", "application/json");
+  headers.set("accept", "application/json");
+
+  if (typeof init.body === "string" && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
 
   const response = await fetch(input, {
     ...init,
-    headers
+    headers,
+    credentials: init.credentials ?? "same-origin"
   });
   const contentType = response.headers.get("content-type") ?? "";
   const rawBody = await response.text();
@@ -1316,7 +1403,9 @@ async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<
     normalizedBody.startsWith("<!DOCTYPE html") ||
     normalizedBody.startsWith("<html")
   ) {
-    throw new Error("Paperclip returned HTML instead of JSON. Refresh the app and try again.");
+    throw new Error(
+      "Paperclip returned HTML instead of JSON. This usually means the API served the app shell or a sign-in page instead of the expected endpoint."
+    );
   }
 
   let payload: unknown = null;
@@ -1324,7 +1413,7 @@ async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<
     try {
       payload = JSON.parse(normalizedBody);
     } catch {
-      throw new Error("Paperclip returned an unexpected response while importing the company.");
+      throw new Error("Paperclip returned an unexpected response.");
     }
   }
 
@@ -1333,6 +1422,257 @@ async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<
   }
 
   return payload as T;
+}
+
+async function fetchPaperclipHealth(): Promise<PaperclipHealthResponse | null> {
+  try {
+    return normalizePaperclipHealthResponse(await fetchHostJson("/api/health", {
+      headers: {
+        accept: "application/json"
+      }
+    }));
+  } catch {
+    return null;
+  }
+}
+
+async function resolveOrCreateCompanySecret(
+  companyId: string,
+  name: string,
+  value: string
+): Promise<{ id: string; name: string }> {
+  const existingSecrets = await fetchHostJson<Array<{ id: string; name: string }>>(
+    `/api/companies/${encodeURIComponent(companyId)}/secrets`
+  );
+  const existing = existingSecrets.find(
+    (secret) => secret.name.trim().toLowerCase() === name.trim().toLowerCase()
+  );
+
+  if (existing) {
+    return fetchHostJson<{ id: string; name: string }>(
+      `/api/secrets/${encodeURIComponent(existing.id)}/rotate`,
+      {
+        method: "POST",
+        body: JSON.stringify({ value })
+      }
+    );
+  }
+
+  return fetchHostJson<{ id: string; name: string }>(
+    `/api/companies/${encodeURIComponent(companyId)}/secrets`,
+    {
+      method: "POST",
+      body: JSON.stringify({ name, value })
+    }
+  );
+}
+
+function resolveBrowserOrigin(): string | null {
+  if (typeof window === "undefined" || typeof window.location?.origin !== "string") {
+    return null;
+  }
+
+  const origin = window.location.origin.trim();
+  return origin ? origin : null;
+}
+
+function isTrustedSameOriginHttpUrl(candidate: URL, expectedOrigin: string): boolean {
+  return (
+    (candidate.protocol === "http:" || candidate.protocol === "https:")
+    && candidate.origin === expectedOrigin
+  );
+}
+
+function buildPaperclipUrl(input: string): string | null {
+  const origin = resolveBrowserOrigin();
+  const trimmed = input.trim();
+  if (!origin || !trimmed || trimmed.startsWith("//")) {
+    return null;
+  }
+
+  let candidate: URL;
+  try {
+    candidate = new URL(trimmed, origin);
+  } catch {
+    return null;
+  }
+
+  return isTrustedSameOriginHttpUrl(candidate, origin) ? candidate.toString() : null;
+}
+
+function resolveCliAuthUrl(url?: string, path?: string): string | null {
+  if (typeof url === "string" && url.trim()) {
+    return buildPaperclipUrl(url.trim());
+  }
+
+  if (typeof path !== "string" || !path.trim()) {
+    return null;
+  }
+
+  return buildPaperclipUrl(path.trim());
+}
+
+function resolveCliAuthPollUrl(urlOrPath?: string): string | null {
+  if (typeof urlOrPath !== "string" || !urlOrPath.trim()) {
+    return null;
+  }
+
+  const trimmed = urlOrPath.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed)) {
+    return buildPaperclipUrl(trimmed);
+  }
+
+  const normalizedPath = trimmed.startsWith("/api/")
+    ? trimmed
+    : `/api${trimmed.startsWith("/") ? "" : "/"}${trimmed}`;
+
+  return buildPaperclipUrl(normalizedPath);
+}
+
+function normalizeCliAuthPollIntervalMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return 1500;
+  }
+
+  return Math.min(5000, Math.max(750, Math.floor(value)));
+}
+
+function waitForDuration(durationMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, durationMs);
+  });
+}
+
+async function requestBoardAccessChallenge(companyId: string): Promise<CliAuthChallengeResponse> {
+  return fetchHostJson<CliAuthChallengeResponse>("/api/cli-auth/challenges", {
+    method: "POST",
+    body: JSON.stringify({
+      command: "paperclip plugin agent-companies settings",
+      clientName: "Agent Companies plugin",
+      requestedAccess: "board",
+      requestedCompanyId: companyId
+    })
+  });
+}
+
+async function waitForBoardAccessApproval(challenge: CliAuthChallengeResponse): Promise<string> {
+  const challengeToken = typeof challenge.token === "string" ? challenge.token.trim() : "";
+  const pollUrl = resolveCliAuthPollUrl(challenge.pollUrl ?? challenge.pollPath);
+  if (!challengeToken || !pollUrl) {
+    throw new Error("Paperclip did not return a trusted board access challenge.");
+  }
+
+  const expiresAtTimeMs =
+    typeof challenge.expiresAt === "string" ? Date.parse(challenge.expiresAt) : Number.NaN;
+  const pollIntervalMs = normalizeCliAuthPollIntervalMs(challenge.suggestedPollIntervalMs);
+
+  while (true) {
+    const pollUrlWithToken = new URL(pollUrl);
+    pollUrlWithToken.searchParams.set("token", challengeToken);
+    const pollResult = await fetchHostJson<CliAuthChallengePollResponse>(pollUrlWithToken.toString(), {
+      headers: {
+        accept: "application/json"
+      }
+    });
+    const status = typeof pollResult.status === "string" ? pollResult.status.trim().toLowerCase() : "pending";
+
+    if (status === "approved") {
+      const boardApiToken =
+        typeof pollResult.boardApiToken === "string" && pollResult.boardApiToken.trim()
+          ? pollResult.boardApiToken.trim()
+          : typeof challenge.boardApiToken === "string" && challenge.boardApiToken.trim()
+            ? challenge.boardApiToken.trim()
+            : "";
+      if (!boardApiToken) {
+        throw new Error("Paperclip approved board access but did not return a usable API token.");
+      }
+
+      return boardApiToken;
+    }
+
+    if (status === "cancelled") {
+      throw new Error("Board access approval was cancelled.");
+    }
+
+    if (status === "expired") {
+      throw new Error("Board access approval expired. Start the connection flow again.");
+    }
+
+    if (Number.isFinite(expiresAtTimeMs) && Date.now() >= expiresAtTimeMs) {
+      throw new Error("Board access approval expired. Start the connection flow again.");
+    }
+
+    await waitForDuration(pollIntervalMs);
+  }
+}
+
+function getCliAuthIdentityLabel(identity: CliAuthIdentityResponse): string | null {
+  const candidates = [
+    identity.user?.displayName,
+    identity.user?.name,
+    identity.user?.login,
+    identity.user?.email,
+    identity.displayName,
+    identity.name,
+    identity.login,
+    identity.email
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+async function fetchBoardAccessIdentity(boardApiToken: string): Promise<string | null> {
+  const identity = await fetchHostJson<CliAuthIdentityResponse>("/api/cli-auth/me", {
+    headers: {
+      authorization: `Bearer ${boardApiToken.trim()}`
+    }
+  });
+
+  return getCliAuthIdentityLabel(identity);
+}
+
+function usePaperclipBoardAccessRequirement(): {
+  status: "loading" | "required" | "not_required" | "unknown";
+  required: boolean;
+} {
+  const [status, setStatus] = useState<"loading" | "required" | "not_required" | "unknown">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const health = await fetchPaperclipHealth();
+      if (cancelled) {
+        return;
+      }
+
+      if (!health) {
+        setStatus("unknown");
+        return;
+      }
+
+      setStatus(requiresPaperclipBoardAccess(health) ? "required" : "not_required");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return {
+    status,
+    required: status === "required"
+  };
+}
+
+function isBoardAccessRequiredError(error: unknown): boolean {
+  return getErrorMessage(error).toLowerCase().includes("board access required");
 }
 
 function getImportedCompanyLabel(company: CatalogCompanySummary): string | null {
@@ -2324,6 +2664,9 @@ export function AgentCompaniesSettingsPage({
   const { data, error, loading, refresh } = usePluginData<CatalogSnapshot>("catalog.read", {
     companyId: context.companyId ?? ""
   });
+  const boardAccess = usePluginData<BoardAccessRegistration>("board-access.read", {
+    companyId: context.companyId ?? ""
+  });
   const prepareCompanyImport = usePluginAction("catalog.prepare-company-import");
   const recordCompanyImport = usePluginAction("catalog.record-company-import");
   const syncCompany = usePluginAction("catalog.sync-company");
@@ -2332,17 +2675,38 @@ export function AgentCompaniesSettingsPage({
   const removeRepository = usePluginAction("catalog.remove-repository");
   const scanRepository = usePluginAction("catalog.scan-repository");
   const scanAllRepositories = usePluginAction("catalog.scan-all-repositories");
+  const updateBoardAccess = usePluginAction("board-access.update");
   const catalog = data ?? EMPTY_CATALOG;
+  const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const [repositoryInput, setRepositoryInput] = useState("");
   const [companyQuery, setCompanyQuery] = useState("");
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingActionState | null>(null);
   const [importState, setImportState] = useState<ImportState | null>(null);
   const [syncState, setSyncState] = useState<SyncState | null>(null);
+  const [connectingBoardAccess, setConnectingBoardAccess] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importCompanyId, setImportCompanyId] = useState<string | null>(null);
   const [importCompanyName, setImportCompanyName] = useState("");
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
+  const hasCompanyContext = Boolean(context.companyId);
+  const boardAccessConfigured = Boolean(boardAccess.data?.configured);
+  const boardAccessIdentity = boardAccess.data?.identity?.trim() || null;
+  const boardAccessRequired = boardAccessRequirement.required;
+  const currentCompanyLabel = context.companyPrefix?.trim() || "this company";
+  const boardAccessBadgeLabel = connectingBoardAccess
+    ? "Connecting"
+    : boardAccessConfigured
+      ? "Connected"
+      : boardAccessRequired
+        ? "Required"
+        : boardAccessRequirement.status === "loading"
+          ? "Checking"
+          : "Optional";
+  const boardAccessBadgeClass =
+    boardAccessRequired && !boardAccessConfigured
+      ? "agent-companies-settings__badge agent-companies-settings__badge--danger"
+      : "agent-companies-settings__badge agent-companies-settings__badge--accent";
   const visibleCompanies = catalog.companies.filter((company) =>
     matchesCompanyQuery(company, companyQuery.trim())
   );
@@ -2408,6 +2772,37 @@ export function AgentCompaniesSettingsPage({
       window.clearInterval(intervalId);
     };
   }, [catalog.companies, refresh]);
+
+  useEffect(() => {
+    if (!hasCompanyContext) {
+      return;
+    }
+
+    const refreshBoardAccess = () => {
+      try {
+        boardAccess.refresh();
+      } catch {
+        return;
+      }
+    };
+
+    const handleWindowFocus = () => {
+      refreshBoardAccess();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshBoardAccess();
+      }
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [boardAccess.refresh, hasCompanyContext]);
 
   async function refreshCatalog(noticeState: NoticeState | null = null): Promise<void> {
     if (noticeState) {
@@ -2707,13 +3102,91 @@ export function AgentCompaniesSettingsPage({
           : undefined
       });
     } catch (actionError) {
-      setNotice({
-        tone: "error",
-        text: getErrorMessage(actionError)
-      });
+      if (isBoardAccessRequiredError(actionError)) {
+        const importedCompanyLabel = getImportedCompanyLabel(company) ?? company.importedCompany.name;
+        setNotice({
+          tone: "error",
+          title: "Board access required",
+          text:
+            hasCompanyContext && context.companyId === company.importedCompany.id
+              ? `Connect board access for ${currentCompanyLabel} in the section above, then retry sync for "${company.name}".`
+              : `Open Agent Companies Plugin settings inside "${importedCompanyLabel}", connect board access, and retry sync for "${company.name}".`
+        });
+      } else {
+        setNotice({
+          tone: "error",
+          text: getErrorMessage(actionError)
+        });
+      }
     } finally {
       setSyncState(null);
       refresh();
+    }
+  }
+
+  async function handleConnectBoardAccess(): Promise<void> {
+    if (!context.companyId) {
+      setNotice({
+        tone: "error",
+        text: "Open this settings page inside an imported company before connecting board access."
+      });
+      return;
+    }
+
+    setConnectingBoardAccess(true);
+    let approvalWindow: Window | null = null;
+
+    try {
+      if (typeof window !== "undefined") {
+        approvalWindow = window.open("about:blank", "_blank");
+      }
+
+      const challenge = await requestBoardAccessChallenge(context.companyId);
+      const approvalUrl = resolveCliAuthUrl(challenge.approvalUrl, challenge.approvalPath);
+      if (!approvalUrl) {
+        throw new Error("Paperclip did not return a trusted board approval URL.");
+      }
+
+      if (!approvalWindow && typeof window !== "undefined") {
+        approvalWindow = window.open(approvalUrl, "_blank");
+      } else {
+        approvalWindow?.location.replace(approvalUrl);
+      }
+
+      if (!approvalWindow) {
+        throw new Error("Allow pop-ups for Paperclip, then try connecting board access again.");
+      }
+
+      const boardApiToken = await waitForBoardAccessApproval(challenge);
+      const identity = await fetchBoardAccessIdentity(boardApiToken);
+      const secretName = `agent_companies_board_api_${context.companyId.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
+      const secret = await resolveOrCreateCompanySecret(context.companyId, secretName, boardApiToken);
+
+      await updateBoardAccess({
+        companyId: context.companyId,
+        paperclipBoardApiTokenRef: secret.id,
+        identity
+      });
+      await boardAccess.refresh();
+
+      setNotice({
+        tone: "success",
+        title: identity ? `Board access connected as ${identity}` : "Board access connected",
+        text: `Worker-side sync can now authenticate against ${currentCompanyLabel}.`
+      });
+    } catch (actionError) {
+      setNotice({
+        tone: "error",
+        title: "Board access could not be connected",
+        text: getErrorMessage(actionError)
+      });
+    } finally {
+      setConnectingBoardAccess(false);
+      try {
+        approvalWindow?.close();
+      } catch {
+        return;
+      }
     }
   }
 
@@ -2902,6 +3375,63 @@ export function AgentCompaniesSettingsPage({
           Could not load the repository catalog: {error.message}
         </div>
       ) : null}
+
+      <section className="agent-companies-settings__panel">
+        <div className="agent-companies-settings__panel-head">
+          <div>
+            <h2 className="agent-companies-settings__panel-title">Board Access Connection</h2>
+            <p className="agent-companies-settings__panel-copy">
+              Sync needs a board access connection on authenticated Paperclip deployments because the worker cannot reuse your browser session.
+            </p>
+          </div>
+          <div className="agent-companies-settings__badge-row">
+            <span className={boardAccessBadgeClass}>{boardAccessBadgeLabel}</span>
+          </div>
+        </div>
+
+        <div className="agent-companies-settings__status-grid">
+          <div className="agent-companies-settings__status-row">
+            <div className="agent-companies-settings__status-copy">
+              <p className="agent-companies-settings__status-title">
+                {!hasCompanyContext
+                  ? "Open settings inside an imported company"
+                  : boardAccessConfigured
+                    ? boardAccessIdentity
+                      ? `Connected as ${boardAccessIdentity}`
+                      : `Connected for ${currentCompanyLabel}`
+                    : boardAccessRequired
+                      ? `Board access is required for ${currentCompanyLabel}`
+                      : `Board access is optional for ${currentCompanyLabel}`}
+              </p>
+              <p className="agent-companies-settings__status-body">
+                {!hasCompanyContext
+                  ? "Pick the imported company you want to sync, then open this settings page from that company to save a board access connection."
+                  : boardAccessConfigured
+                    ? "This saved connection is used for worker-side sync calls to the Paperclip import API."
+                    : boardAccessRequired
+                      ? "Connect board access once for this company so future syncs can authenticate."
+                      : boardAccessRequirement.status === "loading"
+                        ? "Checking whether this Paperclip deployment requires board access for worker-side API calls."
+                        : "You only need to connect board access if sync later reports that the deployment requires authentication."}
+              </p>
+            </div>
+            <button
+              className="agent-companies-settings__button agent-companies-settings__button--primary"
+              disabled={!hasCompanyContext || connectingBoardAccess || pendingAction !== null || importState !== null || syncState !== null}
+              onClick={() => {
+                void handleConnectBoardAccess();
+              }}
+              type="button"
+            >
+              {connectingBoardAccess
+                ? "Waiting for approval..."
+                : boardAccessConfigured
+                  ? "Reconnect board access"
+                  : "Connect board access"}
+            </button>
+          </div>
+        </div>
+      </section>
 
       <div className="agent-companies-settings__layout">
         <section className="agent-companies-settings__panel">

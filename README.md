@@ -14,6 +14,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 - A hosted Paperclip settings page for browsing repositories and discovered companies
 - Inline company import into a new Paperclip company
 - Manual sync plus daily background auto-sync for imported companies
+- Company-scoped Board access connection for authenticated Paperclip deployments
 - Optional `metadata.paperclip.agentIcon` support for agent icon hints
 - A preloaded default catalog source: `https://github.com/paperclipai/companies`
 
@@ -51,7 +52,8 @@ paperclipai plugin install --local .
 3. Add a repository source with `owner/repo`, a full repository URL, or a local checkout path.
 4. Review discovered companies and open **View contents** to inspect agents, projects, tasks, issues, and skills.
 5. Click **Import** to create a new Paperclip company from a discovered package.
-6. Use **Sync now** when the source changes, or leave **Daily auto-sync** enabled to keep imports current.
+6. If your Paperclip deployment requires authentication, open this plugin inside the imported company once and complete **Board access connection** in settings.
+7. Use **Sync now** when the source changes, or leave **Daily auto-sync** enabled to keep imports current.
 
 ## Package Expectations
 
@@ -84,12 +86,14 @@ During import, the plugin packages the company directory as an inline Paperclip 
 - Imported companies default to daily auto-sync.
 - Manual sync is available whenever the source version changes or cannot be compared safely.
 - Sync uses overwrite mode by default so the imported Paperclip company stays aligned with the source package.
+- Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
 
 ## Security And Privacy
 
 - Remote repositories are cloned with `git` into temporary checkouts.
 - For private repositories, the worker reuses your existing local git credential helpers when available.
 - Local checkout paths are read from the Paperclip host machine, so only trusted operators should add local paths.
+- Board access connections are stored as company secrets and the plugin keeps only the secret reference plus display metadata in plugin state.
 - Inline imports intentionally skip common secret-bearing files such as `.env*`, `.npmrc`, `.git-credentials`, `.netrc`, and files inside `.ssh/`, `.aws/`, or `.gnupg/`.
 - The plugin stores catalog and sync metadata in Paperclip plugin state.
 
