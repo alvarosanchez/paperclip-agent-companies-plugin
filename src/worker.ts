@@ -1,9 +1,10 @@
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { access, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { definePlugin, runWorker, type PluginContext, type ScopeKey } from "@paperclipai/plugin-sdk";
+import { definePlugin, startWorkerRpcHost, type PluginContext, type ScopeKey } from "@paperclipai/plugin-sdk";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   AGENT_COMPANIES_SCHEMA,
@@ -2368,6 +2369,20 @@ function createRepositoryScanner(): RepositoryScanner {
   return scanRepositorySource;
 }
 
+export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]): boolean {
+  if (typeof entry !== "string" || !entry.trim()) {
+    return false;
+  }
+
+  const modulePath = fileURLToPath(moduleUrl);
+
+  try {
+    return realpathSync(entry) === realpathSync(modulePath);
+  } catch {
+    return resolve(entry) === resolve(modulePath);
+  }
+}
+
 export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions = {}) {
   const now = options.now ?? (() => new Date().toISOString());
   const scanRepository = options.scanRepository ?? createRepositoryScanner();
@@ -2621,4 +2636,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
 const plugin = createAgentCompaniesPlugin();
 
 export default plugin;
-runWorker(plugin, import.meta.url);
+
+if (shouldStartWorkerHost(import.meta.url)) {
+  startWorkerRpcHost({ plugin });
+}
