@@ -1467,12 +1467,37 @@ async function resolveOrCreateCompanySecret(
   );
 }
 
-function buildPaperclipUrl(input: string): string {
-  if (typeof window === "undefined" || !window.location?.origin) {
-    return input;
+function resolveBrowserOrigin(): string | null {
+  if (typeof window === "undefined" || typeof window.location?.origin !== "string") {
+    return null;
   }
 
-  return new URL(input, window.location.origin).toString();
+  const origin = window.location.origin.trim();
+  return origin ? origin : null;
+}
+
+function isTrustedSameOriginHttpUrl(candidate: URL, expectedOrigin: string): boolean {
+  return (
+    (candidate.protocol === "http:" || candidate.protocol === "https:")
+    && candidate.origin === expectedOrigin
+  );
+}
+
+function buildPaperclipUrl(input: string): string | null {
+  const origin = resolveBrowserOrigin();
+  const trimmed = input.trim();
+  if (!origin || !trimmed || trimmed.startsWith("//")) {
+    return null;
+  }
+
+  let candidate: URL;
+  try {
+    candidate = new URL(trimmed, origin);
+  } catch {
+    return null;
+  }
+
+  return isTrustedSameOriginHttpUrl(candidate, origin) ? candidate.toString() : null;
 }
 
 function resolveCliAuthUrl(url?: string, path?: string): string | null {
@@ -1534,7 +1559,7 @@ async function waitForBoardAccessApproval(challenge: CliAuthChallengeResponse): 
   const challengeToken = typeof challenge.token === "string" ? challenge.token.trim() : "";
   const pollUrl = resolveCliAuthPollUrl(challenge.pollUrl ?? challenge.pollPath);
   if (!challengeToken || !pollUrl) {
-    throw new Error("Paperclip did not return a usable board access challenge.");
+    throw new Error("Paperclip did not return a trusted board access challenge.");
   }
 
   const expiresAtTimeMs =
@@ -3119,7 +3144,7 @@ export function AgentCompaniesSettingsPage({
       const challenge = await requestBoardAccessChallenge(context.companyId);
       const approvalUrl = resolveCliAuthUrl(challenge.approvalUrl, challenge.approvalPath);
       if (!approvalUrl) {
-        throw new Error("Paperclip did not return a board approval URL.");
+        throw new Error("Paperclip did not return a trusted board approval URL.");
       }
 
       if (!approvalWindow && typeof window !== "undefined") {
