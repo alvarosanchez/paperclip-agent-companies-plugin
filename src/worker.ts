@@ -38,10 +38,16 @@ import {
   type RepositorySource,
   type CatalogState
 } from "./catalog.js";
+import { requiresPaperclipBoardAccess } from "./paperclip-health.js";
 
 const CATALOG_SCOPE: ScopeKey = {
   scopeKind: "instance",
   stateKey: CATALOG_STATE_KEY
+};
+const BOARD_ACCESS_STATE_KEY = "agent-companies.board-access.v1";
+const BOARD_ACCESS_SCOPE: ScopeKey = {
+  scopeKind: "instance",
+  stateKey: BOARD_ACCESS_STATE_KEY
 };
 
 const IGNORED_DIRECTORY_NAMES = new Set([
@@ -240,6 +246,24 @@ interface StoredBoardCredential {
   userId: string | null;
 }
 
+interface CompanyBoardAccessRecord {
+  paperclipBoardApiTokenRef: string;
+  identity: string | null;
+  updatedAt: string | null;
+}
+
+interface BoardAccessState {
+  companies: Record<string, CompanyBoardAccessRecord>;
+  updatedAt: string | null;
+}
+
+interface BoardAccessRegistration {
+  companyId: string | null;
+  configured: boolean;
+  identity: string | null;
+  updatedAt: string | null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -250,6 +274,50 @@ function asNonEmptyString(value: unknown): string | null {
 
 function asIsoTimestamp(value: unknown): string | null {
   return asNonEmptyString(value);
+}
+
+function normalizeCompanyBoardAccessRecord(value: unknown): CompanyBoardAccessRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const paperclipBoardApiTokenRef = asNonEmptyString(value.paperclipBoardApiTokenRef);
+  if (!paperclipBoardApiTokenRef) {
+    return null;
+  }
+
+  return {
+    paperclipBoardApiTokenRef,
+    identity: asNonEmptyString(value.identity),
+    updatedAt: asIsoTimestamp(value.updatedAt)
+  };
+}
+
+function normalizeBoardAccessState(value: unknown): BoardAccessState {
+  if (!isRecord(value)) {
+    return {
+      companies: {},
+      updatedAt: null
+    };
+  }
+
+  const rawCompanies = isRecord(value.companies) ? value.companies : {};
+  const companies: Record<string, CompanyBoardAccessRecord> = {};
+
+  for (const [companyId, record] of Object.entries(rawCompanies)) {
+    const normalizedCompanyId = asNonEmptyString(companyId);
+    const normalizedRecord = normalizeCompanyBoardAccessRecord(record);
+    if (!normalizedCompanyId || !normalizedRecord) {
+      continue;
+    }
+
+    companies[normalizedCompanyId] = normalizedRecord;
+  }
+
+  return {
+    companies,
+    updatedAt: asIsoTimestamp(value.updatedAt)
+  };
 }
 
 function toPosixPath(value: string): string {
@@ -412,16 +480,77 @@ async function readStoredBoardCredential(apiBase: string): Promise<StoredBoardCr
   };
 }
 
-async function resolvePaperclipApiConnection(): Promise<PaperclipApiConnection> {
+async function resolveSavedBoardAccessToken(
+  ctx: PluginContext,
+  companyId: string | null
+): Promise<string | null> {
+  if (!companyId) {
+    return null;
+  }
+
+  const state = await loadBoardAccessState(ctx);
+  const secretRef = state.companies[companyId]?.paperclipBoardApiTokenRef?.trim();
+  if (!secretRef) {
+    return null;
+  }
+
+  try {
+    const token = (await ctx.secrets.resolve(secretRef)).trim();
+    return token || null;
+  } catch (error) {
+    ctx.logger.warn("Unable to resolve the saved Paperclip board access token.", {
+      companyId,
+      secretRef,
+      error: summarizeErrorMessage(error)
+    });
+    return null;
+  }
+}
+
+export async function resolvePaperclipApiConnection(
+  ctx?: PluginContext,
+  companyId: string | null = null
+): Promise<PaperclipApiConnection> {
   const explicitApiBase = process.env.PAPERCLIP_API_URL?.trim();
   const configPath = resolvePaperclipConfigPath();
   const apiBase = normalizeApiBase(explicitApiBase || (await inferPaperclipApiBaseFromConfig(configPath)));
-  const apiKey = process.env.PAPERCLIP_API_KEY?.trim() || (await readStoredBoardCredential(apiBase))?.token || null;
+  const apiKey =
+    process.env.PAPERCLIP_API_KEY?.trim()
+    || (ctx ? await resolveSavedBoardAccessToken(ctx, companyId) : null)
+    || (await readStoredBoardCredential(apiBase))?.token
+    || null;
 
   return {
     apiBase,
     apiKey
   };
+}
+
+async function fetchPaperclipHealth(apiBase: string): Promise<unknown | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase}/api/health`, {
+      headers: {
+        accept: "application/json"
+      }
+    });
+  } catch {
+    return null;
+  }
+
+  try {
+    return await parsePaperclipJsonResponse(response);
+  } catch {
+    return null;
+  }
+}
+
+function buildBoardAccessRequiredSyncMessage(): string {
+  return "Board access required. Open Agent Companies Plugin settings inside the imported company, connect board access, and retry sync.";
+}
+
+function isBoardAccessRequiredError(error: unknown): boolean {
+  return summarizeErrorMessage(error).toLowerCase().includes("board access required");
 }
 
 function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
@@ -1246,6 +1375,11 @@ async function loadCatalogState(ctx: PluginContext): Promise<CatalogState> {
   return normalizeCatalogState(storedState);
 }
 
+async function loadBoardAccessState(ctx: PluginContext): Promise<BoardAccessState> {
+  const storedState = await ctx.state.get(BOARD_ACCESS_SCOPE);
+  return normalizeBoardAccessState(storedState);
+}
+
 async function loadCatalogStateWithSyncRecovery(
   ctx: PluginContext,
   timestamp: string
@@ -1282,6 +1416,34 @@ async function persistCatalogState(
 
   await ctx.state.set(CATALOG_SCOPE, nextState);
   return nextState;
+}
+
+async function persistBoardAccessState(
+  ctx: PluginContext,
+  state: BoardAccessState,
+  now: string
+): Promise<BoardAccessState> {
+  const nextState = normalizeBoardAccessState({
+    companies: state.companies,
+    updatedAt: now
+  });
+
+  await ctx.state.set(BOARD_ACCESS_SCOPE, nextState);
+  return nextState;
+}
+
+function getBoardAccessRegistration(
+  state: BoardAccessState,
+  companyId: string | null
+): BoardAccessRegistration {
+  const record = companyId ? state.companies[companyId] ?? null : null;
+
+  return {
+    companyId,
+    configured: Boolean(record?.paperclipBoardApiTokenRef),
+    identity: record?.identity ?? null,
+    updatedAt: record?.updatedAt ?? null
+  };
 }
 
 async function scanRepositoryEntry(
@@ -2072,10 +2234,17 @@ async function buildCatalogCompanyImportSource(
 }
 
 async function executeDefaultSyncImport(
-  _ctx: PluginContext,
+  ctx: PluginContext,
   input: SyncImportRequest
 ): Promise<PaperclipCompanyImportResult> {
-  const connection = await resolvePaperclipApiConnection();
+  const connection = await resolvePaperclipApiConnection(ctx, input.importedCompanyId);
+  if (!connection.apiKey) {
+    const health = await fetchPaperclipHealth(connection.apiBase);
+    if (requiresPaperclipBoardAccess(health)) {
+      throw new Error(buildBoardAccessRequiredSyncMessage());
+    }
+  }
+
   const requestUrl = `${connection.apiBase}/api/companies/import`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -2113,7 +2282,17 @@ async function executeDefaultSyncImport(
     );
   }
 
-  const payload = await parsePaperclipJsonResponse(response);
+  let payload;
+  try {
+    payload = await parsePaperclipJsonResponse(response);
+  } catch (error) {
+    if (isBoardAccessRequiredError(error)) {
+      throw new Error(buildBoardAccessRequiredSyncMessage());
+    }
+
+    throw error;
+  }
+
   if (!isRecord(payload)) {
     throw new Error("Paperclip returned an unexpected sync response.");
   }
@@ -2412,6 +2591,13 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         return buildCatalogResponse(nextState, timestamp);
       });
 
+      ctx.data.register("board-access.read", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const companyId = asNonEmptyString(params.companyId);
+        const state = await loadBoardAccessState(ctx);
+        return getBoardAccessRegistration(state, companyId);
+      });
+
       ctx.data.register("catalog.company-content.read", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = asNonEmptyString(params.companyId);
@@ -2521,6 +2707,37 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           syncImport,
           trigger: "manual"
         });
+      });
+
+      ctx.actions.register("board-access.update", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const companyId = getRequiredString(params, "companyId");
+        const paperclipBoardApiTokenRef = asNonEmptyString(params.paperclipBoardApiTokenRef);
+        const identity = asNonEmptyString(params.identity);
+        const timestamp = now();
+        const currentState = await loadBoardAccessState(ctx);
+        const nextCompanies = { ...currentState.companies };
+
+        if (paperclipBoardApiTokenRef) {
+          nextCompanies[companyId] = {
+            paperclipBoardApiTokenRef,
+            identity,
+            updatedAt: timestamp
+          };
+        } else {
+          delete nextCompanies[companyId];
+        }
+
+        const nextState = await persistBoardAccessState(
+          ctx,
+          {
+            companies: nextCompanies,
+            updatedAt: timestamp
+          },
+          timestamp
+        );
+
+        return getBoardAccessRegistration(nextState, companyId);
       });
 
       ctx.actions.register("catalog.add-repository", async (rawParams) => {
