@@ -26,6 +26,7 @@ import {
   buildGitProcessEnvironment,
   clearRepositoryCheckoutCacheEntry,
   createAgentCompaniesPlugin,
+  resolvePaperclipApiConnection,
   resolveRepositoryContentRoot,
   scanRepositoryForAgentCompanies,
   shouldStartWorkerHost
@@ -280,6 +281,39 @@ metadata:
 Design the next iteration of the platform.
 `
   );
+}
+
+async function addRecurringTaskFixture(repositoryRoot: string): Promise<void> {
+  await mkdir(join(repositoryRoot, "alpha", "tasks", "monday-review"), { recursive: true });
+  await writeFile(
+    join(repositoryRoot, "alpha", "tasks", "monday-review", "TASK.md"),
+    `---
+name: Monday Review
+assignee: ceo
+project: import-pipeline
+recurring: true
+---
+
+Review pipeline health.
+`
+  );
+  await writeFile(
+    join(repositoryRoot, "alpha", ".paperclip.yaml"),
+    `schema: paperclip/v1
+routines:
+  monday-review:
+    status: paused
+    triggers:
+      - kind: schedule
+        cronExpression: "0 9 * * 1"
+        timezone: America/Chicago
+      - kind: webhook
+        enabled: false
+        signingMode: hmac_sha256
+`
+  );
+  await runCommand("git", ["add", "."], repositoryRoot);
+  await runCommand("git", ["commit", "-m", "Add recurring task fixture"], repositoryRoot);
 }
 
 describe("agent companies plugin", () => {
@@ -591,6 +625,56 @@ describe("agent companies plugin", () => {
     expect(detail?.item.frontmatter).toContain("name: Repo Audit");
     expect(detail?.item.markdown).toContain("## Checklist");
     expect(detail?.item.markdown).toContain("Review the repository layout");
+  });
+
+  it("surfaces recurring task metadata from Paperclip routine sidecars", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addRecurringTaskFixture(repositoryPath);
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:20:00.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+    const recurringTask = company?.contents.tasks.find((item) => item.path === "tasks/monday-review/TASK.md");
+
+    expect(recurringTask).toMatchObject({
+      name: "Monday Review",
+      path: "tasks/monday-review/TASK.md"
+    });
+    expect(recurringTask?.recurring).toBe(true);
+    expect(recurringTask?.paperclipRoutineStatus).toBe("paused");
+    expect(recurringTask?.paperclipRoutineTriggerCount).toBe(2);
+
+    const detail = await harness.getData<CatalogCompanyContentDetail | null>(
+      "catalog.company-content.read",
+      {
+        companyId: company?.id,
+        itemPath: "tasks/monday-review/TASK.md"
+      }
+    );
+
+    expect(detail?.item.kind).toBe("tasks");
+    expect(detail?.item.fullPath).toBe("alpha/tasks/monday-review/TASK.md");
+    expect(detail?.item.recurring).toBe(true);
+    expect(detail?.item.paperclipRoutineStatus).toBe("paused");
+    expect(detail?.item.paperclipRoutineTriggerCount).toBe(2);
+    expect(detail?.item.frontmatter).toContain("recurring: true");
+    expect(detail?.item.markdown).toContain("Review pipeline health.");
   });
 
   it("packages a discovered company as an inline import source", async () => {
@@ -1058,6 +1142,113 @@ describe("agent companies plugin", () => {
       }
     }
   });
+
+  it.each([401, 403])(
+    "falls back to board access guidance when the import api returns %i",
+    async (statusCode) => {
+      const repositoryPath = await createRepositoryFixture();
+      const previousApiUrl = process.env.PAPERCLIP_API_URL;
+      const previousApiKey = process.env.PAPERCLIP_API_KEY;
+      const originalFetch = globalThis.fetch;
+      const fetchRequests: string[] = [];
+
+      process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+      delete process.env.PAPERCLIP_API_KEY;
+      globalThis.fetch = async (input) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        fetchRequests.push(url);
+
+        if (url === "http://127.0.0.1:3210/api/health") {
+          return new Response(
+            JSON.stringify({
+              deploymentMode: "local"
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          );
+        }
+
+        if (url === "http://127.0.0.1:3210/api/companies/import") {
+          return new Response(
+            JSON.stringify({
+              error: statusCode === 401 ? "Unauthorized" : "Forbidden"
+            }),
+            {
+              status: statusCode,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          );
+        }
+
+        throw new Error(`Unexpected fetch to ${url}`);
+      };
+
+      try {
+        const plugin = createAgentCompaniesPlugin({
+          now: () => "2026-04-14T09:23:00.000Z",
+          startupAutoSyncDelayMs: null
+        });
+        const harness = createTestHarness({
+          manifest,
+          capabilities: [...manifest.capabilities]
+        });
+
+        await harness.ctx.state.set(CATALOG_SCOPE, {
+          repositories: [],
+          updatedAt: "2026-04-14T09:00:00.000Z"
+        });
+
+        await plugin.definition.setup(harness.ctx);
+        await harness.performAction("catalog.add-repository", {
+          url: repositoryPath
+        });
+
+        const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+        const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+        await harness.performAction("catalog.record-company-import", {
+          sourceCompanyId: company?.id,
+          importedCompanyId: "paperclip-company-123",
+          importedCompanyName: "Alpha Labs Imported",
+          importedCompanyIssuePrefix: "ALP"
+        });
+        await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+        await expect(
+          harness.performAction("catalog.sync-company", {
+            companyId: company?.id
+          })
+        ).rejects.toThrow(
+          /Board access required\. Open Agent Companies Plugin settings inside the imported company, connect board access, and retry sync\./u
+        );
+
+        expect(fetchRequests).toEqual([
+          "http://127.0.0.1:3210/api/health",
+          "http://127.0.0.1:3210/api/companies/import"
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (previousApiUrl === undefined) {
+          delete process.env.PAPERCLIP_API_URL;
+        } else {
+          process.env.PAPERCLIP_API_URL = previousApiUrl;
+        }
+
+        if (previousApiKey === undefined) {
+          delete process.env.PAPERCLIP_API_KEY;
+        } else {
+          process.env.PAPERCLIP_API_KEY = previousApiKey;
+        }
+      }
+    }
+  );
 
   it("rejects inline import sources with oversized files", async () => {
     const repositoryPath = await createRepositoryFixture();
@@ -1780,8 +1971,77 @@ describe("agent companies plugin", () => {
     expect(environment.GIT_TERMINAL_PROMPT).toBe("0");
   });
 
+  it("prefers the hosted Paperclip api base saved in plugin state over inferred local config", async () => {
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousConfigPath = process.env.PAPERCLIP_CONFIG_PATH;
+    const paperclipHome = await mkdtemp(join(tmpdir(), "paperclip-agent-companies-plugin-home-"));
+    tempDirectories.push(paperclipHome);
+
+    await mkdir(join(paperclipHome, "instances", "default"), { recursive: true });
+    await writeFile(
+      join(paperclipHome, "instances", "default", "config.json"),
+      JSON.stringify({
+        server: {
+          port: 3100
+        }
+      })
+    );
+
+    delete process.env.PAPERCLIP_API_URL;
+    delete process.env.PAPERCLIP_CONFIG_PATH;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("paperclip-runtime.set-api-base", {
+        apiBase: "http://127.0.0.1:63323/"
+      });
+
+      const connection = await resolvePaperclipApiConnection(harness.ctx);
+
+      expect(connection.apiBase).toBe("http://127.0.0.1:63323");
+      expect(connection.apiKey).toBeNull();
+    } finally {
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousPaperclipHome === undefined) {
+        delete process.env.PAPERCLIP_HOME;
+      } else {
+        process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      }
+
+      if (previousPaperclipInstanceId === undefined) {
+        delete process.env.PAPERCLIP_INSTANCE_ID;
+      } else {
+        process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      }
+
+      if (previousConfigPath === undefined) {
+        delete process.env.PAPERCLIP_CONFIG_PATH;
+      } else {
+        process.env.PAPERCLIP_CONFIG_PATH = previousConfigPath;
+      }
+    }
+  });
+
   it("scans real git repositories for agent company manifests", async () => {
     const repositoryPath = await createRepositoryFixture();
+    await addRecurringTaskFixture(repositoryPath);
 
     const companies = await scanRepositoryForAgentCompanies(repositoryPath, "fixture-repository");
 
@@ -1794,7 +2054,14 @@ describe("agent companies plugin", () => {
     expect(companies[0]?.contents.agents.map((item) => item.name)).toEqual(["Alpha CEO"]);
     expect(companies[0]?.contents.skills.map((item) => item.name)).toEqual(["Repo Audit"]);
     expect(companies[0]?.contents.projects.map((item) => item.name)).toEqual(["Import Pipeline"]);
-    expect(companies[0]?.contents.tasks.map((item) => item.name)).toEqual(["Seed Default Company"]);
+    expect(companies[0]?.contents.tasks.map((item) => item.name)).toEqual([
+      "Monday Review",
+      "Seed Default Company"
+    ]);
+    const recurringTask = companies[0]?.contents.tasks.find((item) => item.path === "tasks/monday-review/TASK.md");
+    expect(recurringTask?.recurring).toBe(true);
+    expect(recurringTask?.paperclipRoutineStatus).toBe("paused");
+    expect(recurringTask?.paperclipRoutineTriggerCount).toBe(2);
     expect(companies[0]?.contents.issues.map((item) => item.name)).toEqual(["Follow Up Review"]);
     expect(companies[1]?.contents.agents.map((item) => item.name)).toEqual(["Beta Operator"]);
     expect(companies[1]?.contents.skills).toEqual([]);

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -1473,7 +1473,20 @@ function resolveBrowserOrigin(): string | null {
   }
 
   const origin = window.location.origin.trim();
-  return origin ? origin : null;
+  if (!origin || origin === "null") {
+    return null;
+  }
+
+  try {
+    const normalizedOrigin = new URL(origin);
+    if (normalizedOrigin.protocol !== "http:" && normalizedOrigin.protocol !== "https:") {
+      return null;
+    }
+
+    return normalizedOrigin.origin;
+  } catch {
+    return null;
+  }
 }
 
 function isTrustedSameOriginHttpUrl(candidate: URL, expectedOrigin: string): boolean {
@@ -1818,10 +1831,110 @@ function formatContentCount(
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function getRecurringTaskCount(contents: CompanyContents): number {
+  return contents.tasks.filter((item) => item.recurring).length;
+}
+
+function formatRoutineTriggerCount(count: number): string {
+  return `${count} ${count === 1 ? "routine trigger" : "routine triggers"}`;
+}
+
+function getRecurringTaskImportHint(contents: CompanyContents): string | null {
+  const recurringTaskCount = getRecurringTaskCount(contents);
+  if (recurringTaskCount === 0) {
+    return null;
+  }
+
+  const hasPaperclipRoutineMetadata = contents.tasks.some(
+    (item) =>
+      item.recurring
+      && (
+        typeof item.paperclipRoutineTriggerCount === "number"
+        || Boolean(item.paperclipRoutineStatus)
+      )
+  );
+
+  const routineLabel = recurringTaskCount === 1 ? "routine" : "routines";
+  const recurringTaskLabel = formatContentCount(
+    recurringTaskCount,
+    "recurring task",
+    "recurring tasks"
+  );
+
+  return hasPaperclipRoutineMetadata
+    ? `${recurringTaskLabel} will import as Paperclip ${routineLabel}; .paperclip.yaml routine metadata is preserved.`
+    : `${recurringTaskLabel} will import as Paperclip ${routineLabel}.`;
+}
+
+function getCompanyContentStatNote(
+  section: (typeof COMPANY_CONTENT_SECTIONS)[number],
+  contents: CompanyContents
+): string {
+  const count = contents[section.key].length;
+  if (section.key === "tasks") {
+    const recurringTaskCount = getRecurringTaskCount(contents);
+    if (recurringTaskCount > 0) {
+      return formatContentCount(recurringTaskCount, "recurring task", "recurring tasks");
+    }
+  }
+
+  return formatContentCount(count, section.singular, section.plural);
+}
+
+function getCompanyContentItemBadges(
+  item: CompanyContentItem,
+  kind: CompanyContentKey
+): Array<{ label: string; tone?: "accent" }> {
+  const badges: Array<{ label: string; tone?: "accent" }> = [];
+
+  if (kind === "tasks" && item.recurring) {
+    badges.push({
+      label: "Recurring task",
+      tone: "accent"
+    });
+  }
+
+  if (item.paperclipRoutineStatus) {
+    badges.push({
+      label: `Routine: ${item.paperclipRoutineStatus}`
+    });
+  }
+
+  if (typeof item.paperclipRoutineTriggerCount === "number") {
+    badges.push({
+      label: formatRoutineTriggerCount(item.paperclipRoutineTriggerCount)
+    });
+  }
+
+  return badges;
+}
+
 function buildCompanyContentSummary(contents: CompanyContents): string {
   const parts = COMPANY_CONTENT_SECTIONS.flatMap((section) => {
     const count = contents[section.key].length;
-    return count > 0 ? [formatContentCount(count, section.singular, section.plural)] : [];
+    if (count === 0) {
+      return [];
+    }
+
+    if (section.key !== "tasks") {
+      return [formatContentCount(count, section.singular, section.plural)];
+    }
+
+    const recurringTaskCount = getRecurringTaskCount(contents);
+    const oneTimeTaskCount = count - recurringTaskCount;
+    const taskParts: string[] = [];
+
+    if (oneTimeTaskCount > 0) {
+      taskParts.push(formatContentCount(oneTimeTaskCount, "task", "tasks"));
+    }
+
+    if (recurringTaskCount > 0) {
+      taskParts.push(formatContentCount(recurringTaskCount, "recurring task", "recurring tasks"));
+    }
+
+    return taskParts.length > 0
+      ? taskParts
+      : [formatContentCount(count, section.singular, section.plural)];
   });
 
   return parts.length > 0 ? parts.join(" • ") : "No structured contents detected";
@@ -1906,7 +2019,15 @@ function matchesCompanyQuery(company: CatalogCompanySummary, query: string): boo
 
   const normalizedQuery = query.toLowerCase();
   const contentValues = COMPANY_CONTENT_SECTIONS.flatMap((section) =>
-    company.contents[section.key].flatMap((item) => [item.name, item.path])
+    company.contents[section.key].flatMap((item) => [
+      item.name,
+      item.path,
+      item.recurring ? "recurring task paperclip routine" : "",
+      item.paperclipRoutineStatus ?? "",
+      typeof item.paperclipRoutineTriggerCount === "number"
+        ? formatRoutineTriggerCount(item.paperclipRoutineTriggerCount)
+        : ""
+    ])
   );
 
   return [
@@ -2326,7 +2447,7 @@ function CompanyDetailsDialog(props: {
                 <span className="agent-companies-settings__metric-label">{section.label}</span>
                 <strong className="agent-companies-settings__dialog-stat-value">{count}</strong>
                 <span className="agent-companies-settings__metric-note">
-                  {formatContentCount(count, section.singular, section.plural)}
+                  {getCompanyContentStatNote(section, company.contents)}
                 </span>
               </div>
             );
@@ -2350,6 +2471,7 @@ function CompanyDetailsDialog(props: {
                     <ul className="agent-companies-settings__dialog-nav-list">
                       {items.map((item) => {
                         const isActive = selectedSelection?.item.path === item.path;
+                        const badges = getCompanyContentItemBadges(item, section.key);
 
                         return (
                           <li key={item.path}>
@@ -2366,6 +2488,25 @@ function CompanyDetailsDialog(props: {
                                   {item.name}
                                 </span>
                               </div>
+                              {badges.length > 0 ? (
+                                <div className="agent-companies-settings__badge-row">
+                                  {badges.map((badge) => (
+                                    <span
+                                      className={[
+                                        "agent-companies-settings__badge",
+                                        badge.tone === "accent"
+                                          ? "agent-companies-settings__badge--accent"
+                                          : ""
+                                      ]
+                                        .filter(Boolean)
+                                        .join(" ")}
+                                      key={badge.label}
+                                    >
+                                      {badge.label}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : null}
                               <span className="agent-companies-settings__dialog-nav-item-path">
                                 {item.path}
                               </span>
@@ -2408,6 +2549,21 @@ function CompanyDetailsDialog(props: {
                     <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
                       {selectedSection?.label ?? "Item"}
                     </span>
+                    {getCompanyContentItemBadges(detailData.item, detailData.item.kind).map((badge) => (
+                      <span
+                        className={[
+                          "agent-companies-settings__badge",
+                          badge.tone === "accent"
+                            ? "agent-companies-settings__badge--accent"
+                            : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        key={badge.label}
+                      >
+                        {badge.label}
+                      </span>
+                    ))}
                   </div>
                   <div>
                     <h3 className="agent-companies-settings__dialog-preview-title">
@@ -2676,6 +2832,7 @@ export function AgentCompaniesSettingsPage({
   const scanRepository = usePluginAction("catalog.scan-repository");
   const scanAllRepositories = usePluginAction("catalog.scan-all-repositories");
   const updateBoardAccess = usePluginAction("board-access.update");
+  const setPaperclipApiBase = usePluginAction("paperclip-runtime.set-api-base");
   const catalog = data ?? EMPTY_CATALOG;
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const [repositoryInput, setRepositoryInput] = useState("");
@@ -2719,6 +2876,20 @@ export function AgentCompaniesSettingsPage({
   const selectedCompany = selectedCompanyId
     ? catalog.companies.find((company) => company.id === selectedCompanyId) ?? null
     : null;
+  const registeredApiBaseRef = useRef<string | null>(null);
+
+  async function ensurePaperclipApiBaseRegistered(): Promise<void> {
+    const apiBase = resolveBrowserOrigin();
+
+    if (!apiBase || registeredApiBaseRef.current === apiBase) {
+      return;
+    }
+
+    await setPaperclipApiBase({
+      apiBase
+    });
+    registeredApiBaseRef.current = apiBase;
+  }
 
   useEffect(() => {
     if (!selectedCompany && !importCompany) {
@@ -2772,6 +2943,10 @@ export function AgentCompaniesSettingsPage({
       window.clearInterval(intervalId);
     };
   }, [catalog.companies, refresh]);
+
+  useEffect(() => {
+    void ensurePaperclipApiBaseRegistered();
+  }, [setPaperclipApiBase]);
 
   useEffect(() => {
     if (!hasCompanyContext) {
@@ -2871,6 +3046,7 @@ export function AgentCompaniesSettingsPage({
     });
 
     try {
+      await ensurePaperclipApiBaseRegistered();
       const preparedImport = await prepareCompanyImport({
         companyId: importCompany.id
       }) as CatalogPreparedCompanyImport;
@@ -2940,6 +3116,7 @@ export function AgentCompaniesSettingsPage({
         : warningDetails.length;
       const importDetails = [
         `Package contents: ${buildCompanyContentSummary(importCompany.contents)}`,
+        getRecurringTaskImportHint(importCompany.contents),
         "Auto-sync: enabled daily by default after import.",
         "Default sync mode after import: overwrite existing content.",
         (() => {
@@ -3046,6 +3223,7 @@ export function AgentCompaniesSettingsPage({
     setNotice(null);
 
     try {
+      await ensurePaperclipApiBaseRegistered();
       const syncResult = await syncCompany({
         companyId
       }) as CatalogCompanySyncResult;
@@ -3054,6 +3232,7 @@ export function AgentCompaniesSettingsPage({
       const warningDetails = visibleWarningDetails.slice(0, 3);
       const syncDetails = [
         `Package contents: ${buildCompanyContentSummary(company.contents)}`,
+        getRecurringTaskImportHint(company.contents),
         syncResult.collisionStrategy === "replace"
           ? "Sync mode: overwrite existing content."
           : `Sync mode: ${syncResult.collisionStrategy}.`,
