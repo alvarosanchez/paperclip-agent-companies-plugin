@@ -11,9 +11,9 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 
 - Repository discovery from GitHub shorthand (`owner/repo`), full git URLs, or local checkouts
 - Automatic detection of `COMPANY.md` manifests with `schema: agentcompanies/v1`
-- A hosted Paperclip settings page for browsing repositories and discovered companies
-- Inline company import into a new Paperclip company
-- Manual sync plus daily background auto-sync for imported companies
+- A hosted Paperclip settings page with separate discovered-source and imported-company sections
+- Inline company import into a new Paperclip company, including repeated imports from the same discovered source
+- Manual sync plus daily background auto-sync for tracked imported companies
 - Recurring `TASK.md` support: `recurring: true` tasks import as Paperclip routines, with `.paperclip.yaml` routine metadata preserved
 - Company-scoped Board access connection for authenticated Paperclip deployments
 - Optional `metadata.paperclip.agentIcon` support for agent icon hints
@@ -52,9 +52,9 @@ paperclipai plugin install --local .
 2. Open **Agent Companies Plugin**.
 3. Add a repository source with `owner/repo`, a full repository URL, or a local checkout path.
 4. Review discovered companies and open **View contents** to inspect agents, projects, tasks, recurring tasks/routines, issues, and skills.
-5. Click **Import** to create a new Paperclip company from a discovered package.
+5. Click **Import as new company** to create a new Paperclip company from a discovered package. You can repeat this for the same discovered source when you need multiple Paperclip companies from one spec.
 6. If your Paperclip deployment requires authentication, open this plugin inside the imported company once and complete **Board access connection** in settings.
-7. Use **Sync now** when the source changes, or leave **Daily auto-sync** enabled to keep imports current.
+7. Use the separate **Imported Companies** section for **Sync now** and **Daily auto-sync** controls.
 
 ## Package Expectations
 
@@ -85,7 +85,7 @@ During import, the plugin packages the company directory as an inline Paperclip 
 
 ## Sync Behavior
 
-- The plugin records the imported source version from `COMPANY.md`.
+- The plugin records the imported source version from `COMPANY.md` per tracked imported company.
 - Imported companies default to daily auto-sync.
 - Manual sync is available whenever the source version changes or cannot be compared safely.
 - Sync uses overwrite mode by default so the imported Paperclip company stays aligned with the source package.

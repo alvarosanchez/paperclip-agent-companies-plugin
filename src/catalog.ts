@@ -176,17 +176,24 @@ export interface CatalogCompanySummary extends DiscoveredAgentCompany {
   repositoryLabel: string;
   repositoryUrl: string;
   repositoryIsDefault: boolean;
-  importedCompany: CatalogCompanyImportStatus | null;
+  importedCompanies: CatalogCompanyImportStatus[];
+}
+
+export interface CatalogImportedCompanySummary extends CatalogCompanySummary {
+  sourceCompanyId: string;
+  importedCompany: CatalogCompanyImportStatus;
 }
 
 export interface CatalogSnapshot {
   repositories: CatalogRepositorySummary[];
   companies: CatalogCompanySummary[];
+  importedCompanies: CatalogImportedCompanySummary[];
   summary: {
     repositoryCount: number;
     scannedRepositoryCount: number;
     errorRepositoryCount: number;
     companyCount: number;
+    importedCompanyCount: number;
     updatedAt: string | null;
   };
 }
@@ -709,6 +716,10 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
   };
 }
 
+function getImportedCatalogCompanyRecordKey(record: Pick<ImportedCatalogCompanyRecord, "sourceCompanyId" | "importedCompanyId">): string {
+  return `${record.sourceCompanyId}::${record.importedCompanyId}`;
+}
+
 function normalizeRepositorySource(value: unknown): RepositorySource | null {
   if (!isRecord(value)) {
     return null;
@@ -827,7 +838,10 @@ export function normalizeCatalogState(value: unknown): CatalogState {
       continue;
     }
 
-    importedCompanies.set(normalizedImportedCompany.sourceCompanyId, normalizedImportedCompany);
+    importedCompanies.set(
+      getImportedCatalogCompanyRecordKey(normalizedImportedCompany),
+      normalizedImportedCompany
+    );
   }
 
   return {
@@ -838,9 +852,13 @@ export function normalizeCatalogState(value: unknown): CatalogState {
 }
 
 export function buildCatalogSnapshot(state: CatalogState, now: string | null = null): CatalogSnapshot {
-  const importedCompaniesBySourceId = new Map<string, ImportedCatalogCompanyRecord>(
-    state.importedCompanies.map((importedCompany) => [importedCompany.sourceCompanyId, importedCompany])
-  );
+  const importedCompaniesBySourceId = new Map<string, ImportedCatalogCompanyRecord[]>();
+
+  for (const importedCompany of state.importedCompanies) {
+    const existingImportedCompanies = importedCompaniesBySourceId.get(importedCompany.sourceCompanyId) ?? [];
+    existingImportedCompanies.push(importedCompany);
+    importedCompaniesBySourceId.set(importedCompany.sourceCompanyId, existingImportedCompanies);
+  }
   const repositories = state.repositories.map((repository) => ({
     ...repository,
     companyCount: repository.companies.length
@@ -853,39 +871,42 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
         repositoryLabel: repository.label,
         repositoryUrl: repository.url,
         repositoryIsDefault: repository.isDefault,
-        importedCompany: (() => {
-          const importedCompany = importedCompaniesBySourceId.get(company.id);
-          if (!importedCompany) {
-            return null;
-          }
+        importedCompanies: (importedCompaniesBySourceId.get(company.id) ?? [])
+          .map((importedCompany) => {
+            const latestSourceVersion = company.version;
+            const isSyncAvailable = isCatalogCompanySyncAvailable(
+              importedCompany.importedSourceVersion,
+              latestSourceVersion
+            );
 
-          const latestSourceVersion = company.version;
-          const isSyncAvailable = isCatalogCompanySyncAvailable(
-            importedCompany.importedSourceVersion,
-            latestSourceVersion
-          );
-
-          return {
-            id: importedCompany.importedCompanyId,
-            name: importedCompany.importedCompanyName,
-            issuePrefix: importedCompany.importedCompanyIssuePrefix,
-            importedSourceVersion: importedCompany.importedSourceVersion,
-            latestSourceVersion,
-            importedAt: importedCompany.importedAt,
-            autoSyncEnabled: importedCompany.autoSyncEnabled,
-            syncCollisionStrategy: importedCompany.syncCollisionStrategy,
-            syncStatus: importedCompany.lastSyncStatus,
-            lastSyncAttemptAt: importedCompany.lastSyncAttemptAt,
-            lastSyncedAt: importedCompany.lastSyncedAt,
-            lastSyncError: importedCompany.lastSyncError,
-            syncRunningSince: importedCompany.syncRunningSince,
-            isSyncAvailable,
-            isUpToDate: !isSyncAvailable,
-            isAutoSyncDue:
-              now && isSyncAvailable ? isCatalogCompanyAutoSyncDue(importedCompany, now) : false,
-            nextAutoSyncAt: importedCompany.autoSyncEnabled ? getCatalogCompanyNextAutoSyncAt(importedCompany) : null
-          };
-        })()
+            return {
+              id: importedCompany.importedCompanyId,
+              name: importedCompany.importedCompanyName,
+              issuePrefix: importedCompany.importedCompanyIssuePrefix,
+              importedSourceVersion: importedCompany.importedSourceVersion,
+              latestSourceVersion,
+              importedAt: importedCompany.importedAt,
+              autoSyncEnabled: importedCompany.autoSyncEnabled,
+              syncCollisionStrategy: importedCompany.syncCollisionStrategy,
+              syncStatus: importedCompany.lastSyncStatus,
+              lastSyncAttemptAt: importedCompany.lastSyncAttemptAt,
+              lastSyncedAt: importedCompany.lastSyncedAt,
+              lastSyncError: importedCompany.lastSyncError,
+              syncRunningSince: importedCompany.syncRunningSince,
+              isSyncAvailable,
+              isUpToDate: !isSyncAvailable,
+              isAutoSyncDue:
+                now && isSyncAvailable ? isCatalogCompanyAutoSyncDue(importedCompany, now) : false,
+              nextAutoSyncAt: importedCompany.autoSyncEnabled ? getCatalogCompanyNextAutoSyncAt(importedCompany) : null
+            };
+          })
+          .sort((left, right) =>
+            left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
+            (left.issuePrefix ?? "").localeCompare(right.issuePrefix ?? "", undefined, {
+              sensitivity: "base"
+            }) ||
+            left.id.localeCompare(right.id, undefined, { sensitivity: "base" })
+          )
       }))
     )
     .sort((left, right) =>
@@ -893,15 +914,35 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
       left.repositoryLabel.localeCompare(right.repositoryLabel, undefined, { sensitivity: "base" }) ||
       left.manifestPath.localeCompare(right.manifestPath, undefined, { sensitivity: "base" })
     );
+  const importedCompanies = companies
+    .flatMap((company) =>
+      company.importedCompanies.map((importedCompany) => ({
+        ...company,
+        sourceCompanyId: company.id,
+        importedCompany
+      }))
+    )
+    .sort((left, right) =>
+      left.importedCompany.name.localeCompare(right.importedCompany.name, undefined, {
+        sensitivity: "base"
+      }) ||
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
+      left.repositoryLabel.localeCompare(right.repositoryLabel, undefined, { sensitivity: "base" }) ||
+      left.importedCompany.id.localeCompare(right.importedCompany.id, undefined, {
+        sensitivity: "base"
+      })
+    );
 
   return {
     repositories,
     companies,
+    importedCompanies,
     summary: {
       repositoryCount: repositories.length,
       scannedRepositoryCount: repositories.filter((repository) => repository.lastScannedAt !== null).length,
       errorRepositoryCount: repositories.filter((repository) => repository.status === "error").length,
       companyCount: companies.length,
+      importedCompanyCount: importedCompanies.length,
       updatedAt: state.updatedAt
     }
   };

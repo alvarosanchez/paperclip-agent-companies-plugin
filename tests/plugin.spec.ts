@@ -1034,7 +1034,8 @@ describe("agent companies plugin", () => {
       };
 
       await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
-        companyId: company?.id
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
       });
 
       expect(fetchRequests).toHaveLength(1);
@@ -1120,7 +1121,8 @@ describe("agent companies plugin", () => {
 
       await expect(
         harness.performAction("catalog.sync-company", {
-          companyId: company?.id
+          sourceCompanyId: company?.id,
+          importedCompanyId: "paperclip-company-123"
         })
       ).rejects.toThrow(
         /Board access required\. Open Agent Companies Plugin settings inside the imported company, connect board access, and retry sync\./u
@@ -1223,7 +1225,8 @@ describe("agent companies plugin", () => {
 
         await expect(
           harness.performAction("catalog.sync-company", {
-            companyId: company?.id
+            sourceCompanyId: company?.id,
+            importedCompanyId: "paperclip-company-123"
           })
         ).rejects.toThrow(
           /Board access required\. Open Agent Companies Plugin settings inside the imported company, connect board access, and retry sync\./u
@@ -1288,7 +1291,7 @@ describe("agent companies plugin", () => {
     );
   });
 
-  it("tracks imported companies and blocks repeat imports", async () => {
+  it("tracks multiple imported companies for one discovered source and keeps import preparation available", async () => {
     const repositoryPath = await createRepositoryFixture();
     const plugin = createAgentCompaniesPlugin({
       now: () => "2026-04-14T09:23:00.000Z"
@@ -1311,7 +1314,7 @@ describe("agent companies plugin", () => {
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    expect(company?.importedCompany).toBeNull();
+    expect(company?.importedCompanies).toEqual([]);
 
     await harness.performAction("catalog.record-company-import", {
       sourceCompanyId: company?.id,
@@ -1319,39 +1322,55 @@ describe("agent companies plugin", () => {
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
     });
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-456",
+      importedCompanyName: "Alpha Labs Sandbox",
+      importedCompanyIssuePrefix: "ALPS"
+    });
 
     const afterImportRecord = await harness.getData<CatalogSnapshot>("catalog.read");
-    const importedCompany = afterImportRecord.companies.find(
+    const discoveredCompany = afterImportRecord.companies.find(
       (candidate) => candidate.id === company?.id
     );
 
-    expect(importedCompany?.importedCompany).toEqual({
-      id: "paperclip-company-123",
-      name: "Alpha Labs Imported",
-      issuePrefix: "ALP",
-      importedSourceVersion: "1.0.0",
-      latestSourceVersion: "1.0.0",
-      importedAt: "2026-04-14T09:23:00.000Z",
-      autoSyncEnabled: true,
-      syncCollisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
-      syncStatus: "succeeded",
-      lastSyncAttemptAt: "2026-04-14T09:23:00.000Z",
-      lastSyncedAt: "2026-04-14T09:23:00.000Z",
-      lastSyncError: null,
-      syncRunningSince: null,
-      isSyncAvailable: false,
-      isUpToDate: true,
-      isAutoSyncDue: false,
-      nextAutoSyncAt: "2026-04-15T09:23:00.000Z"
-    });
+    expect(discoveredCompany?.importedCompanies).toHaveLength(2);
+    expect(discoveredCompany?.importedCompanies.map((candidate) => candidate.id)).toEqual([
+      "paperclip-company-123",
+      "paperclip-company-456"
+    ]);
+    expect(afterImportRecord.importedCompanies).toHaveLength(2);
+    expect(
+      afterImportRecord.importedCompanies
+        .filter((candidate) => candidate.sourceCompanyId === company?.id)
+        .map((candidate) => ({
+          id: candidate.importedCompany.id,
+          name: candidate.importedCompany.name,
+          issuePrefix: candidate.importedCompany.issuePrefix,
+          importedSourceVersion: candidate.importedCompany.importedSourceVersion
+        }))
+    ).toEqual([
+      {
+        id: "paperclip-company-123",
+        name: "Alpha Labs Imported",
+        issuePrefix: "ALP",
+        importedSourceVersion: "1.0.0"
+      },
+      {
+        id: "paperclip-company-456",
+        name: "Alpha Labs Sandbox",
+        issuePrefix: "ALPS",
+        importedSourceVersion: "1.0.0"
+      }
+    ]);
 
-    await expect(
-      harness.performAction("catalog.prepare-company-import", {
+    const preparedImport = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
         companyId: company?.id
-      })
-    ).rejects.toThrow(
-      '"Alpha Labs" has already been imported as "ALP". Use sync to update the existing Paperclip company.'
+      }
     );
+    expect(preparedImport.companyId).toBe(company?.id);
   });
 
   it("lets operators disable daily auto-sync for an imported company", async () => {
@@ -1385,16 +1404,29 @@ describe("agent companies plugin", () => {
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
     });
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-456",
+      importedCompanyName: "Alpha Labs Sandbox",
+      importedCompanyIssuePrefix: "ALPS"
+    });
 
     const afterDisable = await harness.performAction<CatalogSnapshot>("catalog.set-company-auto-sync", {
       sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
       enabled: false
     });
-    const importedCompany = afterDisable.companies.find((candidate) => candidate.id === company?.id);
+    const disabledImport = afterDisable.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+    );
+    const untouchedImport = afterDisable.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-456"
+    );
 
-    expect(importedCompany?.importedCompany?.autoSyncEnabled).toBe(false);
-    expect(importedCompany?.importedCompany?.isAutoSyncDue).toBe(false);
-    expect(importedCompany?.importedCompany?.nextAutoSyncAt).toBeNull();
+    expect(disabledImport?.importedCompany.autoSyncEnabled).toBe(false);
+    expect(disabledImport?.importedCompany.isAutoSyncDue).toBe(false);
+    expect(disabledImport?.importedCompany.nextAutoSyncAt).toBeNull();
+    expect(untouchedImport?.importedCompany.autoSyncEnabled).toBe(true);
   });
 
   it("syncs imported companies with overwrite collisions", async () => {
@@ -1453,12 +1485,19 @@ describe("agent companies plugin", () => {
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
     });
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-456",
+      importedCompanyName: "Alpha Labs Sandbox",
+      importedCompanyIssuePrefix: "ALPS"
+    });
 
     await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
 
     currentTime = "2026-04-15T10:00:00.000Z";
     const syncResult = await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
-      companyId: company?.id
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123"
     });
 
     expect(syncCalls).toEqual([
@@ -1486,15 +1525,23 @@ describe("agent companies plugin", () => {
     expect(syncResult.company?.action).toBe("updated");
 
     const afterSync = await harness.getData<CatalogSnapshot>("catalog.read");
-    const importedCompany = afterSync.companies.find((candidate) => candidate.id === company?.id);
+    const syncedImport = afterSync.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+    );
+    const untouchedImport = afterSync.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-456"
+    );
 
-    expect(importedCompany?.importedCompany?.syncStatus).toBe("succeeded");
-    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
-    expect(importedCompany?.importedCompany?.lastSyncError).toBeNull();
-    expect(importedCompany?.importedCompany?.importedSourceVersion).toBe("1.1.0");
-    expect(importedCompany?.importedCompany?.latestSourceVersion).toBe("1.1.0");
-    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
-    expect(importedCompany?.importedCompany?.isUpToDate).toBe(true);
+    expect(syncedImport?.importedCompany.syncStatus).toBe("succeeded");
+    expect(syncedImport?.importedCompany.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
+    expect(syncedImport?.importedCompany.lastSyncError).toBeNull();
+    expect(syncedImport?.importedCompany.importedSourceVersion).toBe("1.1.0");
+    expect(syncedImport?.importedCompany.latestSourceVersion).toBe("1.1.0");
+    expect(syncedImport?.importedCompany.isSyncAvailable).toBe(false);
+    expect(syncedImport?.importedCompany.isUpToDate).toBe(true);
+    expect(untouchedImport?.importedCompany.importedSourceVersion).toBe("1.0.0");
+    expect(untouchedImport?.importedCompany.latestSourceVersion).toBe("1.1.0");
+    expect(untouchedImport?.importedCompany.isSyncAvailable).toBe(true);
   });
 
   it("applies metadata.paperclip.agentIcon when preparing sync imports", async () => {
@@ -1554,7 +1601,8 @@ describe("agent companies plugin", () => {
     currentTime = "2026-04-15T10:00:00.000Z";
 
     await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
-      companyId: company?.id
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123"
     });
 
     expect(syncedExtension?.schema).toBe("paperclip/v1");
@@ -1609,7 +1657,8 @@ describe("agent companies plugin", () => {
 
     currentTime = "2026-04-15T10:00:00.000Z";
     const syncResult = await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
-      companyId: company?.id
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123"
     });
 
     expect(syncCount).toBe(0);
@@ -1619,11 +1668,13 @@ describe("agent companies plugin", () => {
     expect(syncResult.upToDate).toBe(true);
 
     const afterSync = await harness.getData<CatalogSnapshot>("catalog.read");
-    const importedCompany = afterSync.companies.find((candidate) => candidate.id === company?.id);
+    const importedCompany = afterSync.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+    );
 
-    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
-    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
-    expect(importedCompany?.importedCompany?.isUpToDate).toBe(true);
+    expect(importedCompany?.importedCompany.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
+    expect(importedCompany?.importedCompany.isSyncAvailable).toBe(false);
+    expect(importedCompany?.importedCompany.isUpToDate).toBe(true);
   });
 
   it("runs the daily auto-sync job for due imported companies", async () => {
@@ -1680,12 +1731,14 @@ describe("agent companies plugin", () => {
     expect(syncCount).toBe(1);
 
     const afterJob = await harness.getData<CatalogSnapshot>("catalog.read");
-    const importedCompany = afterJob.companies.find((candidate) => candidate.id === company?.id);
+    const importedCompany = afterJob.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+    );
 
-    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T09:24:00.000Z");
-    expect(importedCompany?.importedCompany?.syncStatus).toBe("succeeded");
-    expect(importedCompany?.importedCompany?.importedSourceVersion).toBe("1.1.0");
-    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
+    expect(importedCompany?.importedCompany.lastSyncedAt).toBe("2026-04-15T09:24:00.000Z");
+    expect(importedCompany?.importedCompany.syncStatus).toBe("succeeded");
+    expect(importedCompany?.importedCompany.importedSourceVersion).toBe("1.1.0");
+    expect(importedCompany?.importedCompany.isSyncAvailable).toBe(false);
   });
 
   it("runs overdue auto-sync shortly after startup so restarts do not miss the daily cadence", async () => {
@@ -1760,14 +1813,14 @@ describe("agent companies plugin", () => {
     expect(syncCount).toBe(1);
 
     const afterStartupSync = await harness.getData<CatalogSnapshot>("catalog.read");
-    const importedCompany = afterStartupSync.companies.find(
-      (candidate) => candidate.id === alphaCompany?.id
+    const importedCompany = afterStartupSync.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
     );
 
-    expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T09:24:00.000Z");
-    expect(importedCompany?.importedCompany?.syncStatus).toBe("succeeded");
-    expect(importedCompany?.importedCompany?.importedSourceVersion).toBe("1.0.0");
-    expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
+    expect(importedCompany?.importedCompany.lastSyncedAt).toBe("2026-04-15T09:24:00.000Z");
+    expect(importedCompany?.importedCompany.syncStatus).toBe("succeeded");
+    expect(importedCompany?.importedCompany.importedSourceVersion).toBe("1.0.0");
+    expect(importedCompany?.importedCompany.isSyncAvailable).toBe(false);
   });
 
   it("returns null when tampered company content paths resolve outside the repository root", async () => {
