@@ -516,10 +516,11 @@ async function main() {
   console.log('The URL has been opened in your default browser.');
   console.log(`Open ${pluginDisplayName} from the installed plugins list.`);
   console.log(`Confirm that the ${settingsPageHeading} settings page shows the preloaded ${manualVerificationRepositoryUrl} source.`);
-  console.log('Confirm that discovered companies are listed, click Import on one company, enter a new Paperclip company name, and verify the success message summarizes the import, offers an Open dashboard link, and mentions daily auto-sync plus overwrite mode.');
-  console.log('Confirm that the imported company now shows a disabled Up to date action plus a checked Daily auto-sync toggle.');
+  console.log('Confirm that discovered companies are listed, click Import as new company on one source package, enter a new Paperclip company name, and verify the success message summarizes the import, offers an Open dashboard link, and mentions daily auto-sync plus overwrite mode.');
+  console.log('Confirm that the discovered company still keeps its Import as new company button after the import completes.');
+  console.log('Confirm that the imported company appears in the separate Imported Companies section with a disabled Up to date action plus a checked Daily auto-sync toggle.');
   console.log('Change the source company version, click Rescan, and confirm the action switches to Sync now.');
-  console.log('Click Sync now and verify the success message summarizes the sync result for the existing Paperclip company without showing overwrite warnings for replaced records.');
+  console.log('Click Sync now from the Imported Companies section and verify the success message summarizes the sync result for the existing Paperclip company without showing overwrite warnings for replaced records.');
   console.log('Toggle Daily auto-sync off and back on again to confirm the setting updates immediately.');
   console.log('Confirm that the imported company appears in Paperclip with the expected agents, skills, projects, and issues.');
   console.log('Open View contents on a company, click an item in the left column, and confirm the rendered markdown updates on the right.');
