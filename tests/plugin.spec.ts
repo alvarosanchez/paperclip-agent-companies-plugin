@@ -1340,6 +1340,13 @@ describe("agent companies plugin", () => {
       "paperclip-company-456"
     ]);
     expect(afterImportRecord.importedCompanies).toHaveLength(2);
+    expect(afterImportRecord.importedCompanies.map((candidate) => candidate.id)).toEqual([
+      "paperclip-company-123",
+      "paperclip-company-456"
+    ]);
+    for (const importedCompany of afterImportRecord.importedCompanies) {
+      expect(importedCompany).not.toHaveProperty("importedCompanies");
+    }
     expect(
       afterImportRecord.importedCompanies
         .filter((candidate) => candidate.sourceCompanyId === company?.id)

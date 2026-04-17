@@ -2645,6 +2645,9 @@ async function runCatalogCompanySync(
 
       ctx.logger.warn("Imported agent company sync failed", {
         sourceCompanyId,
+        sourceCompanyName: initialMatch.company.name,
+        importedCompanyId,
+        importedCompanyName: importedCompany.importedCompanyName,
         trigger: options.trigger,
         error: summarizeErrorMessage(error)
       });
@@ -2687,8 +2690,8 @@ async function runDueAutoSyncs(
           importedCompany.sourceCompanyId,
           importedCompany.importedCompanyId,
           {
-          ...options,
-          trigger: options.trigger
+            ...options,
+            trigger: options.trigger
           }
         );
       } catch (error) {

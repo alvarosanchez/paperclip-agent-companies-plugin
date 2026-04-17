@@ -179,10 +179,14 @@ export interface CatalogCompanySummary extends DiscoveredAgentCompany {
   importedCompanies: CatalogCompanyImportStatus[];
 }
 
-export interface CatalogImportedCompanySummary extends CatalogCompanySummary {
+export type CatalogImportedCompanySummary = Omit<
+  CatalogCompanySummary,
+  "id" | "importedCompanies"
+> & {
+  id: string;
   sourceCompanyId: string;
   importedCompany: CatalogCompanyImportStatus;
-}
+};
 
 export interface CatalogSnapshot {
   repositories: CatalogRepositorySummary[];
@@ -915,13 +919,20 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
       left.manifestPath.localeCompare(right.manifestPath, undefined, { sensitivity: "base" })
     );
   const importedCompanies = companies
-    .flatMap((company) =>
-      company.importedCompanies.map((importedCompany) => ({
-        ...company,
-        sourceCompanyId: company.id,
+    .flatMap((company) => {
+      const {
+        id: sourceCompanyId,
+        importedCompanies: importedCompanyStatuses,
+        ...sourceCompany
+      } = company;
+
+      return importedCompanyStatuses.map((importedCompany) => ({
+        ...sourceCompany,
+        id: importedCompany.id,
+        sourceCompanyId,
         importedCompany
-      }))
-    )
+      }));
+    })
     .sort((left, right) =>
       left.importedCompany.name.localeCompare(right.importedCompany.name, undefined, {
         sensitivity: "base"
