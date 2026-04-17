@@ -49,6 +49,11 @@ const BOARD_ACCESS_SCOPE: ScopeKey = {
   scopeKind: "instance",
   stateKey: BOARD_ACCESS_STATE_KEY
 };
+const PAPERCLIP_RUNTIME_STATE_KEY = "agent-companies.paperclip-runtime.v1";
+const PAPERCLIP_RUNTIME_SCOPE: ScopeKey = {
+  scopeKind: "instance",
+  stateKey: PAPERCLIP_RUNTIME_STATE_KEY
+};
 
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
@@ -225,6 +230,11 @@ interface PortableCatalogFileAugmentationResult {
   sourceByteDelta: number;
 }
 
+interface PaperclipRoutineMetadata {
+  status: string | null;
+  triggerCount: number;
+}
+
 interface SyncImportRequest {
   sourceCompanyId: string;
   sourceCompanyName: string;
@@ -236,6 +246,16 @@ interface SyncImportRequest {
 interface PaperclipApiConnection {
   apiBase: string;
   apiKey: string | null;
+}
+
+class PaperclipApiResponseError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "PaperclipApiResponseError";
+    this.status = status;
+  }
 }
 
 interface StoredBoardCredential {
@@ -254,6 +274,11 @@ interface CompanyBoardAccessRecord {
 
 interface BoardAccessState {
   companies: Record<string, CompanyBoardAccessRecord>;
+  updatedAt: string | null;
+}
+
+interface PaperclipRuntimeState {
+  apiBase: string | null;
   updatedAt: string | null;
 }
 
@@ -316,6 +341,22 @@ function normalizeBoardAccessState(value: unknown): BoardAccessState {
 
   return {
     companies,
+    updatedAt: asIsoTimestamp(value.updatedAt)
+  };
+}
+
+function normalizePaperclipRuntimeState(value: unknown): PaperclipRuntimeState {
+  if (!isRecord(value)) {
+    return {
+      apiBase: null,
+      updatedAt: null
+    };
+  }
+
+  const apiBase = asNonEmptyString(value.apiBase);
+
+  return {
+    apiBase: apiBase ? normalizeApiBase(apiBase) : null,
     updatedAt: asIsoTimestamp(value.updatedAt)
   };
 }
@@ -512,8 +553,13 @@ export async function resolvePaperclipApiConnection(
   companyId: string | null = null
 ): Promise<PaperclipApiConnection> {
   const explicitApiBase = process.env.PAPERCLIP_API_URL?.trim();
+  const savedApiBase = ctx ? await resolveSavedPaperclipApiBase(ctx) : null;
   const configPath = resolvePaperclipConfigPath();
-  const apiBase = normalizeApiBase(explicitApiBase || (await inferPaperclipApiBaseFromConfig(configPath)));
+  const apiBase = normalizeApiBase(
+    explicitApiBase
+    || savedApiBase
+    || (await inferPaperclipApiBaseFromConfig(configPath))
+  );
   const apiKey =
     process.env.PAPERCLIP_API_KEY?.trim()
     || (ctx ? await resolveSavedBoardAccessToken(ctx, companyId) : null)
@@ -543,6 +589,11 @@ async function fetchPaperclipHealth(apiBase: string): Promise<unknown | null> {
   } catch {
     return null;
   }
+}
+
+async function resolveSavedPaperclipApiBase(ctx: PluginContext): Promise<string | null> {
+  const state = await loadPaperclipRuntimeState(ctx);
+  return state.apiBase;
 }
 
 function buildBoardAccessRequiredSyncMessage(): string {
@@ -641,7 +692,7 @@ async function parsePaperclipJsonResponse(response: Response): Promise<unknown> 
     normalizedBody.startsWith("<!DOCTYPE html") ||
     normalizedBody.startsWith("<html")
   ) {
-    throw new Error("Paperclip returned HTML instead of JSON.");
+    throw new PaperclipApiResponseError("Paperclip returned HTML instead of JSON.", response.status);
   }
 
   let payload: unknown = null;
@@ -649,12 +700,18 @@ async function parsePaperclipJsonResponse(response: Response): Promise<unknown> 
     try {
       payload = JSON.parse(normalizedBody);
     } catch {
-      throw new Error("Paperclip returned an unexpected non-JSON response.");
+      throw new PaperclipApiResponseError(
+        "Paperclip returned an unexpected non-JSON response.",
+        response.status
+      );
     }
   }
 
   if (!response.ok) {
-    throw new Error(getPaperclipApiErrorMessage(payload, response.status));
+    throw new PaperclipApiResponseError(
+      getPaperclipApiErrorMessage(payload, response.status),
+      response.status
+    );
   }
 
   return payload;
@@ -691,6 +748,13 @@ function getTopLevelScalar(frontmatter: string, key: string): string | null {
 function summarizeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/\s+/gu, " ").trim().slice(0, 600);
+}
+
+function isPaperclipApiAuthorizationError(error: unknown): boolean {
+  return (
+    error instanceof PaperclipApiResponseError
+    && (error.status === 401 || error.status === 403)
+  );
 }
 
 function summarizeRepositoryCloneFailure(message: string): string {
@@ -927,7 +991,7 @@ function getPaperclipAgentIconHint(frontmatter: Record<string, unknown> | null):
   return asNonEmptyString(paperclip?.agentIcon);
 }
 
-function normalizePaperclipAgentSlug(value: unknown): string | null {
+function normalizePaperclipSlug(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -939,6 +1003,79 @@ function normalizePaperclipAgentSlug(value: unknown): string | null {
     .replace(/^-+|-+$/gu, "");
 
   return normalized || null;
+}
+
+function isRecurringTaskFrontmatter(
+  parsedFrontmatter: Record<string, unknown> | null,
+  rawFrontmatter: string | null
+): boolean {
+  if (parsedFrontmatter) {
+    if (parsedFrontmatter.recurring === true) {
+      return true;
+    }
+
+    if (
+      typeof parsedFrontmatter.recurring === "string"
+      && parsedFrontmatter.recurring.trim().toLowerCase() === "true"
+    ) {
+      return true;
+    }
+
+    const schedule = isRecord(parsedFrontmatter.schedule) ? parsedFrontmatter.schedule : null;
+    if (asNonEmptyString(schedule?.recurrence)) {
+      return true;
+    }
+  }
+
+  return rawFrontmatter ? getTopLevelScalar(rawFrontmatter, "recurring")?.toLowerCase() === "true" : false;
+}
+
+async function readPaperclipRoutineMetadata(
+  companyRoot: string
+): Promise<Map<string, PaperclipRoutineMetadata>> {
+  const metadataBySlug = new Map<string, PaperclipRoutineMetadata>();
+
+  for (const fileName of PAPERCLIP_EXTENSION_FILE_NAMES) {
+    let content: string;
+    try {
+      content = await readFile(join(companyRoot, fileName), "utf8");
+    } catch (error) {
+      if (
+        isRecord(error)
+        && (error.code === "ENOENT" || error.code === "EISDIR" || error.code === "EACCES")
+      ) {
+        continue;
+      }
+
+      throw error;
+    }
+
+    const extension = parseYamlObject(content);
+    const routines = extension && isRecord(extension.routines) ? extension.routines : null;
+    if (!routines) {
+      return metadataBySlug;
+    }
+
+    for (const [rawSlug, value] of Object.entries(routines)) {
+      if (!isRecord(value)) {
+        continue;
+      }
+
+      const slug = normalizePaperclipSlug(rawSlug);
+      if (!slug) {
+        continue;
+      }
+
+      metadataBySlug.set(slug, {
+        status: asNonEmptyString(value.status),
+        triggerCount: Array.isArray(value.triggers) ? value.triggers.length : 0
+      });
+    }
+
+    return metadataBySlug;
+  }
+
+  return metadataBySlug;
 }
 
 function summarizePortableCatalogFiles(
@@ -982,11 +1119,11 @@ function parseSupportedPaperclipAgentIcons(content: string): Set<string> {
   return icons;
 }
 
-async function resolveSupportedPaperclipAgentIcons(): Promise<Set<string>> {
+async function resolveSupportedPaperclipAgentIcons(ctx?: PluginContext): Promise<Set<string>> {
   const fallbackIcons = new Set(DEFAULT_SUPPORTED_PAPERCLIP_AGENT_ICONS);
 
   try {
-    const connection = await resolvePaperclipApiConnection();
+    const connection = await resolvePaperclipApiConnection(ctx);
     const headers: Record<string, string> = {
       accept: "text/plain"
     };
@@ -1065,8 +1202,8 @@ async function discoverPaperclipAgentIcons(
 
     const icon = getPaperclipAgentIconHint(frontmatter);
     const slug =
-      normalizePaperclipAgentSlug(frontmatter.slug) ??
-      normalizePaperclipAgentSlug(relativePath.split("/").filter(Boolean).at(-2));
+      normalizePaperclipSlug(frontmatter.slug) ??
+      normalizePaperclipSlug(relativePath.split("/").filter(Boolean).at(-2));
 
     if (!slug || !icon) {
       continue;
@@ -1094,7 +1231,7 @@ async function applyPaperclipAgentIconsToPortableFiles(
     };
   }
 
-  const supportedIcons = await resolveSupportedPaperclipAgentIcons();
+  const supportedIcons = await resolveSupportedPaperclipAgentIcons(ctx);
   const extensionPath = findPortablePaperclipExtensionPath(files) ?? PAPERCLIP_EXTENSION_FILE_NAMES[0];
   const existingExtensionEntry = files[extensionPath];
 
@@ -1375,6 +1512,11 @@ async function loadCatalogState(ctx: PluginContext): Promise<CatalogState> {
   return normalizeCatalogState(storedState);
 }
 
+async function loadPaperclipRuntimeState(ctx: PluginContext): Promise<PaperclipRuntimeState> {
+  const storedState = await ctx.state.get(PAPERCLIP_RUNTIME_SCOPE);
+  return normalizePaperclipRuntimeState(storedState);
+}
+
 async function loadBoardAccessState(ctx: PluginContext): Promise<BoardAccessState> {
   const storedState = await ctx.state.get(BOARD_ACCESS_SCOPE);
   return normalizeBoardAccessState(storedState);
@@ -1429,6 +1571,20 @@ async function persistBoardAccessState(
   });
 
   await ctx.state.set(BOARD_ACCESS_SCOPE, nextState);
+  return nextState;
+}
+
+async function persistPaperclipRuntimeState(
+  ctx: PluginContext,
+  state: PaperclipRuntimeState,
+  now: string
+): Promise<PaperclipRuntimeState> {
+  const nextState = normalizePaperclipRuntimeState({
+    apiBase: state.apiBase,
+    updatedAt: now
+  });
+
+  await ctx.state.set(PAPERCLIP_RUNTIME_SCOPE, nextState);
   return nextState;
 }
 
@@ -1717,7 +1873,8 @@ function deriveCompanyContentName(relativePath: string): string {
 
 async function parseCompanyContentItem(
   manifestPath: string,
-  companyRoot: string
+  companyRoot: string,
+  routineMetadataByTaskSlug: Map<string, PaperclipRoutineMetadata>
 ): Promise<{ kind: CompanyContentKey; item: CompanyContentItem } | null> {
   const relativePath = normalizeCompanyContentPath(toPosixPath(relative(companyRoot, manifestPath)));
   if (!relativePath) {
@@ -1755,13 +1912,24 @@ async function parseCompanyContentItem(
     deriveCompanyContentName(relativePath);
   const paperclipAgentIcon =
     kind === "agents" ? getPaperclipAgentIconHint(parsedFrontmatter) : null;
+  const taskSlug =
+    kind === "tasks" ? normalizePaperclipSlug(relativePath.split("/").filter(Boolean).at(-2)) : null;
+  const routineMetadata =
+    kind === "tasks" && taskSlug ? routineMetadataByTaskSlug.get(taskSlug) ?? null : null;
+  const recurring =
+    kind === "tasks"
+      ? isRecurringTaskFrontmatter(parsedFrontmatter, frontmatter) || routineMetadata !== null
+      : false;
 
   return {
     kind,
     item: {
       name,
       path: relativePath,
-      ...(paperclipAgentIcon ? { paperclipAgentIcon } : {})
+      ...(paperclipAgentIcon ? { paperclipAgentIcon } : {}),
+      ...(recurring ? { recurring: true } : {}),
+      ...(routineMetadata?.status ? { paperclipRoutineStatus: routineMetadata.status } : {}),
+      ...(routineMetadata ? { paperclipRoutineTriggerCount: routineMetadata.triggerCount } : {})
     }
   };
 }
@@ -1769,9 +1937,14 @@ async function parseCompanyContentItem(
 async function scanCompanyContents(companyRoot: string): Promise<CompanyContents> {
   const contents = createEmptyCompanyContents();
   const manifestPaths = await findCompanyContentManifestPaths(companyRoot);
+  const routineMetadataByTaskSlug = await readPaperclipRoutineMetadata(companyRoot);
 
   for (const manifestPath of manifestPaths) {
-    const parsedItem = await parseCompanyContentItem(manifestPath, companyRoot);
+    const parsedItem = await parseCompanyContentItem(
+      manifestPath,
+      companyRoot,
+      routineMetadataByTaskSlug
+    );
     if (!parsedItem) {
       continue;
     }
@@ -2286,7 +2459,7 @@ async function executeDefaultSyncImport(
   try {
     payload = await parsePaperclipJsonResponse(response);
   } catch (error) {
-    if (isBoardAccessRequiredError(error)) {
+    if (isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)) {
       throw new Error(buildBoardAccessRequiredSyncMessage());
     }
 
@@ -2614,6 +2787,26 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = getRequiredString(params, "companyId");
         return buildCatalogCompanyImportSource(ctx, companyId);
+      });
+
+      ctx.actions.register("paperclip-runtime.set-api-base", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const apiBase = normalizeApiBase(getRequiredString(params, "apiBase"));
+        const currentState = await loadPaperclipRuntimeState(ctx);
+
+        if (currentState.apiBase === apiBase) {
+          return currentState;
+        }
+
+        const timestamp = now();
+        return persistPaperclipRuntimeState(
+          ctx,
+          {
+            apiBase,
+            updatedAt: timestamp
+          },
+          timestamp
+        );
       });
 
       ctx.actions.register("catalog.record-company-import", async (rawParams) => {

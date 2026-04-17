@@ -18,6 +18,9 @@ export interface CompanyContentItem {
   name: string;
   path: string;
   paperclipAgentIcon?: string | null;
+  recurring?: boolean;
+  paperclipRoutineStatus?: string | null;
+  paperclipRoutineTriggerCount?: number;
 }
 
 export interface CompanyContents {
@@ -202,6 +205,10 @@ function asNonEmptyString(value: unknown): string | null {
 function asIsoTimestamp(value: unknown): string | null {
   const text = asNonEmptyString(value);
   return text ?? null;
+}
+
+function asNonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function normalizeCatalogSyncCollisionStrategy(value: unknown): CatalogSyncCollisionStrategy {
@@ -399,11 +406,19 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
   }
 
   const paperclipAgentIcon = asNonEmptyString(value.paperclipAgentIcon);
+  const paperclipRoutineStatus = asNonEmptyString(value.paperclipRoutineStatus);
+  const paperclipRoutineTriggerCount = asNonNegativeInteger(value.paperclipRoutineTriggerCount);
 
   return {
     name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),
     path,
     ...(paperclipAgentIcon ? { paperclipAgentIcon } : {})
+    ,
+    ...(value.recurring === true ? { recurring: true } : {}),
+    ...(paperclipRoutineStatus ? { paperclipRoutineStatus } : {}),
+    ...(paperclipRoutineTriggerCount !== null
+      ? { paperclipRoutineTriggerCount }
+      : {})
   };
 }
 
