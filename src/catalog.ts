@@ -412,8 +412,7 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
   return {
     name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),
     path,
-    ...(paperclipAgentIcon ? { paperclipAgentIcon } : {})
-    ,
+    ...(paperclipAgentIcon ? { paperclipAgentIcon } : {}),
     ...(value.recurring === true ? { recurring: true } : {}),
     ...(paperclipRoutineStatus ? { paperclipRoutineStatus } : {}),
     ...(paperclipRoutineTriggerCount !== null

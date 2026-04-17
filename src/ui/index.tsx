@@ -1473,7 +1473,20 @@ function resolveBrowserOrigin(): string | null {
   }
 
   const origin = window.location.origin.trim();
-  return origin ? origin : null;
+  if (!origin || origin === "null") {
+    return null;
+  }
+
+  try {
+    const normalizedOrigin = new URL(origin);
+    if (normalizedOrigin.protocol !== "http:" && normalizedOrigin.protocol !== "https:") {
+      return null;
+    }
+
+    return normalizedOrigin.origin;
+  } catch {
+    return null;
+  }
 }
 
 function isTrustedSameOriginHttpUrl(candidate: URL, expectedOrigin: string): boolean {
@@ -2422,22 +2435,22 @@ function CompanyDetailsDialog(props: {
         </div>
 
         <div className="agent-companies-settings__dialog-summary">
-                  {COMPANY_CONTENT_SECTIONS.map((section) => {
-                    const count = company.contents[section.key].length;
+          {COMPANY_CONTENT_SECTIONS.map((section) => {
+            const count = company.contents[section.key].length;
 
-                    return (
-                      <div
+            return (
+              <div
                 className="agent-companies-settings__dialog-stat"
                 data-testid={`company-details-count-${section.key}`}
                 key={section.key}
               >
-                        <span className="agent-companies-settings__metric-label">{section.label}</span>
-                        <strong className="agent-companies-settings__dialog-stat-value">{count}</strong>
-                        <span className="agent-companies-settings__metric-note">
-                          {getCompanyContentStatNote(section, company.contents)}
-                        </span>
-                      </div>
-                    );
+                <span className="agent-companies-settings__metric-label">{section.label}</span>
+                <strong className="agent-companies-settings__dialog-stat-value">{count}</strong>
+                <span className="agent-companies-settings__metric-note">
+                  {getCompanyContentStatNote(section, company.contents)}
+                </span>
+              </div>
+            );
           })}
         </div>
 
@@ -2537,7 +2550,17 @@ function CompanyDetailsDialog(props: {
                       {selectedSection?.label ?? "Item"}
                     </span>
                     {getCompanyContentItemBadges(detailData.item, detailData.item.kind).map((badge) => (
-                      <span className="agent-companies-settings__badge" key={badge.label}>
+                      <span
+                        className={[
+                          "agent-companies-settings__badge",
+                          badge.tone === "accent"
+                            ? "agent-companies-settings__badge--accent"
+                            : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        key={badge.label}
+                      >
                         {badge.label}
                       </span>
                     ))}
@@ -2856,7 +2879,7 @@ export function AgentCompaniesSettingsPage({
   const registeredApiBaseRef = useRef<string | null>(null);
 
   async function ensurePaperclipApiBaseRegistered(): Promise<void> {
-    const apiBase = typeof window === "undefined" ? "" : window.location.origin.trim();
+    const apiBase = resolveBrowserOrigin();
 
     if (!apiBase || registeredApiBaseRef.current === apiBase) {
       return;

@@ -656,9 +656,9 @@ describe("agent companies plugin", () => {
       name: "Monday Review",
       path: "tasks/monday-review/TASK.md"
     });
-    expect((recurringTask as any)?.recurring).toBe(true);
-    expect((recurringTask as any)?.paperclipRoutineStatus).toBe("paused");
-    expect((recurringTask as any)?.paperclipRoutineTriggerCount).toBe(2);
+    expect(recurringTask?.recurring).toBe(true);
+    expect(recurringTask?.paperclipRoutineStatus).toBe("paused");
+    expect(recurringTask?.paperclipRoutineTriggerCount).toBe(2);
 
     const detail = await harness.getData<CatalogCompanyContentDetail | null>(
       "catalog.company-content.read",
@@ -670,9 +670,9 @@ describe("agent companies plugin", () => {
 
     expect(detail?.item.kind).toBe("tasks");
     expect(detail?.item.fullPath).toBe("alpha/tasks/monday-review/TASK.md");
-    expect((detail?.item as any)?.recurring).toBe(true);
-    expect((detail?.item as any)?.paperclipRoutineStatus).toBe("paused");
-    expect((detail?.item as any)?.paperclipRoutineTriggerCount).toBe(2);
+    expect(detail?.item.recurring).toBe(true);
+    expect(detail?.item.paperclipRoutineStatus).toBe("paused");
+    expect(detail?.item.paperclipRoutineTriggerCount).toBe(2);
     expect(detail?.item.frontmatter).toContain("recurring: true");
     expect(detail?.item.markdown).toContain("Review pipeline health.");
   });
@@ -2059,9 +2059,9 @@ describe("agent companies plugin", () => {
       "Seed Default Company"
     ]);
     const recurringTask = companies[0]?.contents.tasks.find((item) => item.path === "tasks/monday-review/TASK.md");
-    expect((recurringTask as any)?.recurring).toBe(true);
-    expect((recurringTask as any)?.paperclipRoutineStatus).toBe("paused");
-    expect((recurringTask as any)?.paperclipRoutineTriggerCount).toBe(2);
+    expect(recurringTask?.recurring).toBe(true);
+    expect(recurringTask?.paperclipRoutineStatus).toBe("paused");
+    expect(recurringTask?.paperclipRoutineTriggerCount).toBe(2);
     expect(companies[0]?.contents.issues.map((item) => item.name)).toEqual(["Follow Up Review"]);
     expect(companies[1]?.contents.agents.map((item) => item.name)).toEqual(["Beta Operator"]);
     expect(companies[1]?.contents.skills).toEqual([]);
