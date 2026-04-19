@@ -2434,20 +2434,13 @@ async function executeDefaultSyncImport(
   }
 
   const requestUrl = `${connection.apiBase}/api/companies/import`;
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    accept: "application/json"
-  };
-
-  if (connection.apiKey) {
-    headers.authorization = `Bearer ${connection.apiKey}`;
-  }
-
   let response;
   try {
     response = await fetch(requestUrl, {
       method: "POST",
-      headers,
+      headers: buildPaperclipApiHeaders(connection, {
+        includeJsonContentType: true
+      }),
       body: JSON.stringify({
         source: input.preparedImport.source,
         include: {
@@ -2488,10 +2481,19 @@ async function executeDefaultSyncImport(
   return payload as PaperclipCompanyImportResult;
 }
 
-function buildPaperclipApiHeaders(connection: PaperclipApiConnection): Record<string, string> {
+function buildPaperclipApiHeaders(
+  connection: PaperclipApiConnection,
+  options: {
+    includeJsonContentType?: boolean;
+  } = {}
+): Record<string, string> {
   const headers: Record<string, string> = {
     accept: "application/json"
   };
+
+  if (options.includeJsonContentType) {
+    headers["content-type"] = "application/json";
+  }
 
   if (connection.apiKey) {
     headers.authorization = `Bearer ${connection.apiKey}`;
@@ -2512,8 +2514,9 @@ async function fetchPaperclipApiJson(
     response = await fetch(requestUrl, {
       ...init,
       headers: {
-        ...buildPaperclipApiHeaders(connection),
-        ...(init.body ? { "content-type": "application/json" } : {})
+        ...buildPaperclipApiHeaders(connection, {
+          includeJsonContentType: init.body !== undefined
+        })
       }
     });
   } catch (error) {
@@ -2822,11 +2825,22 @@ async function runCatalogCompanySync(
         asNonEmptyString(importResult.company?.id) ?? importedCompany.importedCompanyId;
       const nextImportedCompanyName = importedCompany.importedCompanyName;
 
-      await requestWakeForNewlyAssignedPaperclipIssues(
-        ctx,
-        nextImportedCompanyId,
-        issuesBeforeSync
-      );
+      if (nextImportedCompanyId === importedCompany.importedCompanyId) {
+        await requestWakeForNewlyAssignedPaperclipIssues(
+          ctx,
+          nextImportedCompanyId,
+          issuesBeforeSync
+        );
+      } else {
+        ctx.logger.info(
+          "Skipped Paperclip wake detection because the synced import changed the imported company id",
+          {
+            sourceCompanyId,
+            previousImportedCompanyId: importedCompany.importedCompanyId,
+            nextImportedCompanyId
+          }
+        );
+      }
 
       await persistCatalogState(
         ctx,
