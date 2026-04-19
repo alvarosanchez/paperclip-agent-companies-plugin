@@ -646,6 +646,15 @@ async function main() {
       .getByText(`Imported "Modal Demo Company" as "${importedCompanyName}".`, { exact: true })
       .waitFor({ timeout: 120000 });
 
+    const discoveredImportTrigger = fixtureCompanyCard.locator('[data-testid="company-import-trigger"]');
+    await discoveredImportTrigger.waitFor({ timeout: 120000 });
+    const discoveredImportLabel = (await discoveredImportTrigger.textContent())?.trim() ?? '';
+    if (discoveredImportLabel !== 'Import as new company') {
+      throw new Error(
+        `Expected discovered company to keep the "Import as new company" action after import, received "${discoveredImportLabel}".`
+      );
+    }
+
     const companiesAfterImport = await fetchJson(new URL('/api/companies', baseUrl).toString());
     const importedCompany = Array.isArray(companiesAfterImport)
       ? companiesAfterImport.find((company) => company?.name === importedCompanyName) ?? null
@@ -663,7 +672,12 @@ async function main() {
       );
     }
 
-    const syncTrigger = fixtureCompanyCard.locator('[data-testid="company-sync-trigger"]');
+    const importedCompanyCard = page.locator('[data-testid="imported-company-card"]').filter({
+      hasText: importedCompanyName
+    });
+    await importedCompanyCard.first().waitFor({ timeout: 120000 });
+
+    const syncTrigger = importedCompanyCard.locator('[data-testid="company-sync-trigger"]');
     await syncTrigger.waitFor({ timeout: 120000 });
     const syncLabel = (await syncTrigger.textContent())?.trim() ?? '';
     const syncDisabled = await syncTrigger.isDisabled();
@@ -673,7 +687,7 @@ async function main() {
       );
     }
 
-    const autoSyncToggle = fixtureCompanyCard.locator('[data-testid="company-auto-sync-toggle"]');
+    const autoSyncToggle = importedCompanyCard.locator('[data-testid="company-auto-sync-toggle"]');
     await autoSyncToggle.waitFor({ timeout: 120000 });
     const autoSyncEnabled = await autoSyncToggle.isChecked();
     if (!autoSyncEnabled) {
@@ -700,7 +714,7 @@ async function main() {
       .getByText(`Synced "Modal Demo Company" into "${importedCompanyName}"`, { exact: false })
       .waitFor({ timeout: 120000 });
 
-    await fixtureCompanyCard.getByRole('button', { name: 'View contents' }).click();
+    await importedCompanyCard.getByRole('button', { name: 'View source contents' }).click();
 
     const detailsModal = page.locator('[data-testid="company-details-modal"]');
     await detailsModal.waitFor({ timeout: 120000 });

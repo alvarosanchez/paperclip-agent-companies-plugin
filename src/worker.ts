@@ -178,6 +178,10 @@ const DEFAULT_SUPPORTED_PAPERCLIP_AGENT_ICONS = new Set([
   "zap"
 ]);
 
+function getImportedCatalogCompanyOperationKey(sourceCompanyId: string, importedCompanyId: string): string {
+  return `${sourceCompanyId}::${importedCompanyId}`;
+}
+
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
 type SyncImportExecutor = (
   ctx: PluginContext,
@@ -930,11 +934,15 @@ function updateRepository(
 function updateImportedCatalogCompany(
   state: CatalogState,
   sourceCompanyId: string,
+  importedCompanyId: string,
   updater: (company: ImportedCatalogCompanyRecord) => ImportedCatalogCompanyRecord
 ): CatalogState {
   let didUpdate = false;
   const importedCompanies = state.importedCompanies.map((company) => {
-    if (company.sourceCompanyId !== sourceCompanyId) {
+    if (
+      company.sourceCompanyId !== sourceCompanyId
+      || company.importedCompanyId !== importedCompanyId
+    ) {
       return company;
     }
 
@@ -1379,42 +1387,26 @@ function findRepositoryCompany(
 
 function findImportedCatalogCompany(
   state: CatalogState,
-  sourceCompanyId: string
+  sourceCompanyId: string,
+  importedCompanyId: string
 ): ImportedCatalogCompanyRecord | null {
-  return state.importedCompanies.find((candidate) => candidate.sourceCompanyId === sourceCompanyId) ?? null;
-}
-
-function buildAlreadyImportedErrorMessage(
-  companyName: string,
-  importedCompany: ImportedCatalogCompanyRecord
-): string {
-  const importedLabel =
-    importedCompany.importedCompanyIssuePrefix?.trim() ||
-    importedCompany.importedCompanyName.trim() ||
-    importedCompany.importedCompanyId;
-
-  return `"${companyName}" has already been imported as "${importedLabel}". Use sync to update the existing Paperclip company.`;
-}
-
-function assertCatalogCompanyCanBeImported(
-  state: CatalogState,
-  company: DiscoveredAgentCompany
-): void {
-  const importedCompany = findImportedCatalogCompany(state, company.id);
-  if (!importedCompany) {
-    return;
-  }
-
-  throw new Error(buildAlreadyImportedErrorMessage(company.name, importedCompany));
+  return (
+    state.importedCompanies.find(
+      (candidate) =>
+        candidate.sourceCompanyId === sourceCompanyId
+        && candidate.importedCompanyId === importedCompanyId
+    ) ?? null
+  );
 }
 
 function assertCatalogCompanyCanBeSynced(
   state: CatalogState,
-  company: DiscoveredAgentCompany
+  company: DiscoveredAgentCompany,
+  importedCompanyId: string
 ): ImportedCatalogCompanyRecord {
-  const importedCompany = findImportedCatalogCompany(state, company.id);
+  const importedCompany = findImportedCatalogCompany(state, company.id, importedCompanyId);
   if (!importedCompany) {
-    throw new Error(`"${company.name}" must be imported before it can be synced.`);
+    throw new Error(`"${company.name}" must be imported into that Paperclip company before it can be synced.`);
   }
 
   return importedCompany;
@@ -2330,19 +2322,12 @@ async function buildPortableCatalogFileEntry(
 
 async function buildCatalogCompanyImportSource(
   ctx: PluginContext,
-  companyId: string,
-  options: {
-    allowImported?: boolean;
-  } = {}
+  companyId: string
 ): Promise<CatalogPreparedCompanyImport> {
   const state = await loadCatalogState(ctx);
   const match = findRepositoryCompany(state, companyId);
   if (!match) {
     throw new Error("Company not found.");
-  }
-
-  if (!options.allowImported) {
-    assertCatalogCompanyCanBeImported(state, match.company);
   }
 
   const repositoryRoot = await resolveRepositoryContentRoot(match.repository);
@@ -2694,6 +2679,7 @@ async function requestWakeForNewlyAssignedPaperclipIssues(
 async function runCatalogCompanySync(
   ctx: PluginContext,
   sourceCompanyId: string,
+  importedCompanyId: string,
   options: {
     now: () => string;
     scanRepository: RepositoryScanner;
@@ -2701,7 +2687,8 @@ async function runCatalogCompanySync(
     trigger: "manual" | "schedule" | "startup";
   }
 ): Promise<CatalogCompanySyncResult> {
-  const existingSync = companySyncInflight.get(sourceCompanyId);
+  const syncKey = getImportedCatalogCompanyOperationKey(sourceCompanyId, importedCompanyId);
+  const existingSync = companySyncInflight.get(syncKey);
   if (existingSync) {
     return existingSync;
   }
@@ -2714,14 +2701,18 @@ async function runCatalogCompanySync(
       throw new Error("Company not found.");
     }
 
-    const importedCompany = assertCatalogCompanyCanBeSynced(currentState, initialMatch.company);
+    const importedCompany = assertCatalogCompanyCanBeSynced(
+      currentState,
+      initialMatch.company,
+      importedCompanyId
+    );
     if (isSyncCurrentlyRunning(importedCompany, startedAt)) {
       throw new Error(`"${initialMatch.company.name}" is already syncing.`);
     }
 
     currentState = await persistCatalogState(
       ctx,
-      updateImportedCatalogCompany(currentState, sourceCompanyId, (company) => ({
+      updateImportedCatalogCompany(currentState, sourceCompanyId, importedCompanyId, (company) => ({
         ...company,
         lastSyncStatus: "running",
         syncRunningSince: startedAt,
@@ -2767,7 +2758,7 @@ async function runCatalogCompanySync(
 
         await persistCatalogState(
           ctx,
-          updateImportedCatalogCompany(latestState, sourceCompanyId, (company) => ({
+          updateImportedCatalogCompany(latestState, sourceCompanyId, importedCompanyId, (company) => ({
             ...company,
             importedSourceVersion: latestSourceVersion,
             lastSyncStatus: "succeeded",
@@ -2805,9 +2796,7 @@ async function runCatalogCompanySync(
         };
       }
 
-      const preparedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId, {
-        allowImported: true
-      });
+      const preparedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId);
       const issuesBeforeSync = await tryFetchPaperclipCompanyIssues(
         ctx,
         importedCompany.importedCompanyId
@@ -2844,7 +2833,7 @@ async function runCatalogCompanySync(
 
       await persistCatalogState(
         ctx,
-        updateImportedCatalogCompany(latestState, sourceCompanyId, (company) => ({
+        updateImportedCatalogCompany(latestState, sourceCompanyId, importedCompanyId, (company) => ({
           ...company,
           importedCompanyId: nextImportedCompanyId,
           importedCompanyName: nextImportedCompanyName,
@@ -2884,7 +2873,7 @@ async function runCatalogCompanySync(
 
       await persistCatalogState(
         ctx,
-        updateImportedCatalogCompany(latestState, sourceCompanyId, (company) => ({
+        updateImportedCatalogCompany(latestState, sourceCompanyId, importedCompanyId, (company) => ({
           ...company,
           lastSyncStatus: "failed",
           syncRunningSince: null,
@@ -2895,18 +2884,21 @@ async function runCatalogCompanySync(
 
       ctx.logger.warn("Imported agent company sync failed", {
         sourceCompanyId,
+        sourceCompanyName: initialMatch.company.name,
+        importedCompanyId,
+        importedCompanyName: importedCompany.importedCompanyName,
         trigger: options.trigger,
         error: summarizeErrorMessage(error)
       });
       throw error;
     }
   })().finally(() => {
-    if (companySyncInflight.get(sourceCompanyId) === syncPromise) {
-      companySyncInflight.delete(sourceCompanyId);
+    if (companySyncInflight.get(syncKey) === syncPromise) {
+      companySyncInflight.delete(syncKey);
     }
   });
 
-  companySyncInflight.set(sourceCompanyId, syncPromise);
+  companySyncInflight.set(syncKey, syncPromise);
   return syncPromise;
 }
 
@@ -2932,13 +2924,19 @@ async function runDueAutoSyncs(
 
     for (const importedCompany of dueImports) {
       try {
-        await runCatalogCompanySync(ctx, importedCompany.sourceCompanyId, {
-          ...options,
-          trigger: options.trigger
-        });
+        await runCatalogCompanySync(
+          ctx,
+          importedCompany.sourceCompanyId,
+          importedCompany.importedCompanyId,
+          {
+            ...options,
+            trigger: options.trigger
+          }
+        );
       } catch (error) {
         ctx.logger.warn("Automatic agent company sync failed", {
           sourceCompanyId: importedCompany.sourceCompanyId,
+          importedCompanyId: importedCompany.importedCompanyId,
           trigger: options.trigger,
           error: summarizeErrorMessage(error)
         });
@@ -3062,9 +3060,20 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           throw new Error("Company not found.");
         }
 
-        const existingImport = findImportedCatalogCompany(currentState, sourceCompanyId);
-        if (existingImport && existingImport.importedCompanyId !== importedCompanyId) {
-          throw new Error(buildAlreadyImportedErrorMessage(match.company.name, existingImport));
+        const existingImport = findImportedCatalogCompany(
+          currentState,
+          sourceCompanyId,
+          importedCompanyId
+        );
+        const conflictingImport = currentState.importedCompanies.find(
+          (candidate) =>
+            candidate.importedCompanyId === importedCompanyId
+            && candidate.sourceCompanyId !== sourceCompanyId
+        );
+        if (conflictingImport) {
+          throw new Error(
+            `"${importedCompanyName}" is already linked to a different discovered company source.`
+          );
         }
 
         const nextState = await persistCatalogState(
@@ -3073,7 +3082,11 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
             ...currentState,
             importedCompanies: [
               ...currentState.importedCompanies.filter(
-                (candidate) => candidate.sourceCompanyId !== sourceCompanyId
+                (candidate) =>
+                  !(
+                    candidate.sourceCompanyId === sourceCompanyId
+                    && candidate.importedCompanyId === importedCompanyId
+                  )
               ),
               {
                 sourceCompanyId,
@@ -3102,6 +3115,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
       ctx.actions.register("catalog.set-company-auto-sync", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const sourceCompanyId = getRequiredString(params, "sourceCompanyId");
+        const importedCompanyId = getRequiredString(params, "importedCompanyId");
         const enabled = typeof params.enabled === "boolean" ? params.enabled : null;
 
         if (enabled === null) {
@@ -3115,11 +3129,11 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           throw new Error("Company not found.");
         }
 
-        assertCatalogCompanyCanBeSynced(currentState, match.company);
+        assertCatalogCompanyCanBeSynced(currentState, match.company, importedCompanyId);
 
         const nextState = await persistCatalogState(
           ctx,
-          updateImportedCatalogCompany(currentState, sourceCompanyId, (company) => ({
+          updateImportedCatalogCompany(currentState, sourceCompanyId, importedCompanyId, (company) => ({
             ...company,
             autoSyncEnabled: enabled
           })),
@@ -3131,9 +3145,11 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
 
       ctx.actions.register("catalog.sync-company", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
-        const companyId = getRequiredString(params, "companyId");
+        const sourceCompanyId =
+          asNonEmptyString(params.sourceCompanyId) ?? getRequiredString(params, "companyId");
+        const importedCompanyId = getRequiredString(params, "importedCompanyId");
 
-        return runCatalogCompanySync(ctx, companyId, {
+        return runCatalogCompanySync(ctx, sourceCompanyId, importedCompanyId, {
           now,
           scanRepository,
           syncImport,

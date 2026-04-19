@@ -62,6 +62,7 @@ import {
   type CompanyContentItem,
   type CompanyContents,
   type CatalogCompanySummary,
+  type CatalogImportedCompanySummary,
   type CatalogRepositorySummary,
   type CatalogSnapshot,
   type PaperclipCompanyImportResult
@@ -75,11 +76,13 @@ import {
 const EMPTY_CATALOG: CatalogSnapshot = {
   repositories: [],
   companies: [],
+  importedCompanies: [],
   summary: {
     repositoryCount: 0,
     scannedRepositoryCount: 0,
     errorRepositoryCount: 0,
     companyCount: 0,
+    importedCompanyCount: 0,
     updatedAt: null
   }
 };
@@ -139,7 +142,7 @@ const PAGE_STYLES = `
 
 .agent-companies-settings__summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1083,7 +1086,8 @@ interface NoticeState {
 interface PendingActionState {
   kind: "adding" | "scanning-all" | "scanning-repository" | "removing" | "toggling-auto-sync";
   repositoryId?: string;
-  companyId?: string;
+  sourceCompanyId?: string;
+  importedCompanyId?: string;
 }
 
 interface ImportState {
@@ -1093,7 +1097,8 @@ interface ImportState {
 
 interface SyncState {
   kind: "syncing";
-  companyId: string;
+  sourceCompanyId: string;
+  importedCompanyId: string;
 }
 
 interface CatalogCompanyGroup {
@@ -1688,11 +1693,7 @@ function isBoardAccessRequiredError(error: unknown): boolean {
   return getErrorMessage(error).toLowerCase().includes("board access required");
 }
 
-function getImportedCompanyLabel(company: CatalogCompanySummary): string | null {
-  if (!company.importedCompany) {
-    return null;
-  }
-
+function getImportedCompanyLabel(company: CatalogImportedCompanySummary): string | null {
   return company.importedCompany.issuePrefix?.trim() || company.importedCompany.name.trim();
 }
 
@@ -1701,7 +1702,7 @@ function getImportButtonLabel(
   company: CatalogCompanySummary
 ): string {
   if (importState?.companyId !== company.id) {
-    return "Import";
+    return "Import as new company";
   }
 
   return importState.kind === "preparing" ? "Preparing..." : "Importing...";
@@ -1709,13 +1710,16 @@ function getImportButtonLabel(
 
 function getSyncButtonLabel(
   syncState: SyncState | null,
-  company: CatalogCompanySummary
+  company: CatalogImportedCompanySummary
 ): string {
-  if (company.importedCompany && !company.importedCompany.isSyncAvailable) {
+  if (!company.importedCompany.isSyncAvailable) {
     return "Up to date";
   }
 
-  return syncState?.companyId === company.id ? "Syncing..." : "Sync now";
+  return syncState?.sourceCompanyId === company.sourceCompanyId
+    && syncState.importedCompanyId === company.importedCompany.id
+    ? "Syncing..."
+    : "Sync now";
 }
 
 function formatTimestamp(timestamp: string | null, emptyLabel = "Not scanned yet"): string {
@@ -1733,11 +1737,7 @@ function formatTimestamp(timestamp: string | null, emptyLabel = "Not scanned yet
   }
 }
 
-function getCompanySyncSummary(company: CatalogCompanySummary): string | null {
-  if (!company.importedCompany) {
-    return null;
-  }
-
+function getCompanySyncSummary(company: CatalogImportedCompanySummary): string | null {
   const { importedCompany } = company;
   const parts: string[] = [];
 
@@ -1776,8 +1776,8 @@ function getCompanySyncSummary(company: CatalogCompanySummary): string | null {
   return parts.join(" • ");
 }
 
-function getCompanySyncError(company: CatalogCompanySummary): string | null {
-  if (!company.importedCompany || company.importedCompany.syncStatus !== "failed") {
+function getCompanySyncError(company: CatalogImportedCompanySummary): string | null {
+  if (company.importedCompany.syncStatus !== "failed") {
     return null;
   }
 
@@ -2158,18 +2158,13 @@ function RepositoryCard(props: {
 }
 
 function ImportedCompanySyncControls(props: {
-  company: CatalogCompanySummary;
+  company: CatalogImportedCompanySummary;
   isBusy: boolean;
-  showSyncButton?: boolean;
   syncState: SyncState | null;
-  onSync(companyId: string): void;
-  onToggleAutoSync(companyId: string, enabled: boolean): void;
-}): React.JSX.Element | null {
-  const { company, isBusy, showSyncButton = true, syncState, onSync, onToggleAutoSync } = props;
-  if (!company.importedCompany) {
-    return null;
-  }
-
+  onSync(sourceCompanyId: string, importedCompanyId: string): void;
+  onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
+}): React.JSX.Element {
+  const { company, isBusy, syncState, onSync, onToggleAutoSync } = props;
   const syncSummary = getCompanySyncSummary(company);
   const syncError = getCompanySyncError(company);
   const isSyncAvailable = company.importedCompany.isSyncAvailable;
@@ -2178,23 +2173,26 @@ function ImportedCompanySyncControls(props: {
   return (
     <div className="agent-companies-settings__company-sync">
       <div className="agent-companies-settings__company-sync-row">
-        {showSyncButton ? (
-          <button
-            className="agent-companies-settings__button agent-companies-settings__button--primary"
-            data-testid="company-sync-trigger"
-            disabled={isSyncButtonDisabled}
-            onClick={() => void onSync(company.id)}
-            type="button"
-          >
-            {getSyncButtonLabel(syncState, company)}
-          </button>
-        ) : null}
+        <button
+          className="agent-companies-settings__button agent-companies-settings__button--primary"
+          data-testid="company-sync-trigger"
+          disabled={isSyncButtonDisabled}
+          onClick={() => void onSync(company.sourceCompanyId, company.importedCompany.id)}
+          type="button"
+        >
+          {getSyncButtonLabel(syncState, company)}
+        </button>
         <label className="agent-companies-settings__checkbox">
           <input
             checked={company.importedCompany.autoSyncEnabled}
             data-testid="company-auto-sync-toggle"
             disabled={isBusy}
-            onChange={(event) => void onToggleAutoSync(company.id, event.target.checked)}
+            onChange={(event) =>
+              void onToggleAutoSync(
+                company.sourceCompanyId,
+                company.importedCompany.id,
+                event.target.checked
+              )}
             type="checkbox"
           />
           Daily auto-sync
@@ -2222,29 +2220,21 @@ function ImportedCompanySyncControls(props: {
   );
 }
 
-function CompanyCard(props: {
+function DiscoveredCompanyCard(props: {
   company: CatalogCompanySummary;
   importState: ImportState | null;
   isImportDisabled: boolean;
-  isSyncDisabled: boolean;
-  syncState: SyncState | null;
   onOpenContents(companyId: string): void;
   onOpenImport(companyId: string): void;
-  onSync(companyId: string): void;
-  onToggleAutoSync(companyId: string, enabled: boolean): void;
 }): React.JSX.Element {
   const {
     company,
     importState,
     isImportDisabled,
-    isSyncDisabled,
-    syncState,
     onOpenContents,
-    onOpenImport,
-    onSync,
-    onToggleAutoSync
+    onOpenImport
   } = props;
-  const importedCompanyLabel = getImportedCompanyLabel(company);
+  const importedCompanyCount = company.importedCompanies.length;
 
   return (
     <article className="agent-companies-settings__company-card" data-testid="company-card">
@@ -2254,29 +2244,27 @@ function CompanyCard(props: {
           <div className="agent-companies-settings__company-path">Manifest: {company.manifestPath}</div>
         </div>
         <div className="agent-companies-settings__company-actions">
-          {company.version || importedCompanyLabel ? (
+          {company.version || importedCompanyCount > 0 ? (
             <div className="agent-companies-settings__badge-row">
               {company.version ? (
                 <span className="agent-companies-settings__badge">Version {company.version}</span>
               ) : null}
-              {importedCompanyLabel ? (
-                <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
-                  Imported as {importedCompanyLabel}
+              {importedCompanyCount > 0 ? (
+                <span className="agent-companies-settings__badge">
+                  {importedCompanyCount} imported {importedCompanyCount === 1 ? "company" : "companies"}
                 </span>
               ) : null}
             </div>
           ) : null}
-          {!company.importedCompany ? (
-            <button
-              className="agent-companies-settings__button agent-companies-settings__button--primary"
-              data-testid="company-import-trigger"
-              disabled={isImportDisabled}
-              onClick={() => onOpenImport(company.id)}
-              type="button"
-            >
-              {getImportButtonLabel(importState, company)}
-            </button>
-          ) : null}
+          <button
+            className="agent-companies-settings__button agent-companies-settings__button--primary"
+            data-testid="company-import-trigger"
+            disabled={isImportDisabled}
+            onClick={() => onOpenImport(company.id)}
+            type="button"
+          >
+            {getImportButtonLabel(importState, company)}
+          </button>
           <button
             className="agent-companies-settings__button"
             data-testid="company-details-trigger"
@@ -2284,6 +2272,58 @@ function CompanyCard(props: {
             type="button"
           >
             View contents
+          </button>
+        </div>
+      </div>
+      {company.description ? (
+        <p className="agent-companies-settings__company-description">{company.description}</p>
+      ) : null}
+      <p className="agent-companies-settings__company-summary">
+        {buildCompanyContentSummary(company.contents)}
+      </p>
+    </article>
+  );
+}
+
+function ImportedCompanyCard(props: {
+  company: CatalogImportedCompanySummary;
+  isSyncDisabled: boolean;
+  syncState: SyncState | null;
+  onOpenContents(companyId: string): void;
+  onSync(sourceCompanyId: string, importedCompanyId: string): void;
+  onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
+}): React.JSX.Element {
+  const { company, isSyncDisabled, syncState, onOpenContents, onSync, onToggleAutoSync } = props;
+  const importedCompanyLabel = getImportedCompanyLabel(company);
+
+  return (
+    <article className="agent-companies-settings__company-card" data-testid="imported-company-card">
+      <div className="agent-companies-settings__company-top">
+        <div>
+          <h3 className="agent-companies-settings__company-title">{company.importedCompany.name}</h3>
+          <div className="agent-companies-settings__company-path">
+            Source: {company.name} • Manifest: {company.manifestPath}
+          </div>
+        </div>
+        <div className="agent-companies-settings__company-actions">
+          <div className="agent-companies-settings__badge-row">
+            <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
+              {company.repositoryLabel}
+            </span>
+            {company.version ? (
+              <span className="agent-companies-settings__badge">Version {company.version}</span>
+            ) : null}
+            {importedCompanyLabel ? (
+              <span className="agent-companies-settings__badge">Target {importedCompanyLabel}</span>
+            ) : null}
+          </div>
+          <button
+            className="agent-companies-settings__button"
+            data-testid="imported-company-details-trigger"
+            onClick={() => onOpenContents(company.sourceCompanyId)}
+            type="button"
+          >
+            View source contents
           </button>
         </div>
       </div>
@@ -2308,25 +2348,16 @@ function CompanyDetailsDialog(props: {
   company: CatalogCompanySummary;
   importState: ImportState | null;
   isImportDisabled: boolean;
-  isSyncDisabled: boolean;
-  syncState: SyncState | null;
   onClose(): void;
   onOpenImport(companyId: string): void;
-  onSync(companyId: string): void;
-  onToggleAutoSync(companyId: string, enabled: boolean): void;
 }): React.JSX.Element {
   const {
     company,
     importState,
     isImportDisabled,
-    isSyncDisabled,
-    syncState,
     onClose,
-    onOpenImport,
-    onSync,
-    onToggleAutoSync
+    onOpenImport
   } = props;
-  const importedCompanyLabel = getImportedCompanyLabel(company);
   const [selectedItemPath, setSelectedItemPath] = useState<string | null>(
     getDefaultCompanyContentSelection(company)?.item.path ?? null
   );
@@ -2377,27 +2408,15 @@ function CompanyDetailsDialog(props: {
             </p>
           </div>
           <div className="agent-companies-settings__dialog-actions">
-            {!company.importedCompany ? (
-              <button
-                className="agent-companies-settings__button agent-companies-settings__button--primary"
-                data-testid="company-details-import-trigger"
-                disabled={isImportDisabled}
-                onClick={() => onOpenImport(company.id)}
-                type="button"
-              >
-                {getImportButtonLabel(importState, company)}
-              </button>
-            ) : (
-              <button
-                className="agent-companies-settings__button agent-companies-settings__button--primary"
-                data-testid="company-details-sync-trigger"
-                disabled={isSyncDisabled || !company.importedCompany.isSyncAvailable}
-                onClick={() => void onSync(company.id)}
-                type="button"
-              >
-                {getSyncButtonLabel(syncState, company)}
-              </button>
-            )}
+            <button
+              className="agent-companies-settings__button agent-companies-settings__button--primary"
+              data-testid="company-details-import-trigger"
+              disabled={isImportDisabled}
+              onClick={() => onOpenImport(company.id)}
+              type="button"
+            >
+              {getImportButtonLabel(importState, company)}
+            </button>
             <button
               className="agent-companies-settings__button"
               onClick={onClose}
@@ -2416,22 +2435,16 @@ function CompanyDetailsDialog(props: {
             {company.version ? (
               <span className="agent-companies-settings__badge">Version {company.version}</span>
             ) : null}
-            {importedCompanyLabel ? (
-              <span className="agent-companies-settings__badge">Imported as {importedCompanyLabel}</span>
+            {company.importedCompanies.length > 0 ? (
+              <span className="agent-companies-settings__badge">
+                {company.importedCompanies.length} imported {company.importedCompanies.length === 1 ? "company" : "companies"}
+              </span>
             ) : null}
             <span className="agent-companies-settings__badge">Manifest: {company.manifestPath}</span>
           </div>
           {company.description ? (
             <div className="agent-companies-settings__notice">{company.description}</div>
           ) : null}
-          <ImportedCompanySyncControls
-            company={company}
-            isBusy={isSyncDisabled}
-            onSync={onSync}
-            onToggleAutoSync={onToggleAutoSync}
-            showSyncButton={false}
-            syncState={syncState}
-          />
         </div>
 
         <div className="agent-companies-settings__dialog-summary">
@@ -2741,23 +2754,15 @@ function CompanyGroupCard({
   companies,
   importState,
   isImportDisabled,
-  isSyncDisabled,
-  syncState,
   onOpenContents,
-  onOpenImport,
-  onSync,
-  onToggleAutoSync
+  onOpenImport
 }: {
   repository: CatalogRepositorySummary | null;
   companies: CatalogCompanySummary[];
   importState: ImportState | null;
   isImportDisabled: boolean;
-  isSyncDisabled: boolean;
-  syncState: SyncState | null;
   onOpenContents(companyId: string): void;
   onOpenImport(companyId: string): void;
-  onSync(companyId: string): void;
-  onToggleAutoSync(companyId: string, enabled: boolean): void;
 }): React.JSX.Element {
   const repositoryLabel = repository?.label ?? companies[0]?.repositoryLabel ?? "Unknown source";
   const repositoryUrl = repository?.url ?? companies[0]?.repositoryUrl ?? "";
@@ -2796,17 +2801,13 @@ function CompanyGroupCard({
 
       <div className="agent-companies-settings__company-list">
         {companies.map((company) => (
-          <CompanyCard
+          <DiscoveredCompanyCard
             company={company}
             importState={importState}
             isImportDisabled={isImportDisabled}
-            isSyncDisabled={isSyncDisabled}
             key={company.id}
             onOpenContents={onOpenContents}
             onOpenImport={onOpenImport}
-            onSync={onSync}
-            onToggleAutoSync={onToggleAutoSync}
-            syncState={syncState}
           />
         ))}
       </div>
@@ -2868,6 +2869,7 @@ export function AgentCompaniesSettingsPage({
     matchesCompanyQuery(company, companyQuery.trim())
   );
   const companyGroups = buildCompanyGroups(catalog.repositories, visibleCompanies);
+  const importedCompanies = catalog.importedCompanies;
   const isImportDisabled = pendingAction !== null || importState !== null || syncState !== null;
   const isSyncDisabled = pendingAction !== null || importState !== null || syncState !== null;
   const importCompany = importCompanyId
@@ -2931,7 +2933,7 @@ export function AgentCompaniesSettingsPage({
   }, [catalog.companies, importCompanyId, selectedCompanyId]);
 
   useEffect(() => {
-    if (!catalog.companies.some((company) => company.importedCompany?.syncStatus === "running")) {
+    if (!catalog.importedCompanies.some((company) => company.importedCompany.syncStatus === "running")) {
       return;
     }
 
@@ -2942,7 +2944,7 @@ export function AgentCompaniesSettingsPage({
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [catalog.companies, refresh]);
+  }, [catalog.importedCompanies, refresh]);
 
   useEffect(() => {
     void ensurePaperclipApiBaseRegistered();
@@ -2997,17 +2999,6 @@ export function AgentCompaniesSettingsPage({
       return;
     }
 
-    if (company.importedCompany) {
-      const importedCompanyLabel = getImportedCompanyLabel(company);
-      setNotice({
-        tone: "info",
-        text: importedCompanyLabel
-          ? `"${company.name}" is already imported as "${importedCompanyLabel}". Use Sync now to update it.`
-          : `"${company.name}" is already imported. Use Sync now to update it.`
-      });
-      return;
-    }
-
     setSelectedCompanyId(null);
     setImportCompanyId(company.id);
     setImportCompanyName(company.name);
@@ -3019,16 +3010,6 @@ export function AgentCompaniesSettingsPage({
 
     if (!importCompany) {
       setImportError("That company is no longer available in the current catalog snapshot.");
-      return;
-    }
-
-    if (importCompany.importedCompany) {
-      const importedCompanyLabel = getImportedCompanyLabel(importCompany);
-      setImportError(
-        importedCompanyLabel
-          ? `"${importCompany.name}" is already imported as "${importedCompanyLabel}". Use Sync now to update it.`
-          : `"${importCompany.name}" is already imported. Use Sync now to update it.`
-      );
       return;
     }
 
@@ -3159,32 +3140,42 @@ export function AgentCompaniesSettingsPage({
     }
   }
 
-  async function handleSetCompanyAutoSync(companyId: string, enabled: boolean): Promise<void> {
-    const company = catalog.companies.find((candidate) => candidate.id === companyId);
-    if (!company?.importedCompany) {
+  async function handleSetCompanyAutoSync(
+    sourceCompanyId: string,
+    importedCompanyId: string,
+    enabled: boolean
+  ): Promise<void> {
+    const company = catalog.importedCompanies.find(
+      (candidate) =>
+        candidate.sourceCompanyId === sourceCompanyId
+        && candidate.importedCompany.id === importedCompanyId
+    );
+    if (!company) {
       setNotice({
         tone: "error",
-        text: "That company must be imported before auto-sync can be changed."
+        text: "That imported company is no longer available in the current catalog snapshot."
       });
       return;
     }
 
     setPendingAction({
       kind: "toggling-auto-sync",
-      companyId
+      sourceCompanyId,
+      importedCompanyId
     });
     setNotice(null);
 
     try {
       await setCompanyAutoSync({
-        sourceCompanyId: companyId,
+        sourceCompanyId,
+        importedCompanyId,
         enabled
       });
       await refreshCatalog({
         tone: "info",
         text: enabled
-          ? `Daily auto-sync enabled for "${company.name}".`
-          : `Daily auto-sync paused for "${company.name}".`
+          ? `Daily auto-sync enabled for "${company.importedCompany.name}".`
+          : `Daily auto-sync paused for "${company.importedCompany.name}".`
       });
     } catch (actionError) {
       setNotice({
@@ -3196,12 +3187,19 @@ export function AgentCompaniesSettingsPage({
     }
   }
 
-  async function handleSyncCompany(companyId: string): Promise<void> {
-    const company = catalog.companies.find((candidate) => candidate.id === companyId);
-    if (!company?.importedCompany) {
+  async function handleSyncCompany(
+    sourceCompanyId: string,
+    importedCompanyId: string
+  ): Promise<void> {
+    const company = catalog.importedCompanies.find(
+      (candidate) =>
+        candidate.sourceCompanyId === sourceCompanyId
+        && candidate.importedCompany.id === importedCompanyId
+    );
+    if (!company) {
       setNotice({
         tone: "error",
-        text: "That company must be imported before it can be synced."
+        text: "That imported company is no longer available in the current catalog snapshot."
       });
       return;
     }
@@ -3218,14 +3216,16 @@ export function AgentCompaniesSettingsPage({
 
     setSyncState({
       kind: "syncing",
-      companyId
+      sourceCompanyId,
+      importedCompanyId
     });
     setNotice(null);
 
     try {
       await ensurePaperclipApiBaseRegistered();
       const syncResult = await syncCompany({
-        companyId
+        sourceCompanyId,
+        importedCompanyId
       }) as CatalogCompanySyncResult;
       const visibleWarningDetails = getVisibleSyncWarningDetails(syncResult);
       const warningCount = visibleWarningDetails.length;
@@ -3504,7 +3504,16 @@ export function AgentCompaniesSettingsPage({
             {catalog.summary.companyCount}
           </strong>
           <span className="agent-companies-settings__metric-note">
-            Grouped below
+            Source packages
+          </span>
+        </div>
+        <div className="agent-companies-settings__metric">
+          <span className="agent-companies-settings__metric-label">Imported Companies</span>
+          <strong className="agent-companies-settings__metric-value">
+            {catalog.summary.importedCompanyCount}
+          </strong>
+          <span className="agent-companies-settings__metric-note">
+            Sync targets
           </span>
         </div>
         <div className="agent-companies-settings__metric">
@@ -3689,7 +3698,7 @@ export function AgentCompaniesSettingsPage({
             <div>
               <h2 className="agent-companies-settings__panel-title">Discovered Companies</h2>
               <p className="agent-companies-settings__panel-copy">
-                Grouped by source and trimmed for quick scanning in the Paperclip settings host.
+                These are source packages grouped by repository. Import stays available here even after you create one or more Paperclip companies from the same source.
               </p>
             </div>
             <div className="agent-companies-settings__badge-row">
@@ -3726,14 +3735,10 @@ export function AgentCompaniesSettingsPage({
                   companies={group.companies}
                   importState={importState}
                   isImportDisabled={isImportDisabled}
-                  isSyncDisabled={isSyncDisabled}
                   key={group.repository?.id ?? group.companies[0]?.repositoryId ?? "unknown-repo"}
                   onOpenContents={setSelectedCompanyId}
                   onOpenImport={openImportDialog}
-                  onSync={handleSyncCompany}
-                  onToggleAutoSync={handleSetCompanyAutoSync}
                   repository={group.repository}
-                  syncState={syncState}
                 />
               ))}
             </div>
@@ -3753,6 +3758,45 @@ export function AgentCompaniesSettingsPage({
             </div>
           )}
         </section>
+
+        <section className="agent-companies-settings__panel">
+          <div className="agent-companies-settings__panel-head">
+            <div>
+              <h2 className="agent-companies-settings__panel-title">Imported Companies</h2>
+              <p className="agent-companies-settings__panel-copy">
+                These are the tracked Paperclip companies created from discovered sources. Sync and daily auto-sync controls live here.
+              </p>
+            </div>
+            <div className="agent-companies-settings__badge-row">
+              <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
+                {importedCompanies.length} tracked
+              </span>
+            </div>
+          </div>
+
+          {importedCompanies.length > 0 ? (
+            <div className="agent-companies-settings__company-list">
+              {importedCompanies.map((company) => (
+                <ImportedCompanyCard
+                  company={company}
+                  isSyncDisabled={isSyncDisabled}
+                  key={`${company.sourceCompanyId}:${company.importedCompany.id}`}
+                  onOpenContents={setSelectedCompanyId}
+                  onSync={handleSyncCompany}
+                  onToggleAutoSync={handleSetCompanyAutoSync}
+                  syncState={syncState}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="agent-companies-settings__empty">
+              <h3 className="agent-companies-settings__empty-title">No imported companies yet</h3>
+              <p className="agent-companies-settings__empty-copy">
+                Import a discovered source package above to start tracking Paperclip companies here.
+              </p>
+            </div>
+          )}
+        </section>
       </div>
 
       {selectedCompany ? (
@@ -3760,12 +3804,8 @@ export function AgentCompaniesSettingsPage({
           company={selectedCompany}
           importState={importState}
           isImportDisabled={isImportDisabled}
-          isSyncDisabled={isSyncDisabled}
           onClose={() => setSelectedCompanyId(null)}
           onOpenImport={openImportDialog}
-          onSync={handleSyncCompany}
-          onToggleAutoSync={handleSetCompanyAutoSync}
-          syncState={syncState}
         />
       ) : null}
 
