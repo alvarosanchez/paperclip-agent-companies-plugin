@@ -89,6 +89,7 @@ During import, the plugin packages the company directory as an inline Paperclip 
 - Imported companies default to daily auto-sync.
 - Manual sync is available whenever the source version changes or cannot be compared safely.
 - Sync uses overwrite mode by default so the imported Paperclip company stays aligned with the source package.
+- When sync lands newly assigned imported issues on existing active agents, the plugin queues explicit Paperclip wake requests so those agents can pick up the work even if scheduled heartbeats are disabled.
 - Recurring tasks are imported through Paperclip's company portability flow as routines rather than one-time starter issues, while keeping any `.paperclip.yaml` routine sidecar metadata in the portable package.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.

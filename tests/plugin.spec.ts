@@ -968,6 +968,15 @@ describe("agent companies plugin", () => {
         authorization: headers.get("authorization")
       });
 
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
       return new Response(
         JSON.stringify({
           company: {
@@ -1037,9 +1046,20 @@ describe("agent companies plugin", () => {
         companyId: company?.id
       });
 
-      expect(fetchRequests).toHaveLength(1);
-      expect(fetchRequests[0]?.url).toBe("http://127.0.0.1:3210/api/companies/import");
-      expect(fetchRequests[0]?.authorization).toBe("Bearer paperclip-board-token");
+      expect(fetchRequests).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          authorization: "Bearer paperclip-board-token"
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/import",
+          authorization: "Bearer paperclip-board-token"
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          authorization: "Bearer paperclip-board-token"
+        }
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {
@@ -1069,6 +1089,15 @@ describe("agent companies plugin", () => {
       const url =
         typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       fetchRequests.push(url);
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
 
       if (url === "http://127.0.0.1:3210/api/health") {
         return new Response(
@@ -1126,7 +1155,10 @@ describe("agent companies plugin", () => {
         /Board access required\. Open Agent Companies Plugin settings inside the imported company, connect board access, and retry sync\./u
       );
 
-      expect(fetchRequests).toEqual(["http://127.0.0.1:3210/api/health"]);
+      expect(fetchRequests).toEqual([
+        "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+        "http://127.0.0.1:3210/api/health"
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {
@@ -1158,6 +1190,15 @@ describe("agent companies plugin", () => {
         const url =
           typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
         fetchRequests.push(url);
+
+        if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          });
+        }
 
         if (url === "http://127.0.0.1:3210/api/health") {
           return new Response(
@@ -1230,6 +1271,7 @@ describe("agent companies plugin", () => {
         );
 
         expect(fetchRequests).toEqual([
+          "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           "http://127.0.0.1:3210/api/health",
           "http://127.0.0.1:3210/api/companies/import"
         ]);
@@ -1624,6 +1666,163 @@ describe("agent companies plugin", () => {
     expect(importedCompany?.importedCompany?.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
     expect(importedCompany?.importedCompany?.isSyncAvailable).toBe(false);
     expect(importedCompany?.importedCompany?.isUpToDate).toBe(true);
+  });
+
+  it("queues wake requests for newly assigned issues created by sync", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; method: string; body: unknown }> = [];
+    let issueReadCount = 0;
+    let currentTime = "2026-04-14T09:23:00.000Z";
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? "GET";
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        method,
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        issueReadCount += 1;
+        return new Response(
+          JSON.stringify(
+            issueReadCount === 1
+              ? [
+                  {
+                    id: "issue-1",
+                    identifier: "ALP-1",
+                    title: "Seed Default Company",
+                    status: "backlog",
+                    assigneeAgentId: null
+                  }
+                ]
+              : [
+                  {
+                    id: "issue-1",
+                    identifier: "ALP-1",
+                    title: "Seed Default Company",
+                    status: "backlog",
+                    assigneeAgentId: "agent-123"
+                  }
+                ]
+          ),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/agents/agent-123/wakeup") {
+        return new Response(
+          JSON.stringify({
+            id: "run-123",
+            status: "queued"
+          }),
+          {
+            status: 202,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => currentTime,
+        startupAutoSyncDelayMs: null,
+        syncImport: async (_ctx, input) => ({
+          company: {
+            id: input.importedCompanyId,
+            name: "Alpha Labs Imported",
+            action: "updated"
+          }
+        })
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      });
+
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+      currentTime = "2026-04-15T10:00:00.000Z";
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        companyId: company?.id
+      });
+
+      expect(fetchRequests).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          method: "GET",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          method: "GET",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
+          method: "POST",
+          body: {
+            source: "assignment",
+            triggerDetail: "system",
+            reason: "Wake for imported issue ALP-1",
+            payload: {
+              issueId: "issue-1"
+            }
+          }
+        }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
   });
 
   it("runs the daily auto-sync job for due imported companies", async () => {

@@ -248,6 +248,21 @@ interface PaperclipApiConnection {
   apiKey: string | null;
 }
 
+interface PaperclipIssueRecord {
+  id: string;
+  identifier: string | null;
+  title: string | null;
+  status: string | null;
+  assigneeAgentId: string | null;
+}
+
+interface PaperclipIssueWakeTarget {
+  agentId: string;
+  issueId: string;
+  issueIdentifier: string | null;
+  issueTitle: string | null;
+}
+
 class PaperclipApiResponseError extends Error {
   status: number;
 
@@ -2473,6 +2488,206 @@ async function executeDefaultSyncImport(
   return payload as PaperclipCompanyImportResult;
 }
 
+function buildPaperclipApiHeaders(connection: PaperclipApiConnection): Record<string, string> {
+  const headers: Record<string, string> = {
+    accept: "application/json"
+  };
+
+  if (connection.apiKey) {
+    headers.authorization = `Bearer ${connection.apiKey}`;
+  }
+
+  return headers;
+}
+
+async function fetchPaperclipApiJson(
+  connection: PaperclipApiConnection,
+  path: string,
+  init: Omit<RequestInit, "headers"> = {}
+): Promise<unknown> {
+  const requestUrl = `${connection.apiBase}${path}`;
+  let response: Response;
+
+  try {
+    response = await fetch(requestUrl, {
+      ...init,
+      headers: {
+        ...buildPaperclipApiHeaders(connection),
+        ...(init.body ? { "content-type": "application/json" } : {})
+      }
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not reach the Paperclip API at ${connection.apiBase}: ${summarizeErrorMessage(error)}`
+    );
+  }
+
+  return parsePaperclipJsonResponse(response);
+}
+
+function normalizePaperclipIssue(value: unknown): PaperclipIssueRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asNonEmptyString(value.id);
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    identifier: asNonEmptyString(value.identifier),
+    title: asNonEmptyString(value.title),
+    status: asNonEmptyString(value.status),
+    assigneeAgentId: asNonEmptyString(value.assigneeAgentId)
+  };
+}
+
+async function fetchPaperclipCompanyIssues(
+  connection: PaperclipApiConnection,
+  companyId: string
+): Promise<PaperclipIssueRecord[]> {
+  const payload = await fetchPaperclipApiJson(
+    connection,
+    `/api/companies/${encodeURIComponent(companyId)}/issues`
+  );
+
+  if (!Array.isArray(payload)) {
+    throw new Error("Paperclip returned an unexpected issues response.");
+  }
+
+  return payload
+    .map((issue) => normalizePaperclipIssue(issue))
+    .filter((issue): issue is PaperclipIssueRecord => issue !== null);
+}
+
+function selectPaperclipIssueWakeTargets(
+  beforeIssues: PaperclipIssueRecord[],
+  afterIssues: PaperclipIssueRecord[]
+): PaperclipIssueWakeTarget[] {
+  const wakeTargetsByAgentId = new Map<string, PaperclipIssueWakeTarget>();
+  const previousAssigneesByIssueId = new Map(
+    beforeIssues.map((issue) => [issue.id, issue.assigneeAgentId ?? null])
+  );
+
+  for (const issue of afterIssues) {
+    const assigneeAgentId = issue.assigneeAgentId;
+    if (!assigneeAgentId || issue.status === "done" || issue.status === "cancelled") {
+      continue;
+    }
+
+    const previousAssigneeAgentId = previousAssigneesByIssueId.get(issue.id) ?? null;
+    if (previousAssigneeAgentId === assigneeAgentId) {
+      continue;
+    }
+
+    if (!wakeTargetsByAgentId.has(assigneeAgentId)) {
+      wakeTargetsByAgentId.set(assigneeAgentId, {
+        agentId: assigneeAgentId,
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        issueTitle: issue.title
+      });
+    }
+  }
+
+  return [...wakeTargetsByAgentId.values()];
+}
+
+function buildPaperclipIssueWakeReason(target: PaperclipIssueWakeTarget): string {
+  return target.issueIdentifier
+    ? `Wake for imported issue ${target.issueIdentifier}`
+    : target.issueTitle
+      ? `Wake for imported issue ${target.issueTitle}`
+      : `Wake for imported issue ${target.issueId}`;
+}
+
+async function requestPaperclipIssueWake(
+  connection: PaperclipApiConnection,
+  target: PaperclipIssueWakeTarget
+): Promise<void> {
+  await fetchPaperclipApiJson(
+    connection,
+    `/api/agents/${encodeURIComponent(target.agentId)}/wakeup`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        source: "assignment",
+        triggerDetail: "system",
+        reason: buildPaperclipIssueWakeReason(target),
+        payload: {
+          issueId: target.issueId
+        }
+      })
+    }
+  );
+}
+
+async function tryFetchPaperclipCompanyIssues(
+  ctx: PluginContext,
+  companyId: string
+): Promise<PaperclipIssueRecord[] | null> {
+  try {
+    const connection = await resolvePaperclipApiConnection(ctx, companyId);
+    return await fetchPaperclipCompanyIssues(connection, companyId);
+  } catch (error) {
+    ctx.logger.warn("Skipped Paperclip issue wake snapshot because the issue list could not be read", {
+      companyId,
+      error: summarizeErrorMessage(error)
+    });
+    return null;
+  }
+}
+
+async function requestWakeForNewlyAssignedPaperclipIssues(
+  ctx: PluginContext,
+  companyId: string,
+  beforeIssues: PaperclipIssueRecord[] | null
+): Promise<void> {
+  if (!beforeIssues) {
+    return;
+  }
+
+  let connection: PaperclipApiConnection;
+  let afterIssues: PaperclipIssueRecord[];
+  try {
+    connection = await resolvePaperclipApiConnection(ctx, companyId);
+    afterIssues = await fetchPaperclipCompanyIssues(connection, companyId);
+  } catch (error) {
+    ctx.logger.warn("Skipped Paperclip issue wake requests because the synced issue list could not be read", {
+      companyId,
+      error: summarizeErrorMessage(error)
+    });
+    return;
+  }
+
+  const wakeTargets = selectPaperclipIssueWakeTargets(beforeIssues, afterIssues);
+  if (wakeTargets.length === 0) {
+    return;
+  }
+
+  for (const target of wakeTargets) {
+    try {
+      await requestPaperclipIssueWake(connection, target);
+      ctx.logger.info("Queued Paperclip wake request for a newly assigned synced issue", {
+        companyId,
+        agentId: target.agentId,
+        issueId: target.issueId,
+        issueIdentifier: target.issueIdentifier
+      });
+    } catch (error) {
+      ctx.logger.warn("Failed to queue a Paperclip wake request for a newly assigned synced issue", {
+        companyId,
+        agentId: target.agentId,
+        issueId: target.issueId,
+        issueIdentifier: target.issueIdentifier,
+        error: summarizeErrorMessage(error)
+      });
+    }
+  }
+}
+
 async function runCatalogCompanySync(
   ctx: PluginContext,
   sourceCompanyId: string,
@@ -2590,6 +2805,10 @@ async function runCatalogCompanySync(
       const preparedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId, {
         allowImported: true
       });
+      const issuesBeforeSync = await tryFetchPaperclipCompanyIssues(
+        ctx,
+        importedCompany.importedCompanyId
+      );
       const importResult = await options.syncImport(ctx, {
         sourceCompanyId,
         sourceCompanyName: refreshedMatch.company.name,
@@ -2602,6 +2821,12 @@ async function runCatalogCompanySync(
       const nextImportedCompanyId =
         asNonEmptyString(importResult.company?.id) ?? importedCompany.importedCompanyId;
       const nextImportedCompanyName = importedCompany.importedCompanyName;
+
+      await requestWakeForNewlyAssignedPaperclipIssues(
+        ctx,
+        nextImportedCompanyId,
+        issuesBeforeSync
+      );
 
       await persistCatalogState(
         ctx,
