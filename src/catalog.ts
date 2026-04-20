@@ -9,6 +9,7 @@ export const DEFAULT_SYNC_COLLISION_STRATEGY = "replace" as const;
 export const AUTO_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export type CompanyContentKey = (typeof COMPANY_CONTENT_KEYS)[number];
+export type CompanyImportSelectionMode = "all" | "selected" | "none";
 export type CatalogSyncCollisionStrategy = "rename" | "skip" | "replace";
 export type CatalogCompanySyncStatus = "idle" | "running" | "succeeded" | "failed";
 
@@ -29,6 +30,19 @@ export interface CompanyContents {
   tasks: CompanyContentItem[];
   issues: CompanyContentItem[];
   skills: CompanyContentItem[];
+}
+
+export interface CompanyImportPartSelection {
+  mode: CompanyImportSelectionMode;
+  itemPaths?: string[];
+}
+
+export interface CompanyImportSelection {
+  agents: CompanyImportPartSelection;
+  projects: CompanyImportPartSelection;
+  tasks: CompanyImportPartSelection;
+  issues: CompanyImportPartSelection;
+  skills: CompanyImportPartSelection;
 }
 
 export interface CatalogCompanyContentDetail {
@@ -56,6 +70,7 @@ export type PortableCatalogFileEntry =
 export interface CatalogPreparedCompanyImport {
   companyId: string;
   companyName: string;
+  selection: CompanyImportSelection;
   source: {
     type: "inline";
     files: Record<string, PortableCatalogFileEntry>;
@@ -95,6 +110,7 @@ export interface ImportedCatalogCompanyRecord {
   importedCompanyIssuePrefix: string | null;
   importedSourceVersion: string | null;
   importedAt: string | null;
+  selection: CompanyImportSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
   lastSyncStatus: CatalogCompanySyncStatus;
@@ -111,6 +127,7 @@ export interface CatalogCompanyImportStatus {
   importedSourceVersion: string | null;
   latestSourceVersion: string | null;
   importedAt: string | null;
+  selection: CompanyImportSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
   syncStatus: CatalogCompanySyncStatus;
@@ -228,6 +245,67 @@ function normalizeCatalogSyncCollisionStrategy(value: unknown): CatalogSyncColli
 
 function normalizeCatalogCompanySyncStatus(value: unknown): CatalogCompanySyncStatus {
   return value === "running" || value === "succeeded" || value === "failed" ? value : "idle";
+}
+
+export function createDefaultCompanyImportSelection(): CompanyImportSelection {
+  return {
+    agents: { mode: "all" },
+    projects: { mode: "all" },
+    tasks: { mode: "all" },
+    issues: { mode: "all" },
+    skills: { mode: "all" }
+  };
+}
+
+function normalizeCompanyImportPartSelection(value: unknown): CompanyImportPartSelection {
+  if (!isRecord(value)) {
+    return { mode: "all" };
+  }
+
+  const mode =
+    value.mode === "selected" || value.mode === "none"
+      ? value.mode
+      : "all";
+  const itemPaths = Array.isArray(value.itemPaths)
+    ? [...new Set(
+        value.itemPaths
+          .map((itemPath) =>
+            typeof itemPath === "string" ? normalizeCompanyContentPath(itemPath) : null
+          )
+          .filter((itemPath): itemPath is string => itemPath !== null)
+      )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+    : [];
+
+  if (mode === "selected") {
+    return itemPaths.length > 0
+      ? {
+          mode,
+          itemPaths
+        }
+      : { mode: "none" };
+  }
+
+  return {
+    mode
+  };
+}
+
+export function normalizeCompanyImportSelection(value: unknown): CompanyImportSelection {
+  if (!isRecord(value)) {
+    return createDefaultCompanyImportSelection();
+  }
+
+  const selection = createDefaultCompanyImportSelection();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    selection[key] = normalizeCompanyImportPartSelection(value[key]);
+  }
+
+  return selection;
+}
+
+export function isCompanyImportSelectionEmpty(selection: CompanyImportSelection): boolean {
+  return COMPANY_CONTENT_KEYS.every((key) => selection[key].mode === "none");
 }
 
 function addMillisecondsToIso(timestamp: string, deltaMs: number): string | null {
@@ -700,6 +778,7 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
       asNonEmptyString(value.sourceVersion) ??
       asNonEmptyString(value.version),
     importedAt,
+    selection: normalizeCompanyImportSelection(value.selection),
     autoSyncEnabled:
       typeof value.autoSyncEnabled === "boolean"
         ? value.autoSyncEnabled
@@ -890,6 +969,7 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
               importedSourceVersion: importedCompany.importedSourceVersion,
               latestSourceVersion,
               importedAt: importedCompany.importedAt,
+              selection: importedCompany.selection,
               autoSyncEnabled: importedCompany.autoSyncEnabled,
               syncCollisionStrategy: importedCompany.syncCollisionStrategy,
               syncStatus: importedCompany.lastSyncStatus,

@@ -12,6 +12,8 @@ import {
   CATALOG_STATE_KEY,
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
+  type CompanyImportPartSelection,
+  type CompanyImportSelection,
   DEFAULT_AUTO_SYNC_ENABLED,
   DEFAULT_SYNC_COLLISION_STRATEGY,
   type ImportedCatalogCompanyRecord,
@@ -20,10 +22,12 @@ import {
   createRepositorySource,
   createEmptyCompanyContents,
   hasPersistedCatalogRepositories,
+  isCompanyImportSelectionEmpty,
   isCatalogCompanySyncAvailable,
   isCatalogCompanyAutoSyncDue,
   normalizeCompanyContentPath,
   normalizeCatalogState,
+  normalizeCompanyImportSelection,
   normalizeRepositoryCloneRef,
   type PaperclipCompanyImportResult,
   sortCompanyContentItems,
@@ -1491,6 +1495,234 @@ function findCompanyContentEntry(
   return null;
 }
 
+function normalizeSyncCollisionStrategyInput(
+  value: unknown,
+  fallback: CatalogSyncCollisionStrategy = DEFAULT_SYNC_COLLISION_STRATEGY
+): CatalogSyncCollisionStrategy {
+  return value === "rename" || value === "skip" || value === "replace"
+    ? value
+    : fallback;
+}
+
+function normalizeSelectionPartForCompanyItems(
+  items: CompanyContentItem[],
+  selection: CompanyImportPartSelection
+): CompanyImportPartSelection {
+  if (selection.mode !== "selected") {
+    return selection;
+  }
+
+  const itemPaths = [...new Set(
+    selection.itemPaths?.filter((itemPath) => items.some((item) => item.path === itemPath)) ?? []
+  )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+
+  return itemPaths.length > 0
+    ? {
+        mode: "selected",
+        itemPaths
+      }
+    : { mode: "none" };
+}
+
+function normalizeRequestedCompanyImportSelection(
+  company: DiscoveredAgentCompany,
+  selection: unknown
+): CompanyImportSelection {
+  const normalizedSelection = normalizeCompanyImportSelection(selection);
+
+  return {
+    agents: normalizeSelectionPartForCompanyItems(company.contents.agents, normalizedSelection.agents),
+    projects: normalizeSelectionPartForCompanyItems(company.contents.projects, normalizedSelection.projects),
+    tasks: normalizeSelectionPartForCompanyItems(company.contents.tasks, normalizedSelection.tasks),
+    issues: normalizeSelectionPartForCompanyItems(company.contents.issues, normalizedSelection.issues),
+    skills: normalizeSelectionPartForCompanyItems(company.contents.skills, normalizedSelection.skills)
+  };
+}
+
+function isFullCompanyImportSelection(selection: CompanyImportSelection): boolean {
+  return COMPANY_CONTENT_KEYS.every((key) => selection[key].mode === "all");
+}
+
+function isSelectedCompanyImportItem(
+  selection: CompanyImportSelection,
+  kind: CompanyContentKey,
+  itemPath: string
+): boolean {
+  const partSelection = selection[kind];
+  if (partSelection.mode === "all") {
+    return true;
+  }
+
+  if (partSelection.mode !== "selected") {
+    return false;
+  }
+
+  return partSelection.itemPaths?.includes(itemPath) ?? false;
+}
+
+function getCompanyContentItemRootPath(itemPath: string): string {
+  return toPosixPath(dirname(itemPath));
+}
+
+function getLongestMatchingContentRootLength(filePath: string, roots: string[]): number {
+  let longestLength = -1;
+
+  for (const root of roots) {
+    if (filePath === root || filePath.startsWith(`${root}/`)) {
+      longestLength = Math.max(longestLength, root.length);
+    }
+  }
+
+  return longestLength;
+}
+
+function filterPortableCompanyFilePaths(
+  company: DiscoveredAgentCompany,
+  filePaths: string[],
+  selection: CompanyImportSelection
+): string[] {
+  const selectedManifestPaths = new Set<string>();
+  const excludedManifestPaths = new Set<string>();
+  const selectedRoots: string[] = [];
+  const excludedRoots: string[] = [];
+
+  for (const kind of COMPANY_CONTENT_KEYS) {
+    for (const item of company.contents[kind]) {
+      const isSelected = isSelectedCompanyImportItem(selection, kind, item.path);
+      const itemRoot = getCompanyContentItemRootPath(item.path);
+
+      if (isSelected) {
+        selectedManifestPaths.add(item.path);
+        selectedRoots.push(itemRoot);
+      } else {
+        excludedManifestPaths.add(item.path);
+        excludedRoots.push(itemRoot);
+      }
+    }
+  }
+
+  return filePaths.filter((filePath) => {
+    if (filePath === "COMPANY.md" || PAPERCLIP_EXTENSION_FILE_NAMES.includes(filePath as never)) {
+      return true;
+    }
+
+    if (selectedManifestPaths.has(filePath)) {
+      return true;
+    }
+
+    if (excludedManifestPaths.has(filePath)) {
+      return false;
+    }
+
+    const selectedRootLength = getLongestMatchingContentRootLength(filePath, selectedRoots);
+    if (selectedRootLength < 0) {
+      return false;
+    }
+
+    const excludedRootLength = getLongestMatchingContentRootLength(filePath, excludedRoots);
+    return selectedRootLength >= excludedRootLength;
+  });
+}
+
+function getSelectedCompanyContentSlugs(
+  items: CompanyContentItem[],
+  selection: CompanyImportPartSelection
+): Set<string> | null {
+  if (selection.mode === "all") {
+    return null;
+  }
+
+  if (selection.mode === "none") {
+    return new Set();
+  }
+
+  const selectedSlugs = new Set<string>();
+
+  for (const item of items) {
+    if (!(selection.itemPaths?.includes(item.path) ?? false)) {
+      continue;
+    }
+
+    const slug = normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2));
+    if (slug) {
+      selectedSlugs.add(slug);
+    }
+  }
+
+  return selectedSlugs;
+}
+
+function filterPortablePaperclipExtensionForSelection(
+  company: DiscoveredAgentCompany,
+  selection: CompanyImportSelection,
+  files: Record<string, PortableCatalogFileEntry>
+): Record<string, PortableCatalogFileEntry> {
+  const extensionPath = findPortablePaperclipExtensionPath(files);
+  if (!extensionPath) {
+    return files;
+  }
+
+  const extensionEntry = files[extensionPath];
+  if (typeof extensionEntry !== "string") {
+    return files;
+  }
+
+  const parsedExtension = parseYamlObject(extensionEntry);
+  if (!parsedExtension) {
+    return files;
+  }
+
+  const nextExtension: Record<string, unknown> = {
+    ...parsedExtension
+  };
+  let didChange = false;
+
+  if (isRecord(nextExtension.agents)) {
+    const currentAgents = Object.entries(nextExtension.agents);
+    const selectedAgentSlugs = getSelectedCompanyContentSlugs(
+      company.contents.agents,
+      selection.agents
+    );
+    if (selectedAgentSlugs !== null) {
+      const nextAgents = Object.fromEntries(
+        currentAgents.filter(([slug]) => selectedAgentSlugs.has(slug))
+      );
+      nextExtension.agents = nextAgents;
+      didChange = didChange || Object.keys(nextAgents).length !== currentAgents.length;
+      if (Object.keys(nextAgents).length === 0) {
+        delete nextExtension.agents;
+      }
+    }
+  }
+
+  if (isRecord(nextExtension.routines)) {
+    const currentRoutines = Object.entries(nextExtension.routines);
+    const selectedTaskSlugs = getSelectedCompanyContentSlugs(
+      company.contents.tasks,
+      selection.tasks
+    );
+    if (selectedTaskSlugs !== null) {
+      const nextRoutines = Object.fromEntries(
+        currentRoutines.filter(([slug]) => selectedTaskSlugs.has(slug))
+      );
+      nextExtension.routines = nextRoutines;
+      didChange = didChange || Object.keys(nextRoutines).length !== currentRoutines.length;
+      if (Object.keys(nextRoutines).length === 0) {
+        delete nextExtension.routines;
+      }
+    }
+  }
+
+  if (!didChange) {
+    return files;
+  }
+
+  return {
+    ...files,
+    [extensionPath]: `${stringifyYaml(nextExtension).trimEnd()}\n`
+  };
+}
+
 export async function clearRepositoryCheckoutCacheEntry(repositoryId: string): Promise<void> {
   const cachedEntry = repositoryCheckoutCache.get(repositoryId);
   if (!cachedEntry) {
@@ -2322,7 +2554,8 @@ async function buildPortableCatalogFileEntry(
 
 async function buildCatalogCompanyImportSource(
   ctx: PluginContext,
-  companyId: string
+  companyId: string,
+  requestedSelection?: unknown
 ): Promise<CatalogPreparedCompanyImport> {
   const state = await loadCatalogState(ctx);
   const match = findRepositoryCompany(state, companyId);
@@ -2330,14 +2563,25 @@ async function buildCatalogCompanyImportSource(
     throw new Error("Company not found.");
   }
 
+  const selection = normalizeRequestedCompanyImportSelection(
+    match.company,
+    requestedSelection
+  );
+  if (isCompanyImportSelectionEmpty(selection)) {
+    throw new Error("Select at least one catalog part or item to import.");
+  }
+
   const repositoryRoot = await resolveRepositoryContentRoot(match.repository);
   const companyRelativeRoot = getRepositoryRelativeCompanyRoot(match.company);
   const companyRoot = companyRelativeRoot
     ? resolveRepositoryRelativePath(repositoryRoot, companyRelativeRoot)
     : repositoryRoot;
-  const filePaths = await findPortableCompanyFilePaths(companyRoot);
+  const discoveredFilePaths = await findPortableCompanyFilePaths(companyRoot);
+  const filePaths = isFullCompanyImportSelection(selection)
+    ? discoveredFilePaths
+    : filterPortableCompanyFilePaths(match.company, discoveredFilePaths, selection);
 
-  if (!filePaths.includes("COMPANY.md")) {
+  if (!discoveredFilePaths.includes("COMPANY.md")) {
     throw new Error("Company package is missing COMPANY.md.");
   }
 
@@ -2367,7 +2611,12 @@ async function buildCatalogCompanyImportSource(
   }
 
   const iconAugmentation = await applyPaperclipAgentIconsToPortableFiles(ctx, companyRoot, files);
-  const portableFileSummary = summarizePortableCatalogFiles(iconAugmentation.files);
+  const filteredPortableFiles = filterPortablePaperclipExtensionForSelection(
+    match.company,
+    selection,
+    iconAugmentation.files
+  );
+  const portableFileSummary = summarizePortableCatalogFiles(filteredPortableFiles);
   totalSourceBytes += iconAugmentation.sourceByteDelta;
 
   if (portableFileSummary.fileCount > MAX_INLINE_IMPORT_FILES) {
@@ -2386,6 +2635,7 @@ async function buildCatalogCompanyImportSource(
     companyId: match.company.id,
     companyName: match.company.name,
     repositoryId: match.repository.id,
+    selection,
     fileCount: portableFileSummary.fileCount,
     totalSourceBytes,
     totalPayloadBytes: portableFileSummary.totalPayloadBytes
@@ -2394,9 +2644,10 @@ async function buildCatalogCompanyImportSource(
   return {
     companyId: match.company.id,
     companyName: match.company.name,
+    selection,
     source: {
       type: "inline",
-      files: iconAugmentation.files
+      files: filteredPortableFiles
     },
     stats: {
       fileCount: portableFileSummary.fileCount,
@@ -2796,7 +3047,11 @@ async function runCatalogCompanySync(
         };
       }
 
-      const preparedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId);
+      const preparedImport = await buildCatalogCompanyImportSource(
+        ctx,
+        sourceCompanyId,
+        importedCompany.selection
+      );
       const issuesBeforeSync = await tryFetchPaperclipCompanyIssues(
         ctx,
         importedCompany.importedCompanyId
@@ -3023,7 +3278,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
       ctx.actions.register("catalog.prepare-company-import", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = getRequiredString(params, "companyId");
-        return buildCatalogCompanyImportSource(ctx, companyId);
+        return buildCatalogCompanyImportSource(ctx, companyId, params.selection);
       });
 
       ctx.actions.register("paperclip-runtime.set-api-base", async (rawParams) => {
@@ -3076,6 +3331,15 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           );
         }
 
+        const selection = normalizeRequestedCompanyImportSelection(match.company, params.selection);
+        if (isCompanyImportSelectionEmpty(selection)) {
+          throw new Error("Select at least one catalog part or item to import.");
+        }
+        const syncCollisionStrategy = normalizeSyncCollisionStrategyInput(
+          params.syncCollisionStrategy,
+          existingImport?.syncCollisionStrategy ?? DEFAULT_SYNC_COLLISION_STRATEGY
+        );
+
         const nextState = await persistCatalogState(
           ctx,
           {
@@ -3095,9 +3359,9 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
                 importedCompanyIssuePrefix,
                 importedSourceVersion: match.company.version,
                 importedAt: timestamp,
+                selection,
                 autoSyncEnabled: existingImport?.autoSyncEnabled ?? DEFAULT_AUTO_SYNC_ENABLED,
-                syncCollisionStrategy:
-                  existingImport?.syncCollisionStrategy ?? DEFAULT_SYNC_COLLISION_STRATEGY,
+                syncCollisionStrategy,
                 lastSyncStatus: "succeeded",
                 lastSyncAttemptAt: existingImport?.lastSyncAttemptAt ?? timestamp,
                 lastSyncedAt: timestamp,

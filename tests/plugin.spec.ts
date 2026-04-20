@@ -719,6 +719,13 @@ describe("agent companies plugin", () => {
 
     expect(prepared.companyId).toBe(company?.id);
     expect(prepared.companyName).toBe("Alpha Labs");
+    expect(prepared.selection).toEqual({
+      agents: { mode: "all" },
+      projects: { mode: "all" },
+      tasks: { mode: "all" },
+      issues: { mode: "all" },
+      skills: { mode: "all" }
+    });
     expect(prepared.source.type).toBe("inline");
     expect(prepared.stats.fileCount).toBeGreaterThanOrEqual(6);
     expect(prepared.stats.textFileCount).toBe(prepared.stats.fileCount);
@@ -733,6 +740,58 @@ describe("agent companies plugin", () => {
     ]);
     expect(typeof prepared.source.files["COMPANY.md"]).toBe("string");
     expect(typeof prepared.source.files["skills/repo-audit/assets/icon.svg"]).toBe("string");
+  });
+
+  it("packages selected company parts and items as an inline import source", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:05.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id,
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "selected", itemPaths: ["skills/repo-audit/SKILL.md"] }
+        }
+      }
+    );
+
+    expect(prepared.selection).toEqual({
+      agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+      projects: { mode: "none" },
+      tasks: { mode: "none" },
+      issues: { mode: "none" },
+      skills: { mode: "selected", itemPaths: ["skills/repo-audit/SKILL.md"] }
+    });
+    expect(Object.keys(prepared.source.files).sort()).toEqual([
+      "COMPANY.md",
+      "agents/ceo/AGENTS.md",
+      "skills/repo-audit/SKILL.md",
+      "skills/repo-audit/assets/icon.svg"
+    ]);
   });
 
   it("omits common secret-bearing files from inline import sources", async () => {
@@ -1386,7 +1445,15 @@ describe("agent companies plugin", () => {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
-      importedCompanyIssuePrefix: "ALP"
+      importedCompanyIssuePrefix: "ALP",
+      selection: {
+        agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+        projects: { mode: "none" },
+        tasks: { mode: "none" },
+        issues: { mode: "none" },
+        skills: { mode: "none" }
+      },
+      syncCollisionStrategy: "skip"
     });
     await harness.performAction("catalog.record-company-import", {
       sourceCompanyId: company?.id,
@@ -1417,23 +1484,41 @@ describe("agent companies plugin", () => {
       afterImportRecord.importedCompanies
         .filter((candidate) => candidate.sourceCompanyId === company?.id)
         .map((candidate) => ({
-          id: candidate.importedCompany.id,
-          name: candidate.importedCompany.name,
-          issuePrefix: candidate.importedCompany.issuePrefix,
-          importedSourceVersion: candidate.importedCompany.importedSourceVersion
-        }))
+        id: candidate.importedCompany.id,
+        name: candidate.importedCompany.name,
+        issuePrefix: candidate.importedCompany.issuePrefix,
+        importedSourceVersion: candidate.importedCompany.importedSourceVersion,
+        selection: candidate.importedCompany.selection,
+        syncCollisionStrategy: candidate.importedCompany.syncCollisionStrategy
+      }))
     ).toEqual([
       {
         id: "paperclip-company-123",
         name: "Alpha Labs Imported",
         issuePrefix: "ALP",
-        importedSourceVersion: "1.0.0"
+        importedSourceVersion: "1.0.0",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        },
+        syncCollisionStrategy: "skip"
       },
       {
         id: "paperclip-company-456",
         name: "Alpha Labs Sandbox",
         issuePrefix: "ALPS",
-        importedSourceVersion: "1.0.0"
+        importedSourceVersion: "1.0.0",
+        selection: {
+          agents: { mode: "all" },
+          projects: { mode: "all" },
+          tasks: { mode: "all" },
+          issues: { mode: "all" },
+          skills: { mode: "all" }
+        },
+        syncCollisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
       }
     ]);
 
@@ -1444,6 +1529,72 @@ describe("agent companies plugin", () => {
       }
     );
     expect(preparedImport.companyId).toBe(company?.id);
+  });
+
+  it("updates an existing tracked import contract when the same company is re-imported", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:23:05.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    const afterReimport = await harness.performAction<CatalogSnapshot>("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP",
+      selection: {
+        agents: { mode: "none" },
+        projects: { mode: "selected", itemPaths: ["projects/import-pipeline/PROJECT.md"] },
+        tasks: { mode: "none" },
+        issues: { mode: "selected", itemPaths: ["issues/follow-up/ISSUE.md"] },
+        skills: { mode: "none" }
+      },
+      syncCollisionStrategy: "rename"
+    });
+
+    expect(
+      afterReimport.importedCompanies.filter(
+        (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+      )
+    ).toHaveLength(1);
+    expect(
+      afterReimport.importedCompanies.find(
+        (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+      )?.importedCompany
+    ).toMatchObject({
+      selection: {
+        agents: { mode: "none" },
+        projects: { mode: "selected", itemPaths: ["projects/import-pipeline/PROJECT.md"] },
+        tasks: { mode: "none" },
+        issues: { mode: "selected", itemPaths: ["issues/follow-up/ISSUE.md"] },
+        skills: { mode: "none" }
+      },
+      syncCollisionStrategy: "rename"
+    });
   });
 
   it("lets operators disable daily auto-sync for an imported company", async () => {
@@ -1615,6 +1766,137 @@ describe("agent companies plugin", () => {
     expect(untouchedImport?.importedCompany.importedSourceVersion).toBe("1.0.0");
     expect(untouchedImport?.importedCompany.latestSourceVersion).toBe("1.1.0");
     expect(untouchedImport?.importedCompany.isSyncAvailable).toBe(true);
+  });
+
+  it("syncs imported companies with their saved partial selection contract", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    const syncCalls: Array<{
+      importedCompanyId: string;
+      collisionStrategy: string;
+      filePaths: string[];
+    }> = [];
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null,
+      syncImport: async (_ctx, input) => {
+        syncCalls.push({
+          importedCompanyId: input.importedCompanyId,
+          collisionStrategy: input.collisionStrategy,
+          filePaths: Object.keys(input.preparedImport.source.files).sort()
+        });
+
+        return {
+          company: {
+            id: input.importedCompanyId,
+            name: "Alpha Labs Imported",
+            action: "updated"
+          },
+          warnings: []
+        };
+      }
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP",
+      selection: {
+        agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+        projects: { mode: "none" },
+        tasks: { mode: "none" },
+        issues: { mode: "none" },
+        skills: { mode: "selected", itemPaths: ["skills/repo-audit/SKILL.md"] }
+      },
+      syncCollisionStrategy: "skip"
+    });
+
+    await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+    currentTime = "2026-04-15T10:00:00.000Z";
+
+    await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123"
+    });
+
+    expect(syncCalls).toEqual([
+      {
+        importedCompanyId: "paperclip-company-123",
+        collisionStrategy: "skip",
+        filePaths: [
+          "COMPANY.md",
+          "agents/ceo/AGENTS.md",
+          "skills/repo-audit/SKILL.md",
+          "skills/repo-audit/assets/icon.svg"
+        ]
+      }
+    ]);
+  });
+
+  it("rejects linking one existing Paperclip company to multiple discovered sources", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:23:10.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const alphaCompany = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+    const betaCompany = catalog.companies.find((candidate) => candidate.slug === "beta-works");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: alphaCompany?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Existing Alpha",
+      importedCompanyIssuePrefix: "ALP",
+      selection: {
+        agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+        projects: { mode: "none" },
+        tasks: { mode: "none" },
+        issues: { mode: "none" },
+        skills: { mode: "none" }
+      }
+    });
+
+    await expect(
+      harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: betaCompany?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Existing Alpha",
+        importedCompanyIssuePrefix: "ALP"
+      })
+    ).rejects.toThrow(/already linked to a different discovered company source/u);
   });
 
   it("applies metadata.paperclip.agentIcon when preparing sync imports", async () => {
