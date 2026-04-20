@@ -417,6 +417,57 @@ const PAGE_STYLES = `
   color: color-mix(in oklab, var(--ac-danger) 76%, var(--ac-text));
 }
 
+.agent-companies-settings__menu-shell {
+  position: relative;
+}
+
+.agent-companies-settings__menu {
+  position: fixed;
+  z-index: 70;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--ac-border-strong);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--ac-surface) 94%, var(--ac-bg));
+  box-shadow: 0 18px 36px color-mix(in oklab, var(--ac-bg) 44%, transparent);
+}
+
+.agent-companies-settings__menu-item {
+  appearance: none;
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 78%, transparent);
+  color: var(--ac-text);
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.agent-companies-settings__menu-item:hover {
+  border-color: var(--ac-border-strong);
+  background: color-mix(in oklab, var(--ac-surface-soft) 58%, var(--ac-text) 6%);
+}
+
+.agent-companies-settings__menu-item-title {
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+.agent-companies-settings__menu-item-meta {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ac-text-muted);
+}
+
 .agent-companies-settings__form {
   display: grid;
   gap: 8px;
@@ -1099,7 +1150,7 @@ interface ImportState {
   companyId: string;
 }
 
-type ImportTargetMode = "new_company" | "current_company" | "existing_import";
+type ImportTargetMode = "new_company" | "existing_company" | "existing_import";
 
 interface SyncState {
   kind: "syncing";
@@ -1110,7 +1161,8 @@ interface SyncState {
 interface ImportDialogState {
   sourceCompanyId: string;
   targetMode: ImportTargetMode;
-  importedCompanyId: string | null;
+  targetCompanyId: string | null;
+  targetCompanyName: string;
   companyName: string;
   selection: CompanyImportSelection;
   collisionStrategy: CatalogSyncCollisionStrategy;
@@ -1220,6 +1272,12 @@ interface PaperclipCompanyRecord {
   issuePrefix?: string | null;
 }
 
+interface ImportTargetCompany {
+  id: string;
+  name: string;
+  issuePrefix: string | null;
+}
+
 interface BoardAccessRegistration {
   companyId: string | null;
   configured: boolean;
@@ -1293,6 +1351,46 @@ function getApiErrorMessage(payload: unknown): string | null {
   }
 
   return null;
+}
+
+function normalizeImportTargetCompanies(value: unknown): ImportTargetCompany[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalizedCompanies: ImportTargetCompany[] = [];
+  const seenCompanyIds = new Set<string>();
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const companyId = typeof candidate.id === "string" && candidate.id.trim()
+      ? candidate.id.trim()
+      : null;
+    const companyName = typeof candidate.name === "string" && candidate.name.trim()
+      ? candidate.name.trim()
+      : null;
+    const issuePrefix = typeof candidate.issuePrefix === "string" && candidate.issuePrefix.trim()
+      ? candidate.issuePrefix.trim()
+      : null;
+
+    if (!companyId || !companyName || seenCompanyIds.has(companyId)) {
+      continue;
+    }
+
+    seenCompanyIds.add(companyId);
+    normalizedCompanies.push({
+      id: companyId,
+      name: companyName,
+      issuePrefix
+    });
+  }
+
+  return normalizedCompanies.sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: "base" })
+  );
 }
 
 function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
@@ -1863,6 +1961,205 @@ function buildCompanyImportSelectionSummary(
   ).join(" • ");
 }
 
+function ExistingCompanyImportMenu(props: {
+  availableTargets: ImportTargetCompany[];
+  errorText: string | null;
+  isDisabled: boolean;
+  isLoading: boolean;
+  onSelect(target: ImportTargetCompany): void;
+  optionTestId?: string;
+  triggerTestId?: string;
+}): React.JSX.Element {
+  const {
+    availableTargets,
+    errorText,
+    isDisabled,
+    isLoading,
+    onSelect,
+    optionTestId = "company-import-target-option",
+    triggerTestId = "company-import-existing-trigger"
+  } = props;
+  const [isOpen, setIsOpen] = useState(false);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [menuPosition, setMenuPosition] = useState({
+    left: 12,
+    top: 12,
+    minWidth: 240
+  });
+  const hasTargets = availableTargets.length > 0;
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const updateMenuPosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) {
+        return;
+      }
+
+      const rect = trigger.getBoundingClientRect();
+      const minWidth = Math.max(240, Math.round(rect.width));
+      const maxLeft = Math.max(12, window.innerWidth - minWidth - 12);
+      const left = Math.min(Math.max(12, rect.right - minWidth), maxLeft);
+      const top = Math.min(rect.bottom + 6, Math.max(12, window.innerHeight - 12));
+
+      setMenuPosition({
+        left,
+        top,
+        minWidth
+      });
+    };
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (shellRef.current && event.target instanceof Node && shellRef.current.contains(event.target)) {
+        return;
+      }
+
+      setIsOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!hasTargets) {
+      setIsOpen(false);
+    }
+  }, [hasTargets]);
+
+  useEffect(() => {
+    if (isDisabled || isLoading) {
+      setIsOpen(false);
+    }
+  }, [isDisabled, isLoading]);
+
+  return (
+    <div className="agent-companies-settings__menu-shell" ref={shellRef}>
+      <button
+        aria-expanded={isOpen}
+        className="agent-companies-settings__button"
+        data-testid={triggerTestId}
+        disabled={isDisabled || isLoading || !hasTargets}
+        onClick={() => setIsOpen((currentOpen) => !currentOpen)}
+        title={
+          isLoading
+            ? "Loading non-synced companies..."
+            : errorText
+              ? errorText
+              : !hasTargets
+                ? "No non-synced companies are available."
+                : undefined
+        }
+        ref={triggerRef}
+        type="button"
+      >
+        Import into...
+      </button>
+      {isOpen ? (
+        <div
+          className="agent-companies-settings__menu"
+          data-testid="company-import-target-menu"
+          role="menu"
+          style={{
+            left: menuPosition.left,
+            minWidth: menuPosition.minWidth,
+            top: menuPosition.top
+          }}
+        >
+          {availableTargets.map((target) => (
+            <button
+              className="agent-companies-settings__menu-item"
+              data-testid={optionTestId}
+              key={target.id}
+              onClick={() => {
+                setIsOpen(false);
+                onSelect(target);
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <span className="agent-companies-settings__menu-item-title">{target.name}</span>
+              <span className="agent-companies-settings__menu-item-meta">
+                {target.issuePrefix ? `Issue prefix ${target.issuePrefix}` : "Existing non-synced company"}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CompanyImportActions(props: {
+  availableTargets: ImportTargetCompany[];
+  companyId: string;
+  errorText: string | null;
+  importState: ImportState | null;
+  isDisabled: boolean;
+  isLoadingTargets: boolean;
+  newTriggerTestId?: string;
+  onImportAsNew(companyId: string): void;
+  onImportInto(companyId: string, target: ImportTargetCompany): void;
+  optionTestId?: string;
+  triggerTestId?: string;
+}): React.JSX.Element {
+  const {
+    availableTargets,
+    companyId,
+    errorText,
+    importState,
+    isDisabled,
+    isLoadingTargets,
+    newTriggerTestId = "company-import-new-trigger",
+    onImportAsNew,
+    onImportInto,
+    optionTestId,
+    triggerTestId
+  } = props;
+
+  return (
+    <>
+      <button
+        className="agent-companies-settings__button agent-companies-settings__button--primary"
+        data-testid={newTriggerTestId}
+        disabled={isDisabled}
+        onClick={() => onImportAsNew(companyId)}
+        type="button"
+      >
+        {getImportButtonLabel(importState, companyId, "Import as new company")}
+      </button>
+      <ExistingCompanyImportMenu
+        availableTargets={availableTargets}
+        errorText={errorText}
+        isDisabled={isDisabled}
+        isLoading={isLoadingTargets}
+        onSelect={(target) => onImportInto(companyId, target)}
+        optionTestId={optionTestId}
+        triggerTestId={triggerTestId}
+      />
+    </>
+  );
+}
+
 function getSyncButtonLabel(
   syncState: SyncState | null,
   company: CatalogImportedCompanySummary
@@ -2376,18 +2673,26 @@ function ImportedCompanySyncControls(props: {
 }
 
 function DiscoveredCompanyCard(props: {
+  availableImportTargets: ImportTargetCompany[];
   company: CatalogCompanySummary;
+  importTargetError: string | null;
+  importTargetsLoading: boolean;
   importState: ImportState | null;
   isImportDisabled: boolean;
   onOpenContents(companyId: string): void;
-  onOpenImport(companyId: string): void;
+  onOpenImportAsNew(companyId: string): void;
+  onOpenImportInto(companyId: string, target: ImportTargetCompany): void;
 }): React.JSX.Element {
   const {
+    availableImportTargets,
     company,
+    importTargetError,
+    importTargetsLoading,
     importState,
     isImportDisabled,
     onOpenContents,
-    onOpenImport
+    onOpenImportAsNew,
+    onOpenImportInto
   } = props;
   const importedCompanyCount = company.importedCompanies.length;
 
@@ -2411,15 +2716,16 @@ function DiscoveredCompanyCard(props: {
               ) : null}
             </div>
           ) : null}
-          <button
-            className="agent-companies-settings__button agent-companies-settings__button--primary"
-            data-testid="company-import-trigger"
-            disabled={isImportDisabled}
-            onClick={() => onOpenImport(company.id)}
-            type="button"
-          >
-            {getImportButtonLabel(importState, company.id)}
-          </button>
+          <CompanyImportActions
+            availableTargets={availableImportTargets}
+            companyId={company.id}
+            errorText={importTargetError}
+            importState={importState}
+            isDisabled={isImportDisabled}
+            isLoadingTargets={importTargetsLoading}
+            onImportAsNew={onOpenImportAsNew}
+            onImportInto={onOpenImportInto}
+          />
           <button
             className="agent-companies-settings__button"
             data-testid="company-details-trigger"
@@ -2527,18 +2833,26 @@ function ImportedCompanyCard(props: {
 }
 
 function CompanyDetailsDialog(props: {
+  availableImportTargets: ImportTargetCompany[];
   company: CatalogCompanySummary;
+  importTargetError: string | null;
+  importTargetsLoading: boolean;
   importState: ImportState | null;
   isImportDisabled: boolean;
   onClose(): void;
-  onOpenImport(companyId: string): void;
+  onOpenImportAsNew(companyId: string): void;
+  onOpenImportInto(companyId: string, target: ImportTargetCompany): void;
 }): React.JSX.Element {
   const {
+    availableImportTargets,
     company,
+    importTargetError,
+    importTargetsLoading,
     importState,
     isImportDisabled,
     onClose,
-    onOpenImport
+    onOpenImportAsNew,
+    onOpenImportInto
   } = props;
   const [selectedItemPath, setSelectedItemPath] = useState<string | null>(
     getDefaultCompanyContentSelection(company)?.item.path ?? null
@@ -2590,15 +2904,19 @@ function CompanyDetailsDialog(props: {
             </p>
           </div>
           <div className="agent-companies-settings__dialog-actions">
-            <button
-              className="agent-companies-settings__button agent-companies-settings__button--primary"
-              data-testid="company-details-import-trigger"
-              disabled={isImportDisabled}
-              onClick={() => onOpenImport(company.id)}
-              type="button"
-            >
-              {getImportButtonLabel(importState, company.id)}
-            </button>
+            <CompanyImportActions
+              availableTargets={availableImportTargets}
+              companyId={company.id}
+              errorText={importTargetError}
+              importState={importState}
+              isDisabled={isImportDisabled}
+              isLoadingTargets={importTargetsLoading}
+              newTriggerTestId="company-details-import-new-trigger"
+              onImportAsNew={onOpenImportAsNew}
+              onImportInto={onOpenImportInto}
+              optionTestId="company-details-import-target-option"
+              triggerTestId="company-details-import-existing-trigger"
+            />
             <button
               className="agent-companies-settings__button"
               onClick={onClose}
@@ -2826,15 +3144,11 @@ function CompanyDetailsDialog(props: {
 
 function ImportCompanyDialog(props: {
   company: CatalogCompanySummary;
-  currentCompanyLabel: string;
   dialogState: ImportDialogState;
   errorText: string | null;
   importState: ImportState | null;
-  canImportIntoCurrentCompany: boolean;
-  hasCompanyContext: boolean;
   onChangeCollisionStrategy(value: CatalogSyncCollisionStrategy): void;
   onChangeCompanyName(value: string): void;
-  onChangeTargetMode(value: ImportTargetMode): void;
   onClose(): void;
   onToggleItem(key: CompanyContentKey, itemPath: string, checked: boolean): void;
   onTogglePart(key: CompanyContentKey, enabled: boolean): void;
@@ -2842,15 +3156,11 @@ function ImportCompanyDialog(props: {
 }): React.JSX.Element {
   const {
     company,
-    currentCompanyLabel,
     dialogState,
     errorText,
     importState,
-    canImportIntoCurrentCompany,
-    hasCompanyContext,
     onChangeCollisionStrategy,
     onChangeCompanyName,
-    onChangeTargetMode,
     onClose,
     onToggleItem,
     onTogglePart,
@@ -2858,6 +3168,7 @@ function ImportCompanyDialog(props: {
   } = props;
   const isBusy = importState !== null;
   const isReimport = dialogState.targetMode === "existing_import";
+  const isExistingCompanyImport = dialogState.targetMode === "existing_company";
   const selectionSummary = buildCompanyImportSelectionSummary(dialogState.selection, company.contents);
 
   return (
@@ -2884,7 +3195,9 @@ function ImportCompanyDialog(props: {
             <p className="agent-companies-settings__dialog-copy">
               {isReimport
                 ? "Update the saved sync contract for this tracked imported company by re-importing the selected contents."
-                : "Choose whether to import this discovered package into a new company or the current untracked company, then pick which contents should be included."}
+                : isExistingCompanyImport
+                  ? `Import the selected contents into "${dialogState.targetCompanyName}" and start tracking it for future sync.`
+                  : "Create a new Paperclip company from the selected contents, then pick which contents should be included."}
             </p>
           </div>
           <button
@@ -2913,51 +3226,11 @@ function ImportCompanyDialog(props: {
         </div>
 
         <form className="agent-companies-settings__dialog-form" onSubmit={(event) => void onSubmit(event)}>
-          {!isReimport ? (
-            <fieldset>
-              <legend className="agent-companies-settings__metric-label">Target</legend>
-              <div className="agent-companies-settings__status-grid">
-                <label className="agent-companies-settings__status-row">
-                  <div className="agent-companies-settings__status-copy">
-                    <span className="agent-companies-settings__status-title">New company</span>
-                    <span className="agent-companies-settings__status-body">
-                      Create a fresh Paperclip company from this package.
-                    </span>
-                  </div>
-                  <input
-                    checked={dialogState.targetMode === "new_company"}
-                    disabled={isBusy}
-                    name="agent-companies-import-target"
-                    onChange={() => onChangeTargetMode("new_company")}
-                    type="radio"
-                  />
-                </label>
-                {hasCompanyContext ? (
-                  <label className="agent-companies-settings__status-row">
-                    <div className="agent-companies-settings__status-copy">
-                      <span className="agent-companies-settings__status-title">This company</span>
-                      <span className="agent-companies-settings__status-body">
-                        {canImportIntoCurrentCompany
-                          ? `Import into ${currentCompanyLabel} and start tracking it for future sync.`
-                          : `${currentCompanyLabel} is already tracked. Use Re-import / Edit selection from the tracked company list instead.`}
-                      </span>
-                    </div>
-                    <input
-                      checked={dialogState.targetMode === "current_company"}
-                      disabled={isBusy || !canImportIntoCurrentCompany}
-                      name="agent-companies-import-target"
-                      onChange={() => onChangeTargetMode("current_company")}
-                      type="radio"
-                    />
-                  </label>
-                ) : null}
-              </div>
-            </fieldset>
-          ) : (
+          {dialogState.targetMode !== "new_company" ? (
             <div className="agent-companies-settings__notice">
-              Target: this tracked imported company
+              Target: {dialogState.targetCompanyName}
             </div>
-          )}
+          ) : null}
 
           {dialogState.targetMode === "new_company" ? (
             <>
@@ -3108,6 +3381,8 @@ function ImportCompanyDialog(props: {
                   ? "Importing..."
                   : isReimport
                     ? "Re-import company"
+                    : isExistingCompanyImport
+                      ? "Import into company"
                     : "Import company"}
             </button>
           </div>
@@ -3118,19 +3393,27 @@ function ImportCompanyDialog(props: {
 }
 
 function CompanyGroupCard({
+  availableImportTargets,
   repository,
   companies,
+  importTargetError,
+  importTargetsLoading,
   importState,
   isImportDisabled,
   onOpenContents,
-  onOpenImport
+  onOpenImportAsNew,
+  onOpenImportInto
 }: {
+  availableImportTargets: ImportTargetCompany[];
   repository: CatalogRepositorySummary | null;
   companies: CatalogCompanySummary[];
+  importTargetError: string | null;
+  importTargetsLoading: boolean;
   importState: ImportState | null;
   isImportDisabled: boolean;
   onOpenContents(companyId: string): void;
-  onOpenImport(companyId: string): void;
+  onOpenImportAsNew(companyId: string): void;
+  onOpenImportInto(companyId: string, target: ImportTargetCompany): void;
 }): React.JSX.Element {
   const repositoryLabel = repository?.label ?? companies[0]?.repositoryLabel ?? "Unknown source";
   const repositoryUrl = repository?.url ?? companies[0]?.repositoryUrl ?? "";
@@ -3170,12 +3453,16 @@ function CompanyGroupCard({
       <div className="agent-companies-settings__company-list">
         {companies.map((company) => (
           <DiscoveredCompanyCard
+            availableImportTargets={availableImportTargets}
             company={company}
+            importTargetError={importTargetError}
+            importTargetsLoading={importTargetsLoading}
             importState={importState}
             isImportDisabled={isImportDisabled}
             key={company.id}
             onOpenContents={onOpenContents}
-            onOpenImport={onOpenImport}
+            onOpenImportAsNew={onOpenImportAsNew}
+            onOpenImportInto={onOpenImportInto}
           />
         ))}
       </div>
@@ -3213,6 +3500,9 @@ export function AgentCompaniesSettingsPage({
   const [connectingBoardAccess, setConnectingBoardAccess] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importDialog, setImportDialog] = useState<ImportDialogState | null>(null);
+  const [paperclipCompanies, setPaperclipCompanies] = useState<ImportTargetCompany[]>([]);
+  const [paperclipCompaniesError, setPaperclipCompaniesError] = useState<string | null>(null);
+  const [paperclipCompaniesLoading, setPaperclipCompaniesLoading] = useState(false);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const hasCompanyContext = Boolean(context.companyId);
   const boardAccessConfigured = Boolean(boardAccess.data?.configured);
@@ -3239,20 +3529,28 @@ export function AgentCompaniesSettingsPage({
   const importedCompanies = catalog.importedCompanies;
   const isImportDisabled = pendingAction !== null || importState !== null || syncState !== null;
   const isSyncDisabled = pendingAction !== null || importState !== null || syncState !== null;
-  const trackedCurrentCompanyImport = context.companyId
-    ? catalog.importedCompanies.find(
-        (company) => company.importedCompany.id === context.companyId
-      ) ?? null
-    : null;
-  const canImportIntoCurrentCompany = hasCompanyContext && trackedCurrentCompanyImport === null;
+  const trackedImportedCompanyIds = new Set(
+    catalog.importedCompanies.map((company) => company.importedCompany.id)
+  );
+  const availableImportTargets = paperclipCompanies
+    .filter((company) => !trackedImportedCompanyIds.has(company.id))
+    .sort((left, right) => {
+      const leftIsCurrent = context.companyId === left.id;
+      const rightIsCurrent = context.companyId === right.id;
+      if (leftIsCurrent !== rightIsCurrent) {
+        return leftIsCurrent ? -1 : 1;
+      }
+
+      return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+    });
   const importCompany = importDialog
     ? catalog.companies.find((company) => company.id === importDialog.sourceCompanyId) ?? null
     : null;
-  const importTargetCompany = importDialog?.importedCompanyId
+  const importTargetCompany = importDialog?.targetMode === "existing_import" && importDialog.targetCompanyId
     ? catalog.importedCompanies.find(
         (company) =>
           company.sourceCompanyId === importDialog.sourceCompanyId
-          && company.importedCompany.id === importDialog.importedCompanyId
+          && company.importedCompany.id === importDialog.targetCompanyId
       ) ?? null
     : null;
   const selectedCompany = selectedCompanyId
@@ -3271,6 +3569,20 @@ export function AgentCompaniesSettingsPage({
       apiBase
     });
     registeredApiBaseRef.current = apiBase;
+  }
+
+  async function loadPaperclipCompanies(): Promise<void> {
+    setPaperclipCompaniesLoading(true);
+
+    try {
+      const companies = normalizeImportTargetCompanies(await fetchHostJson<unknown>("/api/companies"));
+      setPaperclipCompanies(companies);
+      setPaperclipCompaniesError(null);
+    } catch (actionError) {
+      setPaperclipCompaniesError(getErrorMessage(actionError));
+    } finally {
+      setPaperclipCompaniesLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -3310,7 +3622,16 @@ export function AgentCompaniesSettingsPage({
       setImportDialog(null);
       setImportError(null);
     }
-  }, [catalog.companies, importDialog, selectedCompanyId]);
+
+    if (
+      importDialog?.targetMode === "existing_company"
+      && importDialog.targetCompanyId
+      && !paperclipCompanies.some((company) => company.id === importDialog.targetCompanyId)
+    ) {
+      setImportDialog(null);
+      setImportError(null);
+    }
+  }, [catalog.companies, importDialog, paperclipCompanies, selectedCompanyId]);
 
   useEffect(() => {
     if (!catalog.importedCompanies.some((company) => company.importedCompany.syncStatus === "running")) {
@@ -3329,6 +3650,10 @@ export function AgentCompaniesSettingsPage({
   useEffect(() => {
     void ensurePaperclipApiBaseRegistered();
   }, [setPaperclipApiBase]);
+
+  useEffect(() => {
+    void loadPaperclipCompanies();
+  }, []);
 
   useEffect(() => {
     if (!hasCompanyContext) {
@@ -3367,9 +3692,10 @@ export function AgentCompaniesSettingsPage({
     }
 
     refresh();
+    void loadPaperclipCompanies();
   }
 
-  function openImportDialog(companyId: string): void {
+  function openImportAsNewDialog(companyId: string): void {
     const company = catalog.companies.find((candidate) => candidate.id === companyId);
     if (!company) {
       setNotice({
@@ -3383,7 +3709,39 @@ export function AgentCompaniesSettingsPage({
     setImportDialog({
       sourceCompanyId: company.id,
       targetMode: "new_company",
-      importedCompanyId: null,
+      targetCompanyId: null,
+      targetCompanyName: "",
+      companyName: company.name,
+      selection: createDefaultCompanyImportSelection(),
+      collisionStrategy: "replace"
+    });
+    setImportError(null);
+  }
+
+  function openImportIntoDialog(sourceCompanyId: string, targetCompany: ImportTargetCompany): void {
+    const company = catalog.companies.find((candidate) => candidate.id === sourceCompanyId);
+    if (!company) {
+      setNotice({
+        tone: "error",
+        text: "That company is no longer available in the current catalog snapshot."
+      });
+      return;
+    }
+
+    if (trackedImportedCompanyIds.has(targetCompany.id)) {
+      setNotice({
+        tone: "error",
+        text: `"${targetCompany.name}" is already tracked. Use Re-import / Edit selection from the tracked company list instead.`
+      });
+      return;
+    }
+
+    setSelectedCompanyId(null);
+    setImportDialog({
+      sourceCompanyId: company.id,
+      targetMode: "existing_company",
+      targetCompanyId: targetCompany.id,
+      targetCompanyName: targetCompany.name,
       companyName: company.name,
       selection: createDefaultCompanyImportSelection(),
       collisionStrategy: "replace"
@@ -3409,7 +3767,8 @@ export function AgentCompaniesSettingsPage({
     setImportDialog({
       sourceCompanyId,
       targetMode: "existing_import",
-      importedCompanyId,
+      targetCompanyId: importedCompanyId,
+      targetCompanyName: company.importedCompany.name,
       companyName: company.importedCompany.name,
       selection: cloneCompanyImportSelection(company.importedCompany.selection),
       collisionStrategy: company.importedCompany.syncCollisionStrategy
@@ -3431,15 +3790,8 @@ export function AgentCompaniesSettingsPage({
       return;
     }
 
-    if (importDialog.targetMode === "current_company" && !context.companyId) {
-      setImportError("Open this settings page inside a company before importing into this company.");
-      return;
-    }
-
-    if (importDialog.targetMode === "current_company" && !canImportIntoCurrentCompany) {
-      setImportError(
-        `${currentCompanyLabel} is already tracked. Use Re-import / Edit selection from the tracked company list instead.`
-      );
+    if (importDialog.targetMode !== "new_company" && !importDialog.targetCompanyId) {
+      setImportError("Choose an existing Paperclip company before importing.");
       return;
     }
 
@@ -3470,10 +3822,7 @@ export function AgentCompaniesSettingsPage({
             }
           : {
               mode: "existing_company" as const,
-              companyId:
-                importDialog.targetMode === "existing_import"
-                  ? importDialog.importedCompanyId
-                  : context.companyId
+              companyId: importDialog.targetCompanyId
             };
 
       const importedCompany = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
@@ -3492,20 +3841,15 @@ export function AgentCompaniesSettingsPage({
         })
       });
       const importedCompanyName =
-        importedCompany.company?.name?.trim()
-        || (
-          importDialog.targetMode === "new_company"
-            ? nextCompanyName
-            : importTargetCompany?.importedCompany.name
-        )
-        || currentCompanyLabel;
+        importDialog.targetMode === "new_company"
+          ? importedCompany.company?.name?.trim() || nextCompanyName || "selected company"
+          : importDialog.targetCompanyName
+            || importTargetCompany?.importedCompany.name
+            || importedCompany.company?.name?.trim()
+            || "selected company";
       const importedCompanyId =
         importedCompany.company?.id?.trim()
-        || (
-          importDialog.targetMode === "existing_import"
-            ? importDialog.importedCompanyId
-            : context.companyId
-        )
+        || importDialog.targetCompanyId
         || null;
       const postImportDetails: string[] = [];
       let importedCompanyIssuePrefix: string | null =
@@ -3533,6 +3877,7 @@ export function AgentCompaniesSettingsPage({
             syncCollisionStrategy: importDialog.collisionStrategy
           });
           refresh();
+          void loadPaperclipCompanies();
         } catch (recordError) {
           postImportDetails.push(
             `Import tracking could not be saved: ${getErrorMessage(recordError)}`
@@ -3555,8 +3900,8 @@ export function AgentCompaniesSettingsPage({
         importDialog.collisionStrategy === "replace"
           ? "Sync mode: overwrite existing content."
           : `Sync mode: ${importDialog.collisionStrategy}.`,
-        importDialog.targetMode === "current_company"
-          ? `Current company adoption: ${currentCompanyLabel} is now tracked for future sync.`
+        importDialog.targetMode === "existing_company"
+          ? `Existing company adoption: ${importDialog.targetCompanyName} is now tracked for future sync.`
           : importDialog.targetMode === "existing_import"
             ? "Tracked import contract updated for future sync."
             : null,
@@ -3584,10 +3929,14 @@ export function AgentCompaniesSettingsPage({
           warningCount > 0
             ? importDialog.targetMode === "existing_import"
               ? `Re-imported "${importCompany.name}" into "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
-              : `Imported "${importCompany.name}" as "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
+              : importDialog.targetMode === "existing_company"
+                ? `Imported "${importCompany.name}" into "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
+                : `Imported "${importCompany.name}" as "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
             : importDialog.targetMode === "existing_import"
               ? `Re-imported "${importCompany.name}" into "${importedCompanyName}".`
-              : `Imported "${importCompany.name}" as "${importedCompanyName}".`,
+              : importDialog.targetMode === "existing_company"
+                ? `Imported "${importCompany.name}" into "${importedCompanyName}".`
+                : `Imported "${importCompany.name}" as "${importedCompanyName}".`,
         details: importDetails,
         action: importedCompanyIssuePrefix
           ? {
@@ -3601,17 +3950,6 @@ export function AgentCompaniesSettingsPage({
     } finally {
       setImportState(null);
     }
-  }
-
-  function handleChangeImportTargetMode(targetMode: ImportTargetMode): void {
-    setImportDialog((currentDialog) =>
-      currentDialog
-        ? {
-            ...currentDialog,
-            targetMode
-          }
-        : currentDialog
-    );
   }
 
   function handleChangeImportCompanyName(companyName: string): void {
@@ -4268,16 +4606,26 @@ export function AgentCompaniesSettingsPage({
             ) : null}
           </div>
 
+          {paperclipCompaniesError ? (
+            <div className="agent-companies-settings__notice" data-tone="error">
+              Could not load existing-company import targets: {paperclipCompaniesError}
+            </div>
+          ) : null}
+
           {catalog.companies.length > 0 && companyGroups.length > 0 ? (
             <div className="agent-companies-settings__company-groups">
               {companyGroups.map((group) => (
                 <CompanyGroupCard
+                  availableImportTargets={availableImportTargets}
                   companies={group.companies}
+                  importTargetError={paperclipCompaniesError}
+                  importTargetsLoading={paperclipCompaniesLoading}
                   importState={importState}
                   isImportDisabled={isImportDisabled}
                   key={group.repository?.id ?? group.companies[0]?.repositoryId ?? "unknown-repo"}
                   onOpenContents={setSelectedCompanyId}
-                  onOpenImport={openImportDialog}
+                  onOpenImportAsNew={openImportAsNewDialog}
+                  onOpenImportInto={openImportIntoDialog}
                   repository={group.repository}
                 />
               ))}
@@ -4343,26 +4691,26 @@ export function AgentCompaniesSettingsPage({
 
       {selectedCompany ? (
         <CompanyDetailsDialog
+          availableImportTargets={availableImportTargets}
           company={selectedCompany}
+          importTargetError={paperclipCompaniesError}
+          importTargetsLoading={paperclipCompaniesLoading}
           importState={importState}
           isImportDisabled={isImportDisabled}
           onClose={() => setSelectedCompanyId(null)}
-          onOpenImport={openImportDialog}
+          onOpenImportAsNew={openImportAsNewDialog}
+          onOpenImportInto={openImportIntoDialog}
         />
       ) : null}
 
       {importCompany && importDialog ? (
         <ImportCompanyDialog
           company={importCompany}
-          currentCompanyLabel={currentCompanyLabel}
           dialogState={importDialog}
           errorText={importError}
           importState={importState}
-          canImportIntoCurrentCompany={canImportIntoCurrentCompany}
-          hasCompanyContext={hasCompanyContext}
           onChangeCollisionStrategy={handleChangeImportCollisionStrategy}
           onChangeCompanyName={handleChangeImportCompanyName}
-          onChangeTargetMode={handleChangeImportTargetMode}
           onClose={() => {
             if (importState) {
               return;

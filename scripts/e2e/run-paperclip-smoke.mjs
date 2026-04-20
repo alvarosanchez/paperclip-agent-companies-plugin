@@ -438,29 +438,35 @@ Fixture company for Paperclip smoke verification.
   );
 }
 
-async function ensureCompanySeeded() {
+async function ensureCompaniesSeeded(minimumCount = 2) {
   const companiesUrl = new URL('/api/companies', baseUrl).toString();
   const existingCompanies = await fetchJson(companiesUrl);
-  if (Array.isArray(existingCompanies) && existingCompanies.length > 0) {
-    log(`Found ${existingCompanies.length} existing companies; onboarding should be skipped.`);
-    return existingCompanies[0];
+  const companies = Array.isArray(existingCompanies) ? [...existingCompanies] : [];
+  if (companies.length >= minimumCount) {
+    log(`Found ${companies.length} existing companies; onboarding should be skipped.`);
+    return companies;
   }
 
-  const createdCompany = await fetchJson(companiesUrl, {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Dummy Company',
-      description: 'Seed company for paperclip-agent-companies-plugin e2e verification.'
-    })
-  });
+  const missingCount = minimumCount - companies.length;
+  for (let index = 0; index < missingCount; index += 1) {
+    const ordinal = companies.length + 1;
+    const createdCompany = await fetchJson(companiesUrl, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `Dummy Company ${ordinal}`,
+        description: `Seed company ${ordinal} for paperclip-agent-companies-plugin e2e verification.`
+      })
+    });
+    companies.push(createdCompany);
+  }
 
   const postCreateCompanies = await fetchJson(companiesUrl);
-  if (!Array.isArray(postCreateCompanies) || postCreateCompanies.length === 0) {
-    throw new Error('Expected at least one company after seeding, but Paperclip still reports none.');
+  if (!Array.isArray(postCreateCompanies) || postCreateCompanies.length < minimumCount) {
+    throw new Error(`Expected at least ${minimumCount} companies after seeding, but Paperclip still reports ${Array.isArray(postCreateCompanies) ? postCreateCompanies.length : 0}.`);
   }
 
-  log(`Seeded company ${createdCompany?.name ?? postCreateCompanies[0]?.name ?? 'unknown'}.`);
-  return postCreateCompanies[0];
+  log(`Seeded companies through ${postCreateCompanies[minimumCount - 1]?.name ?? 'unknown'}.`);
+  return postCreateCompanies;
 }
 
 async function waitForServerExit(timeoutMs) {
@@ -553,7 +559,7 @@ async function main() {
   await waitForReady(baseUrl, 180000);
   log(`Paperclip server is ready at ${baseUrl}.`);
 
-  await ensureCompanySeeded();
+  const seededCompanies = await ensureCompaniesSeeded(2);
   const fixtureRepository = await createFixtureRepository();
   log(`Created local fixture repository at ${fixtureRepository}.`);
 
@@ -632,42 +638,58 @@ async function main() {
       hasText: 'Modal Demo Company'
     });
     await fixtureCompanyCard.first().waitFor({ timeout: 120000 });
-    const importedCompanyName = 'Imported Modal Demo Company';
+    const importTargetCompany = seededCompanies.find((company) => company?.name === 'Dummy Company 2') ?? seededCompanies[1];
+    if (!importTargetCompany?.id || !importTargetCompany?.name) {
+      throw new Error('Expected a second seeded company to exist for the Import into... smoke flow.');
+    }
     const selectedContentsSummary =
       'Selected contents: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Issues: excluded • Skills: all 1 selected';
     const syncContractSummary =
       'Sync contract: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Issues: excluded • Skills: all 1 selected';
 
-    await fixtureCompanyCard.locator('[data-testid="company-import-trigger"]').click();
+    const importAsNewButton = fixtureCompanyCard.locator('[data-testid="company-import-new-trigger"]');
+    await importAsNewButton.waitFor({ timeout: 120000 });
+    const importAsNewLabel = (await importAsNewButton.textContent())?.trim() ?? '';
+    if (importAsNewLabel !== 'Import as new company') {
+      throw new Error(
+        `Expected discovered company to show "Import as new company", received "${importAsNewLabel}".`
+      );
+    }
+
+    const importIntoTrigger = fixtureCompanyCard.locator('[data-testid="company-import-existing-trigger"]');
+    await importIntoTrigger.waitFor({ timeout: 120000 });
+    const importIntoLabel = (await importIntoTrigger.textContent())?.trim() ?? '';
+    if (importIntoLabel !== 'Import into...') {
+      throw new Error(
+        `Expected discovered company to show "Import into...", received "${importIntoLabel}".`
+      );
+    }
+
+    await importIntoTrigger.click();
+    await page
+      .locator('[data-testid="company-import-target-option"]')
+      .filter({ hasText: importTargetCompany.name })
+      .click();
 
     const importModal = page.locator('[data-testid="company-import-modal"]');
     await importModal.waitFor({ timeout: 120000 });
+    await importModal.getByText(`Target: ${importTargetCompany.name}`, { exact: false }).waitFor({ timeout: 120000 });
     await importModal.getByLabel(/^Issues/u).uncheck();
     await importModal.getByText(selectedContentsSummary, { exact: false }).waitFor({ timeout: 120000 });
-    await importModal.locator('[data-testid="company-import-name-input"]').fill(importedCompanyName);
     await importModal.locator('[data-testid="company-import-submit"]').click();
 
     await page.getByText('Company imported', { exact: true }).waitFor({ timeout: 120000 });
     await page
-      .getByText(`Imported "Modal Demo Company" as "${importedCompanyName}".`, { exact: true })
+      .getByText(`Imported "Modal Demo Company" into "${importTargetCompany.name}"`, { exact: false })
       .waitFor({ timeout: 120000 });
     await page.getByText(selectedContentsSummary, { exact: false }).waitFor({ timeout: 120000 });
 
-    const discoveredImportTrigger = fixtureCompanyCard.locator('[data-testid="company-import-trigger"]');
-    await discoveredImportTrigger.waitFor({ timeout: 120000 });
-    const discoveredImportLabel = (await discoveredImportTrigger.textContent())?.trim() ?? '';
-    if (discoveredImportLabel !== 'Import...') {
-      throw new Error(
-        `Expected discovered company to keep the "Import..." action after import, received "${discoveredImportLabel}".`
-      );
-    }
-
     const companiesAfterImport = await fetchJson(new URL('/api/companies', baseUrl).toString());
     const importedCompany = Array.isArray(companiesAfterImport)
-      ? companiesAfterImport.find((company) => company?.name === importedCompanyName) ?? null
+      ? companiesAfterImport.find((company) => company?.id === importTargetCompany.id) ?? null
       : null;
     if (!importedCompany) {
-      throw new Error(`Expected imported company "${importedCompanyName}" to exist after import.`);
+      throw new Error(`Expected imported company "${importTargetCompany.name}" to still exist after import.`);
     }
 
     const openDashboardLink = page.locator('[data-testid="import-success-dashboard-link"]');
@@ -680,10 +702,18 @@ async function main() {
     }
 
     const importedCompanyCard = page.locator('[data-testid="imported-company-card"]').filter({
-      hasText: importedCompanyName
+      hasText: importTargetCompany.name
     });
     await importedCompanyCard.first().waitFor({ timeout: 120000 });
     await importedCompanyCard.getByText(syncContractSummary, { exact: false }).waitFor({ timeout: 120000 });
+
+    await importIntoTrigger.click();
+    const remainingImportTargets = page.locator('[data-testid="company-import-target-option"]');
+    await remainingImportTargets.first().waitFor({ timeout: 120000 });
+    const remainingImportTargetTexts = await remainingImportTargets.allTextContents();
+    if (remainingImportTargetTexts.some((text) => text.includes(importTargetCompany.name))) {
+      throw new Error(`Expected synced company "${importTargetCompany.name}" to be removed from Import into... options.`);
+    }
 
     const syncTrigger = importedCompanyCard.locator('[data-testid="company-sync-trigger"]');
     await syncTrigger.waitFor({ timeout: 120000 });
@@ -719,7 +749,7 @@ async function main() {
     await syncTrigger.click();
     await page.getByText('Company synced', { exact: true }).waitFor({ timeout: 120000 });
     await page
-      .getByText(`Synced "Modal Demo Company" into "${importedCompanyName}"`, { exact: false })
+      .getByText(`Synced "Modal Demo Company" into "${importTargetCompany.name}"`, { exact: false })
       .waitFor({ timeout: 120000 });
     await page.getByText(selectedContentsSummary, { exact: false }).waitFor({ timeout: 120000 });
 

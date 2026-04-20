@@ -361,24 +361,30 @@ async function waitForReady(url, timeoutMs) {
   throw new Error(`Timed out waiting for Paperclip at ${healthUrl}`);
 }
 
-async function ensureCompanySeeded() {
+async function ensureCompaniesSeeded(minimumCount = 2) {
   const companiesUrl = new URL('/api/companies', baseUrl).toString();
   const existingCompanies = await fetchJson(companiesUrl);
-  if (Array.isArray(existingCompanies) && existingCompanies.length > 0) {
-    log(`Found ${existingCompanies.length} existing companies; onboarding should be skipped.`);
-    return existingCompanies[0];
+  const companies = Array.isArray(existingCompanies) ? [...existingCompanies] : [];
+  if (companies.length >= minimumCount) {
+    log(`Found ${companies.length} existing companies; onboarding should be skipped.`);
+    return companies;
   }
 
-  const createdCompany = await fetchJson(companiesUrl, {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Dummy Company',
-      description: 'Seed company for manual paperclip-agent-companies-plugin verification.'
-    })
-  });
+  const missingCount = minimumCount - companies.length;
+  for (let index = 0; index < missingCount; index += 1) {
+    const ordinal = companies.length + 1;
+    const createdCompany = await fetchJson(companiesUrl, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `Dummy Company ${ordinal}`,
+        description: `Seed company ${ordinal} for manual paperclip-agent-companies-plugin verification.`
+      })
+    });
+    companies.push(createdCompany);
+  }
 
-  log(`Seeded company ${createdCompany?.name ?? 'Dummy Company'}.`);
-  return createdCompany;
+  log(`Seeded companies through ${companies[companies.length - 1]?.name ?? 'unknown'}.`);
+  return companies;
 }
 
 async function ensurePluginInstalled(configPath) {
@@ -495,7 +501,7 @@ async function main() {
   await waitForReady(baseUrl, 180000);
   log(`Paperclip server is ready at ${baseUrl}.`);
 
-  const company = await ensureCompanySeeded();
+  const companies = await ensureCompaniesSeeded(2);
   await ensurePluginInstalled(configPath);
   await ensureManualVerificationRepositoryConfigured();
   const manualUrl = new URL(settingsIndexPath, baseUrl).toString();
@@ -504,7 +510,7 @@ async function main() {
   console.log('');
   console.log('Manual verification instance is ready.');
   console.log(`Open: ${manualUrl}`);
-  console.log(`Company: ${company?.name ?? 'Dummy Company'}`);
+  console.log(`Seeded companies: ${companies.map((company) => company?.name ?? 'Unknown company').join(', ')}`);
   console.log(`Plugin: ${pluginDisplayName}`);
   console.log(`State dir: ${stateRoot}`);
   console.log(`Logs dir: ${join(dataDir, 'logs')}`);
@@ -516,12 +522,13 @@ async function main() {
   console.log('The URL has been opened in your default browser.');
   console.log(`Open ${pluginDisplayName} from the installed plugins list.`);
   console.log(`Confirm that the ${settingsPageHeading} settings page shows the preloaded ${manualVerificationRepositoryUrl} source.`);
-  console.log('Confirm that discovered companies are listed, click Import... on one source package, and verify the dialog shows target controls plus per-part and per-item selection toggles with everything selected by default.');
-  console.log('Import one company with a partial selection, verify the success message summarizes the selected contents, offers an Open dashboard link, and mentions daily auto-sync plus overwrite mode.');
-  console.log('Confirm that the discovered company still keeps its Import... button after the import completes.');
+  console.log('Confirm that discovered companies are listed and each card shows both Import as new company and Import into... actions.');
+  console.log('Open Import into... on one source package and verify the dropdown lists the other non-synced seeded companies, such as Dummy Company 2.');
+  console.log('Import one company into Dummy Company 2 with a partial selection, verify the success message summarizes the selected contents, offers an Open dashboard link, and mentions daily auto-sync plus overwrite mode.');
+  console.log('Confirm that Dummy Company 2 disappears from later Import into... dropdowns after it becomes a tracked synced import.');
   console.log('Confirm that the imported company appears in the separate Imported Companies section with a disabled Up to date action, a checked Daily auto-sync toggle, a visible Sync contract summary, and a Re-import / Edit selection action.');
   console.log('Use Re-import / Edit selection to change the saved selection and verify the Sync contract summary updates on the tracked company card.');
-  console.log('Optional: open the plugin from an existing untracked company, pick This company in the import dialog, and verify that the adopted company becomes a tracked synced import.');
+  console.log('Optional: open the plugin from another existing non-synced company and verify that Import into... can adopt that company too when it is not already tracked.');
   console.log('Change the source company version, click Rescan, and confirm the action switches to Sync now.');
   console.log('Click Sync now from the Imported Companies section and verify the success message summarizes the sync result for the existing Paperclip company, including the saved selection contract, without showing overwrite warnings for replaced records.');
   console.log('Toggle Daily auto-sync off and back on again to confirm the setting updates immediately.');
