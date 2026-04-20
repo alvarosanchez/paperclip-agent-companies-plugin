@@ -27,8 +27,8 @@ import {
   isCatalogCompanyAutoSyncDue,
   normalizeCompanyContentPath,
   normalizeCatalogState,
-  normalizeCompanyImportSelection,
   normalizeRepositoryCloneRef,
+  resolveCompanyImportSelection,
   type PaperclipCompanyImportResult,
   sortCompanyContentItems,
   type CatalogSnapshot,
@@ -1504,39 +1504,11 @@ function normalizeSyncCollisionStrategyInput(
     : fallback;
 }
 
-function normalizeSelectionPartForCompanyItems(
-  items: CompanyContentItem[],
-  selection: CompanyImportPartSelection
-): CompanyImportPartSelection {
-  if (selection.mode !== "selected") {
-    return selection;
-  }
-
-  const itemPaths = [...new Set(
-    selection.itemPaths?.filter((itemPath) => items.some((item) => item.path === itemPath)) ?? []
-  )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
-
-  return itemPaths.length > 0
-    ? {
-        mode: "selected",
-        itemPaths
-      }
-    : { mode: "none" };
-}
-
 function normalizeRequestedCompanyImportSelection(
   company: DiscoveredAgentCompany,
   selection: unknown
 ): CompanyImportSelection {
-  const normalizedSelection = normalizeCompanyImportSelection(selection);
-
-  return {
-    agents: normalizeSelectionPartForCompanyItems(company.contents.agents, normalizedSelection.agents),
-    projects: normalizeSelectionPartForCompanyItems(company.contents.projects, normalizedSelection.projects),
-    tasks: normalizeSelectionPartForCompanyItems(company.contents.tasks, normalizedSelection.tasks),
-    issues: normalizeSelectionPartForCompanyItems(company.contents.issues, normalizedSelection.issues),
-    skills: normalizeSelectionPartForCompanyItems(company.contents.skills, normalizedSelection.skills)
-  };
+  return resolveCompanyImportSelection(company.contents, selection);
 }
 
 function isFullCompanyImportSelection(selection: CompanyImportSelection): boolean {
@@ -2110,11 +2082,124 @@ function deriveCompanyContentName(relativePath: string): string {
   return segments.length >= 2 ? segments[segments.length - 2] ?? relativePath : relativePath;
 }
 
+interface ParsedCompanyContentItem {
+  kind: CompanyContentKey;
+  item: CompanyContentItem;
+  slug: string | null;
+  dependencyAgentSlugs: string[];
+  dependencyProjectSlugs: string[];
+}
+
+function collectNormalizedSlugs(value: unknown): string[] {
+  const slugs = new Set<string>();
+
+  function visit(candidate: unknown): void {
+    if (typeof candidate === "string") {
+      const slug = normalizePaperclipSlug(candidate);
+      if (slug) {
+        slugs.add(slug);
+      }
+      return;
+    }
+
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        visit(item);
+      }
+    }
+  }
+
+  visit(value);
+  return [...slugs].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+}
+
+function readFrontmatterSlugValues(
+  parsedFrontmatter: Record<string, unknown> | null,
+  rawFrontmatter: string | null,
+  keys: string[]
+): string[] {
+  const slugs = new Set<string>();
+
+  for (const key of keys) {
+    for (const slug of collectNormalizedSlugs(parsedFrontmatter?.[key])) {
+      slugs.add(slug);
+    }
+  }
+
+  for (const key of keys) {
+    const slug = rawFrontmatter ? normalizePaperclipSlug(getTopLevelScalar(rawFrontmatter, key)) : null;
+    if (slug) {
+      slugs.add(slug);
+    }
+  }
+
+  return [...slugs].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+}
+
+function getCompanyContentPathScopeSlug(relativePath: string): string | null {
+  const segments = relativePath.split("/").filter(Boolean);
+  return segments[0] === "projects" && segments.length >= 2
+    ? normalizePaperclipSlug(segments[1])
+    : null;
+}
+
+function getCompanyContentItemSlug(
+  kind: CompanyContentKey,
+  relativePath: string,
+  parsedFrontmatter: Record<string, unknown> | null,
+  rawFrontmatter: string | null
+): string | null {
+  const frontmatterSlug =
+    normalizePaperclipSlug(parsedFrontmatter?.slug)
+    ?? (rawFrontmatter ? normalizePaperclipSlug(getTopLevelScalar(rawFrontmatter, "slug")) : null);
+  if (frontmatterSlug) {
+    return frontmatterSlug;
+  }
+
+  const segments = relativePath.split("/").filter(Boolean);
+  if ((kind === "agents" || kind === "projects") && segments.length >= 2) {
+    return normalizePaperclipSlug(segments[1]);
+  }
+
+  return null;
+}
+
+function getCompanyContentDependencyAgentSlugs(
+  kind: CompanyContentKey,
+  parsedFrontmatter: Record<string, unknown> | null,
+  rawFrontmatter: string | null
+): string[] {
+  if (kind !== "tasks" && kind !== "issues") {
+    return [];
+  }
+
+  return readFrontmatterSlugValues(parsedFrontmatter, rawFrontmatter, ["assignee", "assignees"]);
+}
+
+function getCompanyContentDependencyProjectSlugs(
+  kind: CompanyContentKey,
+  relativePath: string,
+  parsedFrontmatter: Record<string, unknown> | null,
+  rawFrontmatter: string | null
+): string[] {
+  if (kind !== "tasks" && kind !== "issues") {
+    return [];
+  }
+
+  const slugs = new Set(readFrontmatterSlugValues(parsedFrontmatter, rawFrontmatter, ["project", "projects"]));
+  const pathScopeSlug = getCompanyContentPathScopeSlug(relativePath);
+  if (pathScopeSlug) {
+    slugs.add(pathScopeSlug);
+  }
+
+  return [...slugs].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+}
+
 async function parseCompanyContentItem(
   manifestPath: string,
   companyRoot: string,
   routineMetadataByTaskSlug: Map<string, PaperclipRoutineMetadata>
-): Promise<{ kind: CompanyContentKey; item: CompanyContentItem } | null> {
+): Promise<ParsedCompanyContentItem | null> {
   const relativePath = normalizeCompanyContentPath(toPosixPath(relative(companyRoot, manifestPath)));
   if (!relativePath) {
     return null;
@@ -2159,9 +2244,24 @@ async function parseCompanyContentItem(
     kind === "tasks"
       ? isRecurringTaskFrontmatter(parsedFrontmatter, frontmatter) || routineMetadata !== null
       : false;
+  const slug = getCompanyContentItemSlug(kind, relativePath, parsedFrontmatter, frontmatter);
+  const dependencyAgentSlugs = getCompanyContentDependencyAgentSlugs(
+    kind,
+    parsedFrontmatter,
+    frontmatter
+  );
+  const dependencyProjectSlugs = getCompanyContentDependencyProjectSlugs(
+    kind,
+    relativePath,
+    parsedFrontmatter,
+    frontmatter
+  );
 
   return {
     kind,
+    slug,
+    dependencyAgentSlugs,
+    dependencyProjectSlugs,
     item: {
       name,
       path: relativePath,
@@ -2177,6 +2277,7 @@ async function scanCompanyContents(companyRoot: string): Promise<CompanyContents
   const contents = createEmptyCompanyContents();
   const manifestPaths = await findCompanyContentManifestPaths(companyRoot);
   const routineMetadataByTaskSlug = await readPaperclipRoutineMetadata(companyRoot);
+  const parsedItems: ParsedCompanyContentItem[] = [];
 
   for (const manifestPath of manifestPaths) {
     const parsedItem = await parseCompanyContentItem(
@@ -2188,7 +2289,49 @@ async function scanCompanyContents(companyRoot: string): Promise<CompanyContents
       continue;
     }
 
-    contents[parsedItem.kind].push(parsedItem.item);
+    parsedItems.push(parsedItem);
+  }
+
+  const agentPathsBySlug = new Map<string, string>();
+  const projectPathsBySlug = new Map<string, string>();
+
+  for (const parsedItem of parsedItems) {
+    if (parsedItem.kind === "agents" && parsedItem.slug) {
+      agentPathsBySlug.set(parsedItem.slug, parsedItem.item.path);
+    }
+
+    if (parsedItem.kind === "projects" && parsedItem.slug) {
+      projectPathsBySlug.set(parsedItem.slug, parsedItem.item.path);
+    }
+  }
+
+  for (const parsedItem of parsedItems) {
+    const dependencyPaths = new Set<string>();
+
+    for (const slug of parsedItem.dependencyAgentSlugs) {
+      const dependencyPath = agentPathsBySlug.get(slug);
+      if (dependencyPath && dependencyPath !== parsedItem.item.path) {
+        dependencyPaths.add(dependencyPath);
+      }
+    }
+
+    for (const slug of parsedItem.dependencyProjectSlugs) {
+      const dependencyPath = projectPathsBySlug.get(slug);
+      if (dependencyPath && dependencyPath !== parsedItem.item.path) {
+        dependencyPaths.add(dependencyPath);
+      }
+    }
+
+    contents[parsedItem.kind].push({
+      ...parsedItem.item,
+      ...(dependencyPaths.size > 0
+        ? {
+            dependencyPaths: [...dependencyPaths].sort((left, right) =>
+              left.localeCompare(right, undefined, { sensitivity: "base" })
+            )
+          }
+        : {})
+    });
   }
 
   for (const key of COMPANY_CONTENT_KEYS) {
@@ -2680,7 +2823,7 @@ async function executeDefaultSyncImport(
       body: JSON.stringify({
         source: input.preparedImport.source,
         include: {
-          company: true,
+          company: false,
           agents: true,
           projects: true,
           issues: true,

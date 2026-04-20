@@ -60,6 +60,7 @@ import {
   type CatalogCompanySyncResult,
   type CatalogSyncCollisionStrategy,
   type CompanyContentKey,
+  type CompanyContentSectionDefinition,
   type CompanyImportPartSelection,
   type CompanyImportSelection,
   type CompanyContentItem,
@@ -69,7 +70,14 @@ import {
   type CatalogRepositorySummary,
   type CatalogSnapshot,
   type PaperclipCompanyImportResult,
-  createDefaultCompanyImportSelection
+  createDefaultCompanyImportSelection,
+  getCompanyContentItemRequirementSources,
+  getCompanyContentSectionForKey,
+  getCompanyContentSectionItemCount,
+  getVisibleCompanyContentSections,
+  isCompanyContentItemRequiredBySelection,
+  listCompanyContentSectionItems,
+  resolveCompanyImportSelection
 } from "../catalog.js";
 import {
   normalizePaperclipHealthResponse,
@@ -668,18 +676,71 @@ const PAGE_STYLES = `
   align-items: center;
 }
 
-.agent-companies-settings__checkbox {
+.agent-companies-settings__switch-field {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 154px;
+  padding: 6px 10px;
+  border: 1px solid var(--ac-border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 76%, transparent);
   font-size: 11px;
   line-height: 1.4;
   color: var(--ac-text-muted);
 }
 
-.agent-companies-settings__checkbox input {
+.agent-companies-settings__switch-input {
+  appearance: none;
+  position: relative;
+  width: 34px;
+  height: 20px;
   margin: 0;
-  accent-color: var(--ac-info);
+  flex: 0 0 auto;
+  border: 1px solid var(--ac-border-strong);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 86%, var(--ac-bg));
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
+}
+
+.agent-companies-settings__switch-input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--ac-primary);
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--ac-bg) 52%, transparent);
+  transition:
+    transform 140ms ease,
+    background 140ms ease;
+}
+
+.agent-companies-settings__switch-input:checked {
+  border-color: color-mix(in oklab, var(--ac-info) 52%, var(--ac-border-strong));
+  background: color-mix(in oklab, var(--ac-info) 82%, var(--ac-surface));
+}
+
+.agent-companies-settings__switch-input:checked::after {
+  transform: translateX(16px);
+}
+
+.agent-companies-settings__switch-input:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ac-info) 24%, transparent);
+}
+
+.agent-companies-settings__switch-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .agent-companies-settings__dialog-backdrop {
@@ -730,8 +791,8 @@ const PAGE_STYLES = `
 }
 
 .agent-companies-settings__dialog--compact {
-  width: min(560px, 100%);
-  grid-template-rows: auto auto auto;
+  width: min(640px, 100%);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .agent-companies-settings__dialog-copy {
@@ -1025,6 +1086,174 @@ const PAGE_STYLES = `
 .agent-companies-settings__dialog-form {
   display: grid;
   gap: 12px;
+  min-height: 0;
+}
+
+.agent-companies-settings__dialog--compact .agent-companies-settings__dialog-form {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.agent-companies-settings__dialog-form-scroll {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.agent-companies-settings__dialog-form fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.agent-companies-settings__selection-list {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-companies-settings__selection-group {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--ac-surface-muted) 78%, transparent);
+}
+
+.agent-companies-settings__selection-part,
+.agent-companies-settings__selection-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.agent-companies-settings__selection-part--readonly,
+.agent-companies-settings__selection-item--readonly {
+  cursor: default;
+}
+
+.agent-companies-settings__selection-part {
+  padding: 12px;
+  border: 1px solid var(--ac-border-strong);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--ac-surface) 88%, var(--ac-bg));
+}
+
+.agent-companies-settings__selection-part-copy,
+.agent-companies-settings__selection-item-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-companies-settings__selection-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.agent-companies-settings__selection-part-title {
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 700;
+  color: var(--ac-text);
+}
+
+.agent-companies-settings__selection-part-summary {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__selection-items {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin-left: 8px;
+  padding-left: 14px;
+  border-left: 1px solid color-mix(in oklab, var(--ac-border-strong) 68%, transparent);
+}
+
+.agent-companies-settings__selection-items-label {
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__selection-item {
+  padding: 10px 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ac-surface-soft) 84%, transparent);
+}
+
+.agent-companies-settings__selection-item--readonly {
+  border-color: color-mix(in oklab, var(--ac-info) 20%, var(--ac-border));
+  background: color-mix(in oklab, var(--ac-info-soft) 38%, var(--ac-surface-soft));
+}
+
+.agent-companies-settings__selection-item-title {
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 600;
+  color: var(--ac-text);
+}
+
+.agent-companies-settings__selection-item-path {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ac-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.agent-companies-settings__selection-lock,
+.agent-companies-settings__selection-item-hint,
+.agent-companies-settings__selection-part-hint {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.agent-companies-settings__selection-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in oklab, var(--ac-info) 28%, var(--ac-border));
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ac-info-soft) 64%, transparent);
+  color: var(--ac-info);
+  font-weight: 600;
+}
+
+.agent-companies-settings__selection-item-hint,
+.agent-companies-settings__selection-part-hint {
+  color: color-mix(in oklab, var(--ac-info) 88%, var(--ac-text-muted));
+}
+
+.agent-companies-settings__selection-items-meta,
+.agent-companies-settings__selection-empty {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__selection-empty {
+  margin-left: 8px;
+  padding-left: 14px;
+  border-left: 1px solid color-mix(in oklab, var(--ac-border-strong) 68%, transparent);
 }
 
 .agent-companies-settings__dialog-form-actions {
@@ -1173,44 +1402,6 @@ interface CatalogCompanyGroup {
   companies: CatalogCompanySummary[];
 }
 
-const COMPANY_CONTENT_SECTIONS: Array<{
-  key: CompanyContentKey;
-  label: string;
-  singular: string;
-  plural: string;
-}> = [
-  {
-    key: "agents",
-    label: "Agents",
-    singular: "agent",
-    plural: "agents"
-  },
-  {
-    key: "projects",
-    label: "Projects",
-    singular: "project",
-    plural: "projects"
-  },
-  {
-    key: "tasks",
-    label: "Tasks",
-    singular: "task",
-    plural: "tasks"
-  },
-  {
-    key: "issues",
-    label: "Issues",
-    singular: "issue",
-    plural: "issues"
-  },
-  {
-    key: "skills",
-    label: "Skills",
-    singular: "skill",
-    plural: "skills"
-  }
-];
-
 type PaperclipAgentIconComponent = typeof Bot;
 
 const PAPERCLIP_AGENT_ICON_COMPONENTS: Record<string, PaperclipAgentIconComponent> = {
@@ -1264,6 +1455,69 @@ const PAPERCLIP_AGENT_ICON_COMPONENTS: Record<string, PaperclipAgentIconComponen
 interface CompanyContentSelection {
   kind: CompanyContentKey;
   item: CompanyContentItem;
+}
+
+function getSectionSelectedItemCount(
+  section: CompanyContentSectionDefinition,
+  selection: CompanyImportSelection,
+  contents: CompanyContents
+): number {
+  return listCompanyContentSectionItems(contents, section).reduce(
+    (count, entry) => count + (isSelectionItemChecked(selection[entry.kind], entry.item.path) ? 1 : 0),
+    0
+  );
+}
+
+function formatImportSelectionItemPath(item: CompanyContentItem, kind: CompanyContentKey): string {
+  if (kind === "issues") {
+    return `Paperclip issue • ${item.path}`;
+  }
+
+  if (kind === "tasks" && item.recurring) {
+    return `Recurring task • ${item.path}`;
+  }
+
+  return item.path;
+}
+
+function formatRequirementSourcesHint(
+  sources: Array<{ kind: CompanyContentKey; item: CompanyContentItem }>
+): string | null {
+  if (sources.length === 0) {
+    return null;
+  }
+
+  const names = sources.map((source) => `"${source.item.name}"`);
+  if (names.length === 1) {
+    return `Required by ${names[0]}.`;
+  }
+
+  if (names.length === 2) {
+    return `Required by ${names[0]} and ${names[1]}.`;
+  }
+
+  return `Required by ${names[0]}, ${names[1]}, and ${names.length - 2} other selected items.`;
+}
+
+function isSectionDeselectReadOnly(
+  section: CompanyContentSectionDefinition,
+  selection: CompanyImportSelection,
+  contents: CompanyContents
+): boolean {
+  const currentSelectedCount = getSectionSelectedItemCount(section, selection, contents);
+  if (currentSelectedCount === 0) {
+    return false;
+  }
+
+  const nextSelection = resolveCompanyImportSelection(contents, {
+    ...selection,
+    ...Object.fromEntries(section.contentKeys.map((key) => [key, { mode: "none" }]))
+  });
+
+  return listCompanyContentSectionItems(contents, section).every(({ kind, item }) =>
+    isSelectionItemChecked(selection[kind], item.path) ===
+    isSelectionItemChecked(nextSelection[kind], item.path)
+  );
 }
 
 interface PaperclipCompanyRecord {
@@ -1847,21 +2101,6 @@ function cloneCompanyImportSelection(selection: CompanyImportSelection): Company
   };
 }
 
-function getSelectionItemCount(
-  selection: CompanyImportPartSelection,
-  items: CompanyContentItem[]
-): number {
-  if (selection.mode === "all") {
-    return items.length;
-  }
-
-  if (selection.mode === "none") {
-    return 0;
-  }
-
-  return selection.itemPaths?.length ?? 0;
-}
-
 function isSelectionItemChecked(
   selection: CompanyImportPartSelection,
   itemPath: string
@@ -1889,10 +2128,6 @@ function normalizeSelectionPartFromItemPaths(
     return { mode: "none" };
   }
 
-  if (normalizedItemPaths.length === items.length) {
-    return { mode: "all" };
-  }
-
   return {
     mode: "selected",
     itemPaths: normalizedItemPaths
@@ -1901,13 +2136,19 @@ function normalizeSelectionPartFromItemPaths(
 
 function toggleCompanyImportSelectionPart(
   selection: CompanyImportSelection,
-  key: CompanyContentKey,
-  enabled: boolean
+  keys: CompanyContentKey[],
+  enabled: boolean,
+  contents: CompanyContents
 ): CompanyImportSelection {
-  return {
-    ...selection,
-    [key]: enabled ? { mode: "all" } : { mode: "none" }
+  const nextSelection = {
+    ...selection
   };
+
+  for (const key of keys) {
+    nextSelection[key] = enabled ? { mode: "all" } : { mode: "none" };
+  }
+
+  return resolveCompanyImportSelection(contents, nextSelection);
 }
 
 function toggleCompanyImportSelectionItem(
@@ -1915,7 +2156,8 @@ function toggleCompanyImportSelectionItem(
   key: CompanyContentKey,
   itemPath: string,
   checked: boolean,
-  items: CompanyContentItem[]
+  items: CompanyContentItem[],
+  contents: CompanyContents
 ): CompanyImportSelection {
   const currentPartSelection = selection[key];
   const currentItemPaths =
@@ -1929,36 +2171,38 @@ function toggleCompanyImportSelectionItem(
     ? [...currentItemPaths, itemPath]
     : currentItemPaths.filter((currentPath) => currentPath !== itemPath);
 
-  return {
+  return resolveCompanyImportSelection(contents, {
     ...selection,
     [key]: normalizeSelectionPartFromItemPaths(nextItemPaths, items)
-  };
+  });
 }
 
 function buildSelectionPartSummary(
-  section: (typeof COMPANY_CONTENT_SECTIONS)[number],
-  selection: CompanyImportPartSelection,
-  items: CompanyContentItem[]
+  section: CompanyContentSectionDefinition,
+  selection: CompanyImportSelection,
+  contents: CompanyContents
 ): string {
-  if (selection.mode === "none") {
+  const itemCount = getCompanyContentSectionItemCount(contents, section);
+  const selectedCount = getSectionSelectedItemCount(section, selection, contents);
+
+  if (selectedCount === 0) {
     return `${section.label}: excluded`;
   }
 
-  const selectedCount = getSelectionItemCount(selection, items);
-  if (selection.mode === "all") {
+  if (selectedCount === itemCount) {
     return `${section.label}: all ${selectedCount} selected`;
   }
 
-  return `${section.label}: ${selectedCount} of ${items.length} selected`;
+  return `${section.label}: ${selectedCount} of ${itemCount} selected`;
 }
 
 function buildCompanyImportSelectionSummary(
   selection: CompanyImportSelection,
   contents: CompanyContents
 ): string {
-  return COMPANY_CONTENT_SECTIONS.map((section) =>
-    buildSelectionPartSummary(section, selection[section.key], contents[section.key])
-  ).join(" • ");
+  return getVisibleCompanyContentSections(contents)
+    .map((section) => buildSelectionPartSummary(section, selection, contents))
+    .join(" • ");
 }
 
 function ExistingCompanyImportMenu(props: {
@@ -2319,14 +2563,22 @@ function getRecurringTaskImportHint(contents: CompanyContents): string | null {
 }
 
 function getCompanyContentStatNote(
-  section: (typeof COMPANY_CONTENT_SECTIONS)[number],
+  section: CompanyContentSectionDefinition,
   contents: CompanyContents
 ): string {
-  const count = contents[section.key].length;
-  if (section.key === "tasks") {
+  const count = getCompanyContentSectionItemCount(contents, section);
+  if (section.id === "tasks") {
     const recurringTaskCount = getRecurringTaskCount(contents);
+    const issueCount = contents.issues.length;
+    const noteParts: string[] = [];
     if (recurringTaskCount > 0) {
-      return formatContentCount(recurringTaskCount, "recurring task", "recurring tasks");
+      noteParts.push(formatContentCount(recurringTaskCount, "recurring task", "recurring tasks"));
+    }
+    if (issueCount > 0) {
+      noteParts.push(formatContentCount(issueCount, "Paperclip issue", "Paperclip issues"));
+    }
+    if (noteParts.length > 0) {
+      return noteParts.join(" • ");
     }
   }
 
@@ -2346,6 +2598,12 @@ function getCompanyContentItemBadges(
     });
   }
 
+  if (kind === "issues") {
+    badges.push({
+      label: "Paperclip issue"
+    });
+  }
+
   if (item.paperclipRoutineStatus) {
     badges.push({
       label: `Routine: ${item.paperclipRoutineStatus}`
@@ -2362,18 +2620,15 @@ function getCompanyContentItemBadges(
 }
 
 function buildCompanyContentSummary(contents: CompanyContents): string {
-  const parts = COMPANY_CONTENT_SECTIONS.flatMap((section) => {
-    const count = contents[section.key].length;
-    if (count === 0) {
-      return [];
-    }
-
-    if (section.key !== "tasks") {
+  const parts = getVisibleCompanyContentSections(contents).flatMap((section) => {
+    const count = getCompanyContentSectionItemCount(contents, section);
+    if (section.id !== "tasks") {
       return [formatContentCount(count, section.singular, section.plural)];
     }
 
     const recurringTaskCount = getRecurringTaskCount(contents);
-    const oneTimeTaskCount = count - recurringTaskCount;
+    const issueCount = contents.issues.length;
+    const oneTimeTaskCount = contents.tasks.length - recurringTaskCount;
     const taskParts: string[] = [];
 
     if (oneTimeTaskCount > 0) {
@@ -2384,6 +2639,10 @@ function buildCompanyContentSummary(contents: CompanyContents): string {
       taskParts.push(formatContentCount(recurringTaskCount, "recurring task", "recurring tasks"));
     }
 
+    if (issueCount > 0) {
+      taskParts.push(formatContentCount(issueCount, "Paperclip issue", "Paperclip issues"));
+    }
+
     return taskParts.length > 0
       ? taskParts
       : [formatContentCount(count, section.singular, section.plural)];
@@ -2392,21 +2651,37 @@ function buildCompanyContentSummary(contents: CompanyContents): string {
   return parts.length > 0 ? parts.join(" • ") : "No structured contents detected";
 }
 
-function getCompanyContentSection(
-  key: CompanyContentKey
-): (typeof COMPANY_CONTENT_SECTIONS)[number] {
-  return COMPANY_CONTENT_SECTIONS.find((section) => section.key === key) ?? COMPANY_CONTENT_SECTIONS[0];
+function ToggleSwitch(props: {
+  ariaLabel?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange(checked: boolean): void;
+  testId?: string;
+}): React.JSX.Element {
+  const { ariaLabel, checked, disabled = false, onChange, testId } = props;
+
+  return (
+    <input
+      aria-label={ariaLabel}
+      checked={checked}
+      className="agent-companies-settings__switch-input"
+      data-testid={testId}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.checked)}
+      type="checkbox"
+    />
+  );
 }
 
 function getDefaultCompanyContentSelection(
   company: CatalogCompanySummary
 ): CompanyContentSelection | null {
-  for (const section of COMPANY_CONTENT_SECTIONS) {
-    const firstItem = company.contents[section.key][0];
+  for (const section of getVisibleCompanyContentSections(company.contents)) {
+    const firstItem = listCompanyContentSectionItems(company.contents, section)[0];
     if (firstItem) {
       return {
-        kind: section.key,
-        item: firstItem
+        kind: firstItem.kind,
+        item: firstItem.item
       };
     }
   }
@@ -2422,12 +2697,14 @@ function findCompanyContentSelection(
     return getDefaultCompanyContentSelection(company);
   }
 
-  for (const section of COMPANY_CONTENT_SECTIONS) {
-    const item = company.contents[section.key].find((candidate) => candidate.path === itemPath);
-    if (item) {
+  for (const section of getVisibleCompanyContentSections(company.contents)) {
+    const match = listCompanyContentSectionItems(company.contents, section).find(
+      (candidate) => candidate.item.path === itemPath
+    );
+    if (match) {
       return {
-        kind: section.key,
-        item
+        kind: match.kind,
+        item: match.item
       };
     }
   }
@@ -2470,10 +2747,11 @@ function matchesCompanyQuery(company: CatalogCompanySummary, query: string): boo
   }
 
   const normalizedQuery = query.toLowerCase();
-  const contentValues = COMPANY_CONTENT_SECTIONS.flatMap((section) =>
-    company.contents[section.key].flatMap((item) => [
+  const contentValues = getVisibleCompanyContentSections(company.contents).flatMap((section) =>
+    listCompanyContentSectionItems(company.contents, section).flatMap(({ item, kind }) => [
       item.name,
       item.path,
+      kind === "issues" ? "paperclip issue" : "",
       item.recurring ? "recurring task paperclip routine" : "",
       item.paperclipRoutineStatus ?? "",
       typeof item.paperclipRoutineTriggerCount === "number"
@@ -2634,20 +2912,19 @@ function ImportedCompanySyncControls(props: {
         >
           {getSyncButtonLabel(syncState, company)}
         </button>
-        <label className="agent-companies-settings__checkbox">
-          <input
+        <label className="agent-companies-settings__switch-field">
+          <span>Daily auto-sync</span>
+          <ToggleSwitch
             checked={company.importedCompany.autoSyncEnabled}
-            data-testid="company-auto-sync-toggle"
             disabled={isBusy}
-            onChange={(event) =>
+            onChange={(checked) =>
               void onToggleAutoSync(
                 company.sourceCompanyId,
                 company.importedCompany.id,
-                event.target.checked
+                checked
               )}
-            type="checkbox"
+            testId="company-auto-sync-toggle"
           />
-          Daily auto-sync
         </label>
         {company.importedCompany.syncStatus === "running" ? (
           <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
@@ -2857,8 +3134,11 @@ function CompanyDetailsDialog(props: {
   const [selectedItemPath, setSelectedItemPath] = useState<string | null>(
     getDefaultCompanyContentSelection(company)?.item.path ?? null
   );
+  const visibleSections = getVisibleCompanyContentSections(company.contents);
   const selectedSelection = findCompanyContentSelection(company, selectedItemPath);
-  const selectedSection = selectedSelection ? getCompanyContentSection(selectedSelection.kind) : null;
+  const selectedSection = selectedSelection
+    ? getCompanyContentSectionForKey(selectedSelection.kind)
+    : null;
   const detail = usePluginData<CatalogCompanyContentDetail | null>(
     "catalog.company-content.read",
     selectedSelection
@@ -2948,14 +3228,14 @@ function CompanyDetailsDialog(props: {
         </div>
 
         <div className="agent-companies-settings__dialog-summary">
-          {COMPANY_CONTENT_SECTIONS.map((section) => {
-            const count = company.contents[section.key].length;
+          {visibleSections.map((section) => {
+            const count = getCompanyContentSectionItemCount(company.contents, section);
 
             return (
               <div
                 className="agent-companies-settings__dialog-stat"
-                data-testid={`company-details-count-${section.key}`}
-                key={section.key}
+                data-testid={`company-details-count-${section.id}`}
+                key={section.id}
               >
                 <span className="agent-companies-settings__metric-label">{section.label}</span>
                 <strong className="agent-companies-settings__dialog-stat-value">{count}</strong>
@@ -2969,11 +3249,11 @@ function CompanyDetailsDialog(props: {
 
         <div className="agent-companies-settings__dialog-layout">
           <nav className="agent-companies-settings__dialog-nav" data-testid="company-details-nav">
-            {COMPANY_CONTENT_SECTIONS.map((section) => {
-              const items = company.contents[section.key];
+            {visibleSections.map((section) => {
+              const items = listCompanyContentSectionItems(company.contents, section);
 
               return (
-                <section className="agent-companies-settings__dialog-nav-group" key={section.key}>
+                <section className="agent-companies-settings__dialog-nav-group" key={section.id}>
                   <div className="agent-companies-settings__dialog-nav-head">
                     <h3 className="agent-companies-settings__dialog-nav-title">{section.label}</h3>
                     <span className="agent-companies-settings__badge">
@@ -2982,9 +3262,9 @@ function CompanyDetailsDialog(props: {
                   </div>
                   {items.length > 0 ? (
                     <ul className="agent-companies-settings__dialog-nav-list">
-                      {items.map((item) => {
+                      {items.map(({ kind, item }) => {
                         const isActive = selectedSelection?.item.path === item.path;
-                        const badges = getCompanyContentItemBadges(item, section.key);
+                        const badges = getCompanyContentItemBadges(item, kind);
 
                         return (
                           <li key={item.path}>
@@ -2996,7 +3276,7 @@ function CompanyDetailsDialog(props: {
                               type="button"
                             >
                               <div className="agent-companies-settings__dialog-nav-item-head">
-                                {renderCompanyContentItemIcon(item, section.key)}
+                                {renderCompanyContentItemIcon(item, kind)}
                                 <span className="agent-companies-settings__dialog-nav-item-name">
                                   {item.name}
                                 </span>
@@ -3151,7 +3431,7 @@ function ImportCompanyDialog(props: {
   onChangeCompanyName(value: string): void;
   onClose(): void;
   onToggleItem(key: CompanyContentKey, itemPath: string, checked: boolean): void;
-  onTogglePart(key: CompanyContentKey, enabled: boolean): void;
+  onTogglePart(keys: CompanyContentKey[], enabled: boolean): void;
   onSubmit(event: FormEvent<HTMLFormElement>): Promise<void>;
 }): React.JSX.Element {
   const {
@@ -3170,6 +3450,7 @@ function ImportCompanyDialog(props: {
   const isReimport = dialogState.targetMode === "existing_import";
   const isExistingCompanyImport = dialogState.targetMode === "existing_company";
   const selectionSummary = buildCompanyImportSelectionSummary(dialogState.selection, company.contents);
+  const visibleSections = getVisibleCompanyContentSections(company.contents);
 
   return (
     <div
@@ -3226,133 +3507,210 @@ function ImportCompanyDialog(props: {
         </div>
 
         <form className="agent-companies-settings__dialog-form" onSubmit={(event) => void onSubmit(event)}>
-          {dialogState.targetMode !== "new_company" ? (
-            <div className="agent-companies-settings__notice">
-              Target: {dialogState.targetCompanyName}
-            </div>
-          ) : null}
+          <div
+            className="agent-companies-settings__dialog-form-scroll"
+            data-testid="company-import-form-scroll"
+          >
+            {dialogState.targetMode !== "new_company" ? (
+              <div className="agent-companies-settings__notice">
+                Target: {dialogState.targetCompanyName}
+              </div>
+            ) : null}
 
-          {dialogState.targetMode === "new_company" ? (
-            <>
-              <label htmlFor="agent-companies-import-name">
-                <span className="agent-companies-settings__metric-label">New company name</span>
-              </label>
-              <input
-                autoFocus
-                className="agent-companies-settings__input"
-                data-testid="company-import-name-input"
-                disabled={isBusy}
-                id="agent-companies-import-name"
-                onChange={(event) => onChangeCompanyName(event.target.value)}
-                placeholder="Imported company name"
-                type="text"
-                value={dialogState.companyName}
-              />
-            </>
-          ) : null}
-
-          <fieldset>
-            <legend className="agent-companies-settings__metric-label">Contents</legend>
-            <div className="agent-companies-settings__status-grid">
-              {COMPANY_CONTENT_SECTIONS.map((section) => {
-                const items = company.contents[section.key];
-                const partSelection = dialogState.selection[section.key];
-                const selectedCount = getSelectionItemCount(partSelection, items);
-
-                return (
-                  <div className="agent-companies-settings__panel" key={section.key}>
-                    <label className="agent-companies-settings__status-row">
-                      <div className="agent-companies-settings__status-copy">
-                        <span className="agent-companies-settings__status-title">{section.label}</span>
-                        <span className="agent-companies-settings__status-body">
-                          {buildSelectionPartSummary(section, partSelection, items)}
-                        </span>
-                      </div>
-                      <input
-                        checked={partSelection.mode !== "none"}
-                        disabled={isBusy}
-                        onChange={(event) => onTogglePart(section.key, event.target.checked)}
-                        type="checkbox"
-                      />
-                    </label>
-                    {partSelection.mode !== "none" && items.length > 0 ? (
-                      <div className="agent-companies-settings__status-grid">
-                        {items.map((item) => (
-                          <label className="agent-companies-settings__status-row" key={item.path}>
-                            <div className="agent-companies-settings__status-copy">
-                              <span className="agent-companies-settings__status-title">{item.name}</span>
-                              <span className="agent-companies-settings__status-body">{item.path}</span>
-                            </div>
-                            <input
-                              checked={isSelectionItemChecked(partSelection, item.path)}
-                              disabled={isBusy}
-                              onChange={(event) => onToggleItem(section.key, item.path, event.target.checked)}
-                              type="checkbox"
-                            />
-                          </label>
-                        ))}
-                        <div className="agent-companies-settings__notice">
-                          {selectedCount === items.length
-                            ? `All ${items.length} ${section.plural} selected.`
-                            : `${selectedCount} of ${items.length} ${section.plural} selected.`}
-                        </div>
-                      </div>
-                    ) : null}
-                    {items.length === 0 ? (
-                      <div className="agent-companies-settings__notice">
-                        No {section.plural} are available in this package.
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          </fieldset>
-
-          <fieldset>
-            <legend className="agent-companies-settings__metric-label">Collision Handling</legend>
-            <div className="agent-companies-settings__status-grid">
-              {[
-                {
-                  value: "replace" as const,
-                  label: "Overwrite existing content",
-                  description: "Preferred default for keeping the linked company aligned with the source."
-                },
-                {
-                  value: "skip" as const,
-                  label: "Skip collisions",
-                  description: "Leave existing content in place when a matching item already exists."
-                },
-                {
-                  value: "rename" as const,
-                  label: "Rename collisions",
-                  description: "Ask Paperclip to keep both copies when names conflict."
-                }
-              ].map((option) => (
-                <label className="agent-companies-settings__status-row" key={option.value}>
-                  <div className="agent-companies-settings__status-copy">
-                    <span className="agent-companies-settings__status-title">{option.label}</span>
-                    <span className="agent-companies-settings__status-body">{option.description}</span>
-                  </div>
-                  <input
-                    checked={dialogState.collisionStrategy === option.value}
-                    disabled={isBusy}
-                    name="agent-companies-collision-strategy"
-                    onChange={() => onChangeCollisionStrategy(option.value)}
-                    type="radio"
-                  />
+            {dialogState.targetMode === "new_company" ? (
+              <>
+                <label htmlFor="agent-companies-import-name">
+                  <span className="agent-companies-settings__metric-label">New company name</span>
                 </label>
-              ))}
+                <input
+                  autoFocus
+                  className="agent-companies-settings__input"
+                  data-testid="company-import-name-input"
+                  disabled={isBusy}
+                  id="agent-companies-import-name"
+                  onChange={(event) => onChangeCompanyName(event.target.value)}
+                  placeholder="Imported company name"
+                  type="text"
+                  value={dialogState.companyName}
+                />
+              </>
+            ) : null}
+
+            <fieldset>
+              <legend className="agent-companies-settings__metric-label">Contents</legend>
+              <p className="agent-companies-settings__metric-note">
+                Required agents and projects are included automatically when selected tasks depend on
+                them, including Paperclip issue manifests grouped under Tasks.
+              </p>
+              <div className="agent-companies-settings__selection-list">
+                {visibleSections.map((section) => {
+                  const items = listCompanyContentSectionItems(company.contents, section);
+                  const selectedCount = getSectionSelectedItemCount(
+                    section,
+                    dialogState.selection,
+                    company.contents
+                  );
+                  const requiredItems = items.filter(({ kind, item }) =>
+                    isCompanyContentItemRequiredBySelection(
+                      company.contents,
+                      dialogState.selection,
+                      kind,
+                      item.path
+                    )
+                  );
+                  const requiredCount = requiredItems.length;
+                  const sectionToggleReadOnly =
+                    !isBusy && isSectionDeselectReadOnly(section, dialogState.selection, company.contents);
+                  const sectionHint =
+                    requiredCount > 0
+                      ? `${requiredCount} required ${requiredCount === 1 ? "item is" : "items are"} locked in by selected work items.`
+                      : null;
+
+                  return (
+                    <section className="agent-companies-settings__selection-group" key={section.id}>
+                      <label
+                        className={[
+                          "agent-companies-settings__selection-part",
+                          sectionToggleReadOnly
+                            ? "agent-companies-settings__selection-part--readonly"
+                            : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                      >
+                        <div className="agent-companies-settings__selection-part-copy">
+                          <span className="agent-companies-settings__selection-part-title">{section.label}</span>
+                          <span className="agent-companies-settings__selection-part-summary">
+                            {buildSelectionPartSummary(section, dialogState.selection, company.contents)}
+                          </span>
+                          {sectionHint ? (
+                            <span className="agent-companies-settings__selection-part-hint">
+                              {sectionHint}
+                            </span>
+                          ) : null}
+                        </div>
+                        <ToggleSwitch
+                          checked={selectedCount > 0}
+                          disabled={isBusy || sectionToggleReadOnly}
+                          onChange={(checked) => onTogglePart(section.contentKeys, checked)}
+                        />
+                      </label>
+                      {selectedCount > 0 && items.length > 0 ? (
+                        <div className="agent-companies-settings__selection-items">
+                          <div className="agent-companies-settings__selection-items-label">
+                            Included {section.plural}
+                          </div>
+                          {items.map(({ kind, item }) => {
+                            const itemRequired = isCompanyContentItemRequiredBySelection(
+                              company.contents,
+                              dialogState.selection,
+                              kind,
+                              item.path
+                            );
+                            const requirementSources = itemRequired
+                              ? getCompanyContentItemRequirementSources(
+                                  company.contents,
+                                  dialogState.selection,
+                                  item.path
+                                )
+                              : [];
+                            const requirementHint = formatRequirementSourcesHint(requirementSources);
+
+                            return (
+                              <label
+                                className={[
+                                  "agent-companies-settings__selection-item",
+                                  itemRequired ? "agent-companies-settings__selection-item--readonly" : ""
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
+                                key={item.path}
+                              >
+                                <div className="agent-companies-settings__selection-item-copy">
+                                  <div className="agent-companies-settings__selection-item-head">
+                                    <span className="agent-companies-settings__selection-item-title">{item.name}</span>
+                                    {itemRequired ? (
+                                      <span className="agent-companies-settings__selection-lock">
+                                        <Lock aria-hidden="true" size={12} />
+                                        Required
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <span className="agent-companies-settings__selection-item-path">
+                                    {formatImportSelectionItemPath(item, kind)}
+                                  </span>
+                                  {requirementHint ? (
+                                    <span className="agent-companies-settings__selection-item-hint">
+                                      {requirementHint}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <ToggleSwitch
+                                  checked={isSelectionItemChecked(dialogState.selection[kind], item.path)}
+                                  disabled={isBusy || itemRequired}
+                                  onChange={(checked) => onToggleItem(kind, item.path, checked)}
+                                />
+                              </label>
+                            );
+                          })}
+                          <div className="agent-companies-settings__selection-items-meta">
+                            {selectedCount === items.length
+                              ? `All ${items.length} selected.`
+                              : `${selectedCount} of ${items.length} selected.`}
+                          </div>
+                        </div>
+                      ) : null}
+                    </section>
+                  );
+                })}
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend className="agent-companies-settings__metric-label">Collision Handling</legend>
+              <div className="agent-companies-settings__status-grid">
+                {[
+                  {
+                    value: "replace" as const,
+                    label: "Overwrite existing content",
+                    description: "Preferred default for keeping the linked company aligned with the source."
+                  },
+                  {
+                    value: "skip" as const,
+                    label: "Skip collisions",
+                    description: "Leave existing content in place when a matching item already exists."
+                  },
+                  {
+                    value: "rename" as const,
+                    label: "Rename collisions",
+                    description: "Ask Paperclip to keep both copies when names conflict."
+                  }
+                ].map((option) => (
+                  <label className="agent-companies-settings__status-row" key={option.value}>
+                    <div className="agent-companies-settings__status-copy">
+                      <span className="agent-companies-settings__status-title">{option.label}</span>
+                      <span className="agent-companies-settings__status-body">{option.description}</span>
+                    </div>
+                    <input
+                      checked={dialogState.collisionStrategy === option.value}
+                      disabled={isBusy}
+                      name="agent-companies-collision-strategy"
+                      onChange={() => onChangeCollisionStrategy(option.value)}
+                      type="radio"
+                    />
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <div className="agent-companies-settings__notice">
+              Selected contents: {selectionSummary}
             </div>
-          </fieldset>
 
-          <div className="agent-companies-settings__notice">
-            Selected contents: {selectionSummary}
+            {errorText ? (
+              <p className="agent-companies-settings__error">{errorText}</p>
+            ) : null}
           </div>
-
-          {errorText ? (
-            <p className="agent-companies-settings__error">{errorText}</p>
-          ) : null}
 
           <div className="agent-companies-settings__dialog-form-actions">
             <button
@@ -3712,7 +4070,10 @@ export function AgentCompaniesSettingsPage({
       targetCompanyId: null,
       targetCompanyName: "",
       companyName: company.name,
-      selection: createDefaultCompanyImportSelection(),
+      selection: resolveCompanyImportSelection(
+        company.contents,
+        createDefaultCompanyImportSelection()
+      ),
       collisionStrategy: "replace"
     });
     setImportError(null);
@@ -3743,7 +4104,10 @@ export function AgentCompaniesSettingsPage({
       targetCompanyId: targetCompany.id,
       targetCompanyName: targetCompany.name,
       companyName: company.name,
-      selection: createDefaultCompanyImportSelection(),
+      selection: resolveCompanyImportSelection(
+        company.contents,
+        createDefaultCompanyImportSelection()
+      ),
       collisionStrategy: "replace"
     });
     setImportError(null);
@@ -3770,7 +4134,10 @@ export function AgentCompaniesSettingsPage({
       targetCompanyId: importedCompanyId,
       targetCompanyName: company.importedCompany.name,
       companyName: company.importedCompany.name,
-      selection: cloneCompanyImportSelection(company.importedCompany.selection),
+      selection: resolveCompanyImportSelection(
+        company.contents,
+        cloneCompanyImportSelection(company.importedCompany.selection)
+      ),
       collisionStrategy: company.importedCompany.syncCollisionStrategy
     });
     setImportError(null);
@@ -3825,12 +4192,13 @@ export function AgentCompaniesSettingsPage({
               companyId: importDialog.targetCompanyId
             };
 
+      const includeCompanyMetadata = importDialog.targetMode === "new_company";
       const importedCompany = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
         method: "POST",
         body: JSON.stringify({
           source: preparedImport.source,
           include: {
-            company: true,
+            company: includeCompanyMetadata,
             agents: true,
             projects: true,
             issues: true,
@@ -3911,7 +4279,7 @@ export function AgentCompaniesSettingsPage({
         })(),
         formatImportResultSummary("Agents", importedCompany.agents),
         formatImportResultSummary("Projects", importedCompany.projects),
-        formatImportResultSummary("Issues", importedCompany.issues),
+        formatImportResultSummary("Paperclip issues", importedCompany.issues),
         formatImportResultSummary("Skills", importedCompany.skills),
         warningCount > 0
           ? `Warnings: ${warningCount} returned during import.`
@@ -3977,14 +4345,26 @@ export function AgentCompaniesSettingsPage({
   }
 
   function handleToggleImportSelectionPart(
-    key: CompanyContentKey,
+    keys: CompanyContentKey[],
     enabled: boolean
   ): void {
+    const company = importDialog
+      ? catalog.companies.find((candidate) => candidate.id === importDialog.sourceCompanyId) ?? null
+      : null;
+    if (!company) {
+      return;
+    }
+
     setImportDialog((currentDialog) =>
       currentDialog
         ? {
             ...currentDialog,
-            selection: toggleCompanyImportSelectionPart(currentDialog.selection, key, enabled)
+            selection: toggleCompanyImportSelectionPart(
+              currentDialog.selection,
+              keys,
+              enabled,
+              company.contents
+            )
           }
         : currentDialog
     );
@@ -4011,7 +4391,8 @@ export function AgentCompaniesSettingsPage({
               key,
               itemPath,
               checked,
-              company.contents[key]
+              company.contents[key],
+              company.contents
             )
           }
         : currentDialog
@@ -4123,7 +4504,7 @@ export function AgentCompaniesSettingsPage({
         })(),
         formatImportResultSummary("Agents", syncResult.agents),
         formatImportResultSummary("Projects", syncResult.projects),
-        formatImportResultSummary("Issues", syncResult.issues),
+        formatImportResultSummary("Paperclip issues", syncResult.issues),
         formatImportResultSummary("Skills", syncResult.skills),
         warningCount > 0
           ? `Warnings: ${warningCount} returned during sync.`

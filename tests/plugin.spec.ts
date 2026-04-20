@@ -17,9 +17,15 @@ import {
   type CatalogCompanySyncResult,
   createRepositorySource,
   createEmptyCompanyContents,
+  getCompanyContentItemRequirementSources,
+  getCompanyContentSectionItemCount,
+  getVisibleCompanyContentSections,
+  isCompanyContentItemRequiredBySelection,
+  listCompanyContentSectionItems,
   normalizeCatalogState,
   normalizeRepositoryCloneRef,
   normalizeRepositoryReference,
+  resolveCompanyImportSelection,
   type CatalogSnapshot
 } from "../src/catalog.js";
 import {
@@ -322,6 +328,33 @@ routines:
   );
   await runCommand("git", ["add", "."], repositoryRoot);
   await runCommand("git", ["commit", "-m", "Add recurring task fixture"], repositoryRoot);
+}
+
+async function addProjectIssueFixture(repositoryRoot: string): Promise<void> {
+  await mkdir(
+    join(repositoryRoot, "alpha", "projects", "import-pipeline", "issues", "launch-readiness"),
+    { recursive: true }
+  );
+  await writeFile(
+    join(
+      repositoryRoot,
+      "alpha",
+      "projects",
+      "import-pipeline",
+      "issues",
+      "launch-readiness",
+      "ISSUE.md"
+    ),
+    `---
+name: Launch Readiness
+assignee: ceo
+---
+
+Confirm the project is ready to launch.
+`
+  );
+  await runCommand("git", ["add", "."], repositoryRoot);
+  await runCommand("git", ["commit", "-m", "Add project issue fixture"], repositoryRoot);
 }
 
 describe("agent companies plugin", () => {
@@ -794,6 +827,119 @@ describe("agent companies plugin", () => {
     ]);
   });
 
+  it("auto-includes required agents and projects when selected tasks depend on them", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addRecurringTaskFixture(repositoryPath);
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:07.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id,
+        selection: {
+          agents: { mode: "none" },
+          projects: { mode: "none" },
+          tasks: { mode: "selected", itemPaths: ["tasks/monday-review/TASK.md"] },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        }
+      }
+    );
+
+    expect(prepared.selection).toEqual({
+      agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+      projects: { mode: "selected", itemPaths: ["projects/import-pipeline/PROJECT.md"] },
+      tasks: { mode: "selected", itemPaths: ["tasks/monday-review/TASK.md"] },
+      issues: { mode: "none" },
+      skills: { mode: "none" }
+    });
+    expect(Object.keys(prepared.source.files).sort()).toEqual([
+      ".paperclip.yaml",
+      "COMPANY.md",
+      "agents/ceo/AGENTS.md",
+      "projects/import-pipeline/PROJECT.md",
+      "tasks/monday-review/TASK.md"
+    ]);
+  });
+
+  it("auto-includes required projects and agents for selected Paperclip issue manifests", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addProjectIssueFixture(repositoryPath);
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:08.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id,
+        selection: {
+          agents: { mode: "none" },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: {
+            mode: "selected",
+            itemPaths: ["projects/import-pipeline/issues/launch-readiness/ISSUE.md"]
+          },
+          skills: { mode: "none" }
+        }
+      }
+    );
+
+    expect(prepared.selection).toEqual({
+      agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+      projects: { mode: "selected", itemPaths: ["projects/import-pipeline/PROJECT.md"] },
+      tasks: { mode: "none" },
+      issues: {
+        mode: "selected",
+        itemPaths: ["projects/import-pipeline/issues/launch-readiness/ISSUE.md"]
+      },
+      skills: { mode: "none" }
+    });
+    expect(Object.keys(prepared.source.files).sort()).toEqual([
+      "COMPANY.md",
+      "agents/ceo/AGENTS.md",
+      "projects/import-pipeline/PROJECT.md",
+      "projects/import-pipeline/issues/launch-readiness/ISSUE.md"
+    ]);
+  });
+
   it("omits common secret-bearing files from inline import sources", async () => {
     const repositoryPath = await createRepositoryFixture();
     await mkdir(join(repositoryPath, "alpha", "docs"), { recursive: true });
@@ -897,7 +1043,7 @@ describe("agent companies plugin", () => {
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
-    const fetchRequests: Array<{ url: string; authorization: string | null }> = [];
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
 
     process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
     process.env.PAPERCLIP_API_KEY = "paperclip-secret";
@@ -905,9 +1051,11 @@ describe("agent companies plugin", () => {
       const url =
         typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
       fetchRequests.push({
         url,
-        authorization: headers.get("authorization")
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
       });
 
       return new Response("- crown\n- bot\n", {
@@ -1022,7 +1170,7 @@ describe("agent companies plugin", () => {
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
-    const fetchRequests: Array<{ url: string; authorization: string | null }> = [];
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
 
     process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
     delete process.env.PAPERCLIP_API_KEY;
@@ -1030,9 +1178,11 @@ describe("agent companies plugin", () => {
       const url =
         typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
       fetchRequests.push({
         url,
-        authorization: headers.get("authorization")
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
       });
 
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
@@ -1117,15 +1267,31 @@ describe("agent companies plugin", () => {
       expect(fetchRequests).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          authorization: "Bearer paperclip-board-token"
+          authorization: "Bearer paperclip-board-token",
+          body: null
         },
-        {
+        expect.objectContaining({
           url: "http://127.0.0.1:3210/api/companies/import",
-          authorization: "Bearer paperclip-board-token"
-        },
+          authorization: "Bearer paperclip-board-token",
+          body: expect.objectContaining({
+            include: {
+              company: false,
+              agents: true,
+              projects: true,
+              issues: true,
+              skills: true
+            },
+            target: {
+              mode: "existing_company",
+              companyId: "paperclip-company-123"
+            },
+            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
+          })
+        }),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          authorization: "Bearer paperclip-board-token"
+          authorization: "Bearer paperclip-board-token",
+          body: null
         }
       ]);
     } finally {
@@ -2742,8 +2908,102 @@ describe("agent companies plugin", () => {
     expect(recurringTask?.recurring).toBe(true);
     expect(recurringTask?.paperclipRoutineStatus).toBe("paused");
     expect(recurringTask?.paperclipRoutineTriggerCount).toBe(2);
+    expect(recurringTask?.dependencyPaths).toEqual([
+      "agents/ceo/AGENTS.md",
+      "projects/import-pipeline/PROJECT.md"
+    ]);
     expect(companies[0]?.contents.issues.map((item) => item.name)).toEqual(["Follow Up Review"]);
     expect(companies[1]?.contents.agents.map((item) => item.name)).toEqual(["Beta Operator"]);
     expect(companies[1]?.contents.skills).toEqual([]);
+  });
+
+  it("groups tasks and Paperclip issue manifests into one visible Tasks section and hides empty sections", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addRecurringTaskFixture(repositoryPath);
+
+    const companies = await scanRepositoryForAgentCompanies(repositoryPath, "fixture-repository");
+    const alphaSections = getVisibleCompanyContentSections(companies[0]?.contents ?? createEmptyCompanyContents());
+    const alphaTasksSection = alphaSections.find((section) => section.id === "tasks");
+    const betaSections = getVisibleCompanyContentSections(companies[1]?.contents ?? createEmptyCompanyContents());
+
+    expect(alphaSections.map((section) => section.label)).toEqual([
+      "Agents",
+      "Projects",
+      "Tasks",
+      "Skills"
+    ]);
+    expect(alphaTasksSection).toBeTruthy();
+    expect(
+      alphaTasksSection
+        ? getCompanyContentSectionItemCount(companies[0]?.contents ?? createEmptyCompanyContents(), alphaTasksSection)
+        : null
+    ).toBe(3);
+    expect(
+      alphaTasksSection
+        ? listCompanyContentSectionItems(
+            companies[0]?.contents ?? createEmptyCompanyContents(),
+            alphaTasksSection
+          ).map((entry) => `${entry.kind}:${entry.item.path}`)
+        : []
+    ).toEqual([
+      "issues:issues/follow-up/ISSUE.md",
+      "tasks:projects/import-pipeline/tasks/seed-default/TASK.md",
+      "tasks:tasks/monday-review/TASK.md"
+    ]);
+    expect(betaSections.map((section) => section.label)).toEqual(["Agents"]);
+  });
+
+  it("identifies required dependency items and the selected work items that require them", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addRecurringTaskFixture(repositoryPath);
+
+    const companies = await scanRepositoryForAgentCompanies(repositoryPath, "fixture-repository");
+    const alphaContents = companies[0]?.contents ?? createEmptyCompanyContents();
+    const selection = resolveCompanyImportSelection(alphaContents, {
+      agents: { mode: "none" },
+      projects: { mode: "none" },
+      tasks: { mode: "selected", itemPaths: ["tasks/monday-review/TASK.md"] },
+      issues: { mode: "none" },
+      skills: { mode: "none" }
+    });
+
+    expect(
+      isCompanyContentItemRequiredBySelection(
+        alphaContents,
+        selection,
+        "projects",
+        "projects/import-pipeline/PROJECT.md"
+      )
+    ).toBe(true);
+    expect(
+      isCompanyContentItemRequiredBySelection(
+        alphaContents,
+        selection,
+        "agents",
+        "agents/ceo/AGENTS.md"
+      )
+    ).toBe(true);
+    expect(
+      isCompanyContentItemRequiredBySelection(
+        alphaContents,
+        selection,
+        "tasks",
+        "tasks/monday-review/TASK.md"
+      )
+    ).toBe(false);
+    expect(
+      getCompanyContentItemRequirementSources(
+        alphaContents,
+        selection,
+        "projects/import-pipeline/PROJECT.md"
+      ).map((entry) => `${entry.kind}:${entry.item.name}`)
+    ).toEqual(["tasks:Monday Review"]);
+    expect(
+      getCompanyContentItemRequirementSources(
+        alphaContents,
+        selection,
+        "agents/ceo/AGENTS.md"
+      ).map((entry) => `${entry.kind}:${entry.item.name}`)
+    ).toEqual(["tasks:Monday Review"]);
   });
 });

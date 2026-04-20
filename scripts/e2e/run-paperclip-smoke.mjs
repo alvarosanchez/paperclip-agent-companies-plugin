@@ -643,9 +643,9 @@ async function main() {
       throw new Error('Expected a second seeded company to exist for the Import into... smoke flow.');
     }
     const selectedContentsSummary =
-      'Selected contents: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Issues: excluded • Skills: all 1 selected';
+      'Selected contents: Agents: all 1 selected • Projects: all 1 selected • Tasks: 1 of 2 selected • Skills: all 1 selected';
     const syncContractSummary =
-      'Sync contract: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Issues: excluded • Skills: all 1 selected';
+      'Sync contract: Agents: all 1 selected • Projects: all 1 selected • Tasks: 1 of 2 selected • Skills: all 1 selected';
 
     const importAsNewButton = fixtureCompanyCard.locator('[data-testid="company-import-new-trigger"]');
     await importAsNewButton.waitFor({ timeout: 120000 });
@@ -674,7 +674,36 @@ async function main() {
     const importModal = page.locator('[data-testid="company-import-modal"]');
     await importModal.waitFor({ timeout: 120000 });
     await importModal.getByText(`Target: ${importTargetCompany.name}`, { exact: false }).waitFor({ timeout: 120000 });
-    await importModal.getByLabel(/^Issues/u).uncheck();
+    const importFormScroll = importModal.locator('[data-testid="company-import-form-scroll"]');
+    await importFormScroll.waitFor({ timeout: 120000 });
+    const importFormOverflowY = await importFormScroll.evaluate(
+      (element) => window.getComputedStyle(element).overflowY
+    );
+    if (!['auto', 'scroll'].includes(importFormOverflowY)) {
+      throw new Error(
+        `Expected import form body to be scrollable, received overflow-y="${importFormOverflowY}".`
+      );
+    }
+    const legacyIssuesSectionCount = await importModal.getByText(/^Issues$/u).count();
+    if (legacyIssuesSectionCount > 0) {
+      throw new Error('Expected work items to be grouped under Tasks instead of rendering a separate Issues section.');
+    }
+    await importModal
+      .locator('.agent-companies-settings__selection-item')
+      .filter({ hasText: 'Follow-up Review' })
+      .locator('input[type="checkbox"]')
+      .uncheck();
+    const requiredProjectRow = importModal
+      .locator('.agent-companies-settings__selection-item')
+      .filter({ hasText: 'First Import' });
+    await requiredProjectRow.getByText('Required', { exact: true }).waitFor({ timeout: 120000 });
+    await requiredProjectRow
+      .getByText('Required by "Scope Catalog".', { exact: true })
+      .waitFor({ timeout: 120000 });
+    const requiredProjectToggle = requiredProjectRow.locator('input[type="checkbox"]');
+    if (!(await requiredProjectToggle.isDisabled())) {
+      throw new Error('Expected required dependency items to render a disabled read-only toggle.');
+    }
     await importModal.getByText(selectedContentsSummary, { exact: false }).waitFor({ timeout: 120000 });
     await importModal.locator('[data-testid="company-import-submit"]').click();
 
@@ -690,6 +719,11 @@ async function main() {
       : null;
     if (!importedCompany) {
       throw new Error(`Expected imported company "${importTargetCompany.name}" to still exist after import.`);
+    }
+    if (importedCompany.name !== importTargetCompany.name) {
+      throw new Error(
+        `Expected existing company import target to keep the name "${importTargetCompany.name}", received "${importedCompany.name ?? 'unknown'}".`
+      );
     }
 
     const openDashboardLink = page.locator('[data-testid="import-success-dashboard-link"]');
@@ -752,6 +786,18 @@ async function main() {
       .getByText(`Synced "Modal Demo Company" into "${importTargetCompany.name}"`, { exact: false })
       .waitFor({ timeout: 120000 });
     await page.getByText(selectedContentsSummary, { exact: false }).waitFor({ timeout: 120000 });
+    const companiesAfterSync = await fetchJson(new URL('/api/companies', baseUrl).toString());
+    const syncedCompany = Array.isArray(companiesAfterSync)
+      ? companiesAfterSync.find((company) => company?.id === importTargetCompany.id) ?? null
+      : null;
+    if (!syncedCompany) {
+      throw new Error(`Expected synced company "${importTargetCompany.name}" to still exist after sync.`);
+    }
+    if (syncedCompany.name !== importTargetCompany.name) {
+      throw new Error(
+        `Expected synced existing company to keep the name "${importTargetCompany.name}", received "${syncedCompany.name ?? 'unknown'}".`
+      );
+    }
 
     await importedCompanyCard.getByRole('button', { name: 'View source contents' }).click();
 

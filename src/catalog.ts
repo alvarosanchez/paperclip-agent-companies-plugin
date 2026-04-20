@@ -18,6 +18,7 @@ export type RepositoryScanStatus = "idle" | "ready" | "error";
 export interface CompanyContentItem {
   name: string;
   path: string;
+  dependencyPaths?: string[];
   paperclipAgentIcon?: string | null;
   recurring?: boolean;
   paperclipRoutineStatus?: string | null;
@@ -30,6 +31,21 @@ export interface CompanyContents {
   tasks: CompanyContentItem[];
   issues: CompanyContentItem[];
   skills: CompanyContentItem[];
+}
+
+export type CompanyContentSectionId = "agents" | "projects" | "tasks" | "skills";
+
+export interface CompanyContentSectionDefinition {
+  id: CompanyContentSectionId;
+  label: string;
+  singular: string;
+  plural: string;
+  contentKeys: CompanyContentKey[];
+}
+
+export interface CompanyContentSectionItem {
+  kind: CompanyContentKey;
+  item: CompanyContentItem;
 }
 
 export interface CompanyImportPartSelection {
@@ -308,6 +324,302 @@ export function isCompanyImportSelectionEmpty(selection: CompanyImportSelection)
   return COMPANY_CONTENT_KEYS.every((key) => selection[key].mode === "none");
 }
 
+export function normalizeSelectionPartForCompanyItems(
+  items: CompanyContentItem[],
+  selection: CompanyImportPartSelection
+): CompanyImportPartSelection {
+  if (items.length === 0) {
+    return { mode: "none" };
+  }
+
+  if (selection.mode === "all") {
+    return { mode: "all" };
+  }
+
+  if (selection.mode === "none") {
+    return { mode: "none" };
+  }
+
+  const itemPaths = [...new Set(
+    selection.itemPaths?.filter((itemPath) => items.some((item) => item.path === itemPath)) ?? []
+  )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+
+  if (itemPaths.length === 0) {
+    return { mode: "none" };
+  }
+
+  return {
+    mode: "selected",
+    itemPaths
+  };
+}
+
+function getSelectedCompanyContentItemPaths(
+  items: CompanyContentItem[],
+  selection: CompanyImportPartSelection
+): string[] {
+  if (selection.mode === "all") {
+    return items.map((item) => item.path);
+  }
+
+  if (selection.mode === "selected") {
+    return selection.itemPaths?.filter((itemPath) => items.some((item) => item.path === itemPath)) ?? [];
+  }
+
+  return [];
+}
+
+function isCompanyContentItemSelected(
+  selection: CompanyImportPartSelection,
+  itemPath: string
+): boolean {
+  if (selection.mode === "all") {
+    return true;
+  }
+
+  if (selection.mode !== "selected") {
+    return false;
+  }
+
+  return selection.itemPaths?.includes(itemPath) ?? false;
+}
+
+function removeCompanyContentItemFromSelection(
+  contents: CompanyContents,
+  selection: CompanyImportSelection,
+  kind: CompanyContentKey,
+  itemPath: string
+): CompanyImportSelection {
+  const nextSelection = {
+    ...selection
+  };
+  const nextItemPaths = getSelectedCompanyContentItemPaths(contents[kind], selection[kind]).filter(
+    (currentPath) => currentPath !== itemPath
+  );
+
+  nextSelection[kind] = normalizeSelectionPartForCompanyItems(contents[kind], {
+    mode: "selected",
+    itemPaths: nextItemPaths
+  });
+
+  return nextSelection;
+}
+
+export function expandCompanyImportSelectionDependencies(
+  contents: CompanyContents,
+  selection: CompanyImportSelection
+): CompanyImportSelection {
+  const itemsByPath = new Map<string, CompanyContentSectionItem>();
+  const selectedPathsByKind = new Map<CompanyContentKey, Set<string>>();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    const items = contents[key];
+    selectedPathsByKind.set(
+      key,
+      new Set(getSelectedCompanyContentItemPaths(items, selection[key]))
+    );
+
+    for (const item of items) {
+      itemsByPath.set(item.path, {
+        kind: key,
+        item
+      });
+    }
+  }
+
+  const pendingPaths = [...new Set(
+    COMPANY_CONTENT_KEYS.flatMap((key) => [...(selectedPathsByKind.get(key) ?? new Set<string>())])
+  )];
+  const visitedPaths = new Set<string>();
+
+  while (pendingPaths.length > 0) {
+    const currentPath = pendingPaths.pop();
+    if (!currentPath || visitedPaths.has(currentPath)) {
+      continue;
+    }
+
+    visitedPaths.add(currentPath);
+    const currentItem = itemsByPath.get(currentPath);
+    if (!currentItem) {
+      continue;
+    }
+
+    for (const dependencyPath of currentItem.item.dependencyPaths ?? []) {
+      const dependency = itemsByPath.get(dependencyPath);
+      if (!dependency) {
+        continue;
+      }
+
+      const selectedDependencyPaths = selectedPathsByKind.get(dependency.kind);
+      if (selectedDependencyPaths?.has(dependencyPath)) {
+        continue;
+      }
+
+      selectedDependencyPaths?.add(dependencyPath);
+      pendingPaths.push(dependencyPath);
+    }
+  }
+
+  const nextSelection = createDefaultCompanyImportSelection();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    const selectedItemPaths = [...(selectedPathsByKind.get(key) ?? new Set<string>())].sort(
+      (left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })
+    );
+
+    if (selectedItemPaths.length === 0) {
+      nextSelection[key] = { mode: "none" };
+      continue;
+    }
+
+    if (selection[key].mode === "all" && selectedItemPaths.length === contents[key].length) {
+      nextSelection[key] = { mode: "all" };
+      continue;
+    }
+
+    nextSelection[key] = {
+      mode: "selected",
+      itemPaths: selectedItemPaths
+    };
+  }
+
+  return nextSelection;
+}
+
+export function resolveCompanyImportSelection(
+  contents: CompanyContents,
+  value: unknown
+): CompanyImportSelection {
+  const normalizedSelection = normalizeCompanyImportSelection(value);
+  const nextSelection = createDefaultCompanyImportSelection();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    nextSelection[key] = normalizeSelectionPartForCompanyItems(contents[key], normalizedSelection[key]);
+  }
+
+  return expandCompanyImportSelectionDependencies(contents, nextSelection);
+}
+
+export const COMPANY_CONTENT_SECTION_DEFINITIONS: readonly CompanyContentSectionDefinition[] = [
+  {
+    id: "agents",
+    label: "Agents",
+    singular: "agent",
+    plural: "agents",
+    contentKeys: ["agents"]
+  },
+  {
+    id: "projects",
+    label: "Projects",
+    singular: "project",
+    plural: "projects",
+    contentKeys: ["projects"]
+  },
+  {
+    id: "tasks",
+    label: "Tasks",
+    singular: "task",
+    plural: "tasks",
+    contentKeys: ["tasks", "issues"]
+  },
+  {
+    id: "skills",
+    label: "Skills",
+    singular: "skill",
+    plural: "skills",
+    contentKeys: ["skills"]
+  }
+] as const;
+
+export function getCompanyContentSectionForKey(
+  key: CompanyContentKey
+): CompanyContentSectionDefinition {
+  return (
+    COMPANY_CONTENT_SECTION_DEFINITIONS.find((section) => section.contentKeys.includes(key))
+    ?? COMPANY_CONTENT_SECTION_DEFINITIONS[0]
+  );
+}
+
+export function getCompanyContentSectionItemCount(
+  contents: CompanyContents,
+  section: CompanyContentSectionDefinition
+): number {
+  return section.contentKeys.reduce((count, key) => count + contents[key].length, 0);
+}
+
+export function listCompanyContentSectionItems(
+  contents: CompanyContents,
+  section: CompanyContentSectionDefinition
+): CompanyContentSectionItem[] {
+  return section.contentKeys
+    .flatMap((key) =>
+      contents[key].map((item) => ({
+        kind: key,
+        item
+      }))
+    )
+    .sort(
+      (left, right) =>
+        left.item.path.localeCompare(right.item.path, undefined, { sensitivity: "base" })
+        || left.item.name.localeCompare(right.item.name, undefined, { sensitivity: "base" })
+    );
+}
+
+export function getVisibleCompanyContentSections(
+  contents: CompanyContents
+): CompanyContentSectionDefinition[] {
+  return COMPANY_CONTENT_SECTION_DEFINITIONS.filter(
+    (section) => getCompanyContentSectionItemCount(contents, section) > 0
+  );
+}
+
+export function getCompanyContentItemRequirementSources(
+  contents: CompanyContents,
+  selection: CompanyImportSelection,
+  itemPath: string
+): CompanyContentSectionItem[] {
+  return COMPANY_CONTENT_KEYS
+    .flatMap((key) =>
+      contents[key].flatMap((item) => {
+        if (!isCompanyContentItemSelected(selection[key], item.path)) {
+          return [];
+        }
+
+        return item.dependencyPaths?.includes(itemPath)
+          ? [
+              {
+                kind: key,
+                item
+              }
+            ]
+          : [];
+      })
+    )
+    .sort(
+      (left, right) =>
+        left.item.name.localeCompare(right.item.name, undefined, { sensitivity: "base" })
+        || left.item.path.localeCompare(right.item.path, undefined, { sensitivity: "base" })
+    );
+}
+
+export function isCompanyContentItemRequiredBySelection(
+  contents: CompanyContents,
+  selection: CompanyImportSelection,
+  kind: CompanyContentKey,
+  itemPath: string
+): boolean {
+  if (!isCompanyContentItemSelected(selection[kind], itemPath)) {
+    return false;
+  }
+
+  const resolvedSelection = resolveCompanyImportSelection(
+    contents,
+    removeCompanyContentItemFromSelection(contents, selection, kind, itemPath)
+  );
+
+  return isCompanyContentItemSelected(resolvedSelection[kind], itemPath);
+}
+
 function addMillisecondsToIso(timestamp: string, deltaMs: number): string | null {
   const parsed = Date.parse(timestamp);
   if (!Number.isFinite(parsed)) {
@@ -497,10 +809,19 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
   const paperclipAgentIcon = asNonEmptyString(value.paperclipAgentIcon);
   const paperclipRoutineStatus = asNonEmptyString(value.paperclipRoutineStatus);
   const paperclipRoutineTriggerCount = asNonNegativeInteger(value.paperclipRoutineTriggerCount);
+  const dependencyPaths = [...new Set(
+    (Array.isArray(value.dependencyPaths) ? value.dependencyPaths : [])
+      .map((dependencyPath) =>
+        typeof dependencyPath === "string" ? normalizeCompanyContentPath(dependencyPath) : null
+      )
+      .filter((dependencyPath): dependencyPath is string => Boolean(dependencyPath))
+      .filter((dependencyPath) => dependencyPath !== path)
+  )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
 
   return {
     name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),
     path,
+    ...(dependencyPaths.length > 0 ? { dependencyPaths } : {}),
     ...(paperclipAgentIcon ? { paperclipAgentIcon } : {}),
     ...(value.recurring === true ? { recurring: true } : {}),
     ...(paperclipRoutineStatus ? { paperclipRoutineStatus } : {}),

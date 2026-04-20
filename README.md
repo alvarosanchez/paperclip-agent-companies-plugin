@@ -13,7 +13,9 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 - Automatic detection of `COMPANY.md` manifests with `schema: agentcompanies/v1`
 - A hosted Paperclip settings page with separate discovered-source and imported-company sections
 - Separate import actions for creating a new Paperclip company or importing into an existing non-synced company
-- Per-part and per-item import selection for agents, projects, tasks, issues, and skills, with everything selected by default
+- Per-part and per-item import selection for agents, projects, tasks, and skills, with everything selected by default
+- Agent-company `TASK.md` files and Paperclip `ISSUE.md` manifests are grouped together under **Tasks** in the hosted UI
+- Required project and agent dependencies are auto-included whenever selected tasks depend on them
 - Saved sync contracts per tracked imported company, plus a re-import flow for updating the selection later
 - Manual sync plus daily background auto-sync for tracked imported companies
 - Recurring `TASK.md` support: `recurring: true` tasks import as Paperclip routines, with `.paperclip.yaml` routine metadata preserved
@@ -53,9 +55,9 @@ paperclipai plugin install --local .
 1. Open **Installed Plugins** in Paperclip.
 2. Open **Agent Companies Plugin**.
 3. Add a repository source with `owner/repo`, a full repository URL, or a local checkout path.
-4. Review discovered companies and open **View contents** to inspect agents, projects, tasks, recurring tasks/routines, issues, and skills.
+4. Review discovered companies and open **View contents** to inspect agents, projects, tasks, recurring tasks/routines, Paperclip issue manifests, and skills.
 5. Click **Import as new company** to create a fresh Paperclip company, or open **Import into...** to pick one of the other non-synced Paperclip companies already in the instance.
-6. Leave the default full selection in place or toggle down to just the parts and items you want.
+6. Leave the default full selection in place or toggle down to just the parts and items you want. If a selected task depends on a project or agent, the plugin auto-includes those required dependencies.
 7. Importing into an existing non-synced company adopts that company for future syncs, including the company whose settings page you are currently viewing.
 8. Use **Re-import / Edit selection** from the tracked company card whenever you want to deliberately change the saved sync contract.
 9. If your Paperclip deployment requires authentication, open this plugin inside the imported company once and complete **Board access connection** in settings.
@@ -77,7 +79,7 @@ The plugin inventories structured content from these conventional locations when
 - `agents/`
 - `projects/`
 - `tasks/`
-- `issues/`
+- `issues/` (grouped under **Tasks** in the hosted UI because these are Paperclip-provider issue manifests)
 - `skills/`
 
 Recurring task packages are detected from `TASK.md` frontmatter with `recurring: true`. When a company also includes a Paperclip extension sidecar such as `.paperclip.yaml`, the catalog surfaces linked routine status and trigger counts for those recurring tasks.
@@ -94,6 +96,7 @@ During import, the plugin packages the selected company contents as an inline Pa
 - Imported companies default to daily auto-sync.
 - Manual sync is available whenever the source version changes or cannot be compared safely.
 - Each tracked import saves the selected subset of the source package as its long-term sync contract.
+- When selected tasks depend on specific projects or assignees, the saved sync contract automatically includes those required projects and agents.
 - Sync uses the saved selection contract plus the current collision strategy, with overwrite mode selected by default so the imported Paperclip company stays aligned with the source package.
 - Discovered source packages expose separate **Import as new company** and **Import into...** actions.
 - **Import into...** lists only existing Paperclip companies that are not already tracked synced imports.
