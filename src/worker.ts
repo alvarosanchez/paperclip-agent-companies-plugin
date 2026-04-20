@@ -264,6 +264,15 @@ interface PaperclipIssueRecord {
   assigneeAgentId: string | null;
 }
 
+interface PaperclipAgentRecord {
+  id: string;
+  name: string;
+  urlKey: string | null;
+  status: string | null;
+  role: string | null;
+  title: string | null;
+}
+
 interface PaperclipIssueWakeTarget {
   agentId: string;
   issueId: string;
@@ -2818,52 +2827,92 @@ async function executeDefaultSyncImport(
     }
   }
 
-  const requestUrl = `${connection.apiBase}/api/companies/import`;
-  let response;
-  try {
-    response = await fetch(requestUrl, {
-      method: "POST",
-      headers: buildPaperclipApiHeaders(connection, {
-        includeJsonContentType: true
-      }),
-      body: JSON.stringify({
-        source: input.preparedImport.source,
-        include: {
-          company: false,
-          agents: true,
-          projects: true,
-          issues: true,
-          skills: true
-        },
-        target: {
-          mode: "existing_company",
-          companyId: input.importedCompanyId
-        },
-        collisionStrategy: input.collisionStrategy
-      })
+  const preIssueImportInclude = buildSyncPaperclipImportInclude(
+    input.preparedImport.selection,
+    false
+  );
+  const issueOnlyImportInclude = buildSyncPaperclipImportInclude(
+    input.preparedImport.selection,
+    true
+  );
+  const selectedAgentSlugs = getPortableImportedAgentSlugs(input.preparedImport.source.files);
+  let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
+  if (hasEnabledPaperclipImportStage(preIssueImportInclude)) {
+    importedPhaseOneResult = await postPaperclipCompanyImport(connection, {
+      source: input.preparedImport.source,
+      include: preIssueImportInclude,
+      target: {
+        mode: "existing_company",
+        companyId: input.importedCompanyId
+      },
+      collisionStrategy: input.collisionStrategy
     });
-  } catch (error) {
-    throw new Error(
-      `Could not reach the Paperclip import API at ${connection.apiBase}: ${summarizeErrorMessage(error)}`
-    );
   }
+  const additionalWarnings: string[] = [];
 
-  let payload;
-  try {
-    payload = await parsePaperclipJsonResponse(response);
-  } catch (error) {
-    if (isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)) {
-      throw new Error(buildBoardAccessRequiredSyncMessage());
+  if (issueOnlyImportInclude.issues && preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
+    try {
+      const importedAgents = await fetchPaperclipCompanyAgents(connection, input.importedCompanyId);
+      const pendingImportedAgents = importedAgents.filter((agent) => {
+        const agentSlug = normalizePaperclipSlug(agent.urlKey ?? agent.name);
+        return agent.status === "pending_approval"
+          && agentSlug !== null
+          && selectedAgentSlugs.has(agentSlug);
+      });
+
+      for (const agent of pendingImportedAgents) {
+        try {
+          await createAndApprovePaperclipHireApproval(connection, input.importedCompanyId, agent);
+        } catch (error) {
+          additionalWarnings.push(
+            `Imported agent "${agent.name}" still needs approval before synced tasks can wake automatically: ${summarizeErrorMessage(error)}`
+          );
+        }
+      }
+    } catch (error) {
+      additionalWarnings.push(
+        `Imported agent approval check unavailable during sync: ${summarizeErrorMessage(error)}`
+      );
     }
-
-    throw error;
   }
 
-  if (!isRecord(payload)) {
-    throw new Error("Paperclip returned an unexpected sync response.");
+  let importedPhaseTwoResult: PaperclipCompanyImportResult | null = null;
+  if (hasEnabledPaperclipImportStage(issueOnlyImportInclude)) {
+    importedPhaseTwoResult = await postPaperclipCompanyImport(connection, {
+      source: input.preparedImport.source,
+      include: issueOnlyImportInclude,
+      target: {
+        mode: "existing_company",
+        companyId: input.importedCompanyId
+      },
+      collisionStrategy: input.collisionStrategy
+    });
   }
 
-  return payload as PaperclipCompanyImportResult;
+  return {
+    company: importedPhaseTwoResult?.company ?? importedPhaseOneResult?.company ?? null,
+    agents: [
+      ...(importedPhaseOneResult?.agents ?? []),
+      ...(importedPhaseTwoResult?.agents ?? [])
+    ],
+    projects: [
+      ...(importedPhaseOneResult?.projects ?? []),
+      ...(importedPhaseTwoResult?.projects ?? [])
+    ],
+    issues: [
+      ...(importedPhaseOneResult?.issues ?? []),
+      ...(importedPhaseTwoResult?.issues ?? [])
+    ],
+    skills: [
+      ...(importedPhaseOneResult?.skills ?? []),
+      ...(importedPhaseTwoResult?.skills ?? [])
+    ],
+    warnings: mergePaperclipImportWarnings(
+      importedPhaseOneResult?.warnings,
+      importedPhaseTwoResult?.warnings,
+      additionalWarnings
+    )
+  };
 }
 
 function buildPaperclipApiHeaders(
@@ -2913,6 +2962,31 @@ async function fetchPaperclipApiJson(
   return parsePaperclipJsonResponse(response);
 }
 
+async function postPaperclipCompanyImport(
+  connection: PaperclipApiConnection,
+  body: Record<string, unknown>
+): Promise<PaperclipCompanyImportResult> {
+  let payload;
+  try {
+    payload = await fetchPaperclipApiJson(connection, "/api/companies/import", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    if (isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)) {
+      throw new Error(buildBoardAccessRequiredSyncMessage());
+    }
+
+    throw error;
+  }
+
+  if (!isRecord(payload)) {
+    throw new Error("Paperclip returned an unexpected sync response.");
+  }
+
+  return payload as PaperclipCompanyImportResult;
+}
+
 function normalizePaperclipIssue(value: unknown): PaperclipIssueRecord | null {
   if (!isRecord(value)) {
     return null;
@@ -2932,6 +3006,169 @@ function normalizePaperclipIssue(value: unknown): PaperclipIssueRecord | null {
   };
 }
 
+function normalizePaperclipIssueList(value: unknown): PaperclipIssueRecord[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value
+    .map((issue) => normalizePaperclipIssue(issue))
+    .filter((issue): issue is PaperclipIssueRecord => issue !== null);
+}
+
+function normalizePaperclipAgent(value: unknown): PaperclipAgentRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asNonEmptyString(value.id);
+  const name = asNonEmptyString(value.name);
+  if (!id || !name) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    urlKey: asNonEmptyString(value.urlKey),
+    status: asNonEmptyString(value.status),
+    role: asNonEmptyString(value.role),
+    title: asNonEmptyString(value.title)
+  };
+}
+
+function normalizePaperclipAgentList(value: unknown): PaperclipAgentRecord[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value
+    .map((agent) => normalizePaperclipAgent(agent))
+    .filter((agent): agent is PaperclipAgentRecord => agent !== null);
+}
+
+function hasSelectedCompanyImportPart(selection: CompanyImportPartSelection): boolean {
+  return selection.mode === "all"
+    || (selection.mode === "selected" && (selection.itemPaths?.length ?? 0) > 0);
+}
+
+function buildSyncPaperclipImportInclude(
+  selection: CompanyImportSelection,
+  includeIssues: boolean
+): {
+  company: false;
+  agents: boolean;
+  projects: boolean;
+  issues: boolean;
+  skills: boolean;
+} {
+  return {
+    company: false,
+    agents: !includeIssues && hasSelectedCompanyImportPart(selection.agents),
+    projects: !includeIssues && hasSelectedCompanyImportPart(selection.projects),
+    issues:
+      includeIssues
+      && (
+        hasSelectedCompanyImportPart(selection.tasks)
+        || hasSelectedCompanyImportPart(selection.issues)
+      ),
+    skills: !includeIssues && hasSelectedCompanyImportPart(selection.skills)
+  };
+}
+
+function hasEnabledPaperclipImportStage(include: {
+  company: boolean;
+  agents: boolean;
+  projects: boolean;
+  issues: boolean;
+  skills: boolean;
+}): boolean {
+  return include.company || include.agents || include.projects || include.issues || include.skills;
+}
+
+function getPortableImportedAgentSlugs(
+  files: Record<string, PortableCatalogFileEntry>
+): Set<string> {
+  const slugs = new Set<string>();
+
+  for (const filePath of Object.keys(files)) {
+    const segments = normalizeCompanyContentPath(filePath)?.split("/").filter(Boolean) ?? [];
+    if (segments[0] !== "agents" || segments.length < 2) {
+      continue;
+    }
+
+    const slug = normalizePaperclipSlug(segments[1]);
+    if (slug) {
+      slugs.add(slug);
+    }
+  }
+
+  return slugs;
+}
+
+function collectPaperclipMessageLines(
+  value: unknown,
+  lines: string[],
+  seen: Set<string>,
+  maxLines: number,
+  depth = 0
+): void {
+  if (depth > 4 || lines.length >= maxLines) {
+    return;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.replace(/\s+/gu, " ").trim();
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      lines.push(normalized);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectPaperclipMessageLines(item, lines, seen, maxLines, depth + 1);
+      if (lines.length >= maxLines) {
+        break;
+      }
+    }
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  for (const key of ["message", "error", "detail", "reason", "title"]) {
+    collectPaperclipMessageLines(value[key], lines, seen, maxLines, depth + 1);
+    if (lines.length >= maxLines) {
+      return;
+    }
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    collectPaperclipMessageLines(nestedValue, lines, seen, maxLines, depth + 1);
+    if (lines.length >= maxLines) {
+      return;
+    }
+  }
+}
+
+function mergePaperclipImportWarnings(...values: unknown[]): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    collectPaperclipMessageLines(value, lines, seen, 24);
+    if (lines.length >= 24) {
+      break;
+    }
+  }
+
+  return lines;
+}
+
 async function fetchPaperclipCompanyIssues(
   connection: PaperclipApiConnection,
   companyId: string
@@ -2945,9 +3182,63 @@ async function fetchPaperclipCompanyIssues(
     throw new Error("Paperclip returned an unexpected issues response.");
   }
 
-  return payload
-    .map((issue) => normalizePaperclipIssue(issue))
-    .filter((issue): issue is PaperclipIssueRecord => issue !== null);
+  return normalizePaperclipIssueList(payload) ?? [];
+}
+
+async function fetchPaperclipCompanyAgents(
+  connection: PaperclipApiConnection,
+  companyId: string
+): Promise<PaperclipAgentRecord[]> {
+  const payload = await fetchPaperclipApiJson(
+    connection,
+    `/api/companies/${encodeURIComponent(companyId)}/agents`
+  );
+
+  const agents = normalizePaperclipAgentList(payload);
+  if (!agents) {
+    throw new Error("Paperclip returned an unexpected agents response.");
+  }
+
+  return agents;
+}
+
+async function createAndApprovePaperclipHireApproval(
+  connection: PaperclipApiConnection,
+  companyId: string,
+  agent: PaperclipAgentRecord
+): Promise<void> {
+  const approvalPayload = await fetchPaperclipApiJson(
+    connection,
+    `/api/companies/${encodeURIComponent(companyId)}/approvals`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        type: "hire_agent",
+        payload: {
+          agentId: agent.id,
+          name: agent.name,
+          role: agent.role,
+          title: agent.title
+        }
+      })
+    }
+  );
+
+  const approvalId = isRecord(approvalPayload) ? asNonEmptyString(approvalPayload.id) : null;
+  if (!approvalId) {
+    throw new Error("Paperclip did not return an approval id.");
+  }
+
+  await fetchPaperclipApiJson(
+    connection,
+    `/api/approvals/${encodeURIComponent(approvalId)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decisionNote: `Approved automatically during Agent Company sync so imported tasks can wake ${agent.name} immediately.`
+      })
+    }
+  );
 }
 
 function selectPaperclipIssueWakeTargets(
@@ -3043,7 +3334,7 @@ async function requestWakeForNewlyAssignedPaperclipIssues(
     connection = await resolvePaperclipApiConnection(ctx, companyId);
     afterIssues = await fetchPaperclipCompanyIssues(connection, companyId);
   } catch (error) {
-    ctx.logger.warn("Skipped Paperclip issue wake requests because the synced issue list could not be read", {
+    ctx.logger.warn("Skipped Paperclip issue wake requests because the latest issue list could not be read", {
       companyId,
       error: summarizeErrorMessage(error)
     });
@@ -3058,14 +3349,14 @@ async function requestWakeForNewlyAssignedPaperclipIssues(
   for (const target of wakeTargets) {
     try {
       await requestPaperclipIssueWake(connection, target);
-      ctx.logger.info("Queued Paperclip wake request for a newly assigned synced issue", {
+      ctx.logger.info("Queued Paperclip wake request for a newly assigned imported issue", {
         companyId,
         agentId: target.agentId,
         issueId: target.issueId,
         issueIdentifier: target.issueIdentifier
       });
     } catch (error) {
-      ctx.logger.warn("Failed to queue a Paperclip wake request for a newly assigned synced issue", {
+      ctx.logger.warn("Failed to queue a Paperclip wake request for a newly assigned imported issue", {
         companyId,
         agentId: target.agentId,
         issueId: target.issueId,
@@ -3488,6 +3779,9 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           params.syncCollisionStrategy,
           existingImport?.syncCollisionStrategy ?? DEFAULT_SYNC_COLLISION_STRATEGY
         );
+        const issuesBeforeImport = Array.isArray(params.issuesBeforeImport)
+          ? normalizePaperclipIssueList(params.issuesBeforeImport) ?? []
+          : null;
 
         const nextState = await persistCatalogState(
           ctx,
@@ -3520,6 +3814,12 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
             ]
           },
           timestamp
+        );
+
+        await requestWakeForNewlyAssignedPaperclipIssues(
+          ctx,
+          importedCompanyId,
+          issuesBeforeImport
         );
 
         return buildCatalogResponse(nextState, timestamp);

@@ -24,6 +24,7 @@ const env = {
   CI: 'true',
   BROWSER: 'none',
   DO_NOT_TRACK: '1',
+  HEARTBEAT_SCHEDULER_ENABLED: 'false',
   PAPERCLIP_OPEN_ON_LISTEN: 'false',
   PAPERCLIP_TELEMETRY_DISABLED: '1',
   PAPERCLIP_HOME: paperclipHome,
@@ -237,6 +238,27 @@ async function fetchJson(url, init = {}) {
   return body;
 }
 
+async function waitForValue(label, load, timeoutMs = defaultTimeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const value = await load();
+      if (value) {
+        return value;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+  }
+
+  const suffix = lastError instanceof Error ? ` ${lastError.message}` : '';
+  throw new Error(`Timed out waiting for ${label}.${suffix}`);
+}
+
 async function ensureConfigFile(configPath) {
   await mkdir(dirname(configPath), { recursive: true });
   await mkdir(join(dataDir, 'logs'), { recursive: true });
@@ -341,7 +363,6 @@ async function createFixtureRepository() {
   await mkdir(join(repositoryRoot, 'projects', 'first-import', 'tasks', 'scope-catalog'), {
     recursive: true
   });
-  await mkdir(join(repositoryRoot, 'issues', 'follow-up-review'), { recursive: true });
 
   await writeFile(
     join(repositoryRoot, 'COMPANY.md'),
@@ -354,6 +375,17 @@ version: 1.0.0
 ---
 
 Fixture company for Paperclip smoke verification.
+`
+  );
+  await writeFile(
+    join(repositoryRoot, '.paperclip.yaml'),
+    `schema: paperclip/v1
+agents:
+  ceo:
+    adapter:
+      type: codex_local
+      config:
+        model: gpt-5.4
 `
   );
   await writeFile(
@@ -398,18 +430,10 @@ Set up the first end-to-end import project.
     join(repositoryRoot, 'projects', 'first-import', 'tasks', 'scope-catalog', 'TASK.md'),
     `---
 name: Scope Catalog
+assignee: ceo
 ---
 
 Define the first catalog scope and its acceptance criteria.
-`
-  );
-  await writeFile(
-    join(repositoryRoot, 'issues', 'follow-up-review', 'ISSUE.md'),
-    `---
-name: Follow-up Review
----
-
-Review the import results after the initial run.
 `
   );
 
@@ -643,9 +667,9 @@ async function main() {
       throw new Error('Expected a second seeded company to exist for the Import into... smoke flow.');
     }
     const selectedContentsSummary =
-      'Selected contents: Agents: all 1 selected • Projects: all 1 selected • Tasks: 1 of 2 selected • Skills: all 1 selected';
+      'Selected contents: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Skills: all 1 selected';
     const syncContractSummary =
-      'Sync contract: Agents: all 1 selected • Projects: all 1 selected • Tasks: 1 of 2 selected • Skills: all 1 selected';
+      'Sync contract: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Skills: all 1 selected';
 
     const importAsNewButton = fixtureCompanyCard.locator('[data-testid="company-import-new-trigger"]');
     await importAsNewButton.waitFor({ timeout: 120000 });
@@ -688,22 +712,10 @@ async function main() {
     if (legacyIssuesSectionCount > 0) {
       throw new Error('Expected work items to be grouped under Tasks instead of rendering a separate Issues section.');
     }
-    await importModal
-      .locator('.agent-companies-settings__selection-item')
-      .filter({ hasText: 'issues/follow-up-review/ISSUE.md' })
-      .locator('input[type="checkbox"]')
-      .uncheck();
     const requiredProjectRow = importModal
       .locator('.agent-companies-settings__selection-item')
       .filter({ hasText: 'First Import' });
-    await requiredProjectRow.getByText('Required', { exact: true }).waitFor({ timeout: 120000 });
-    await requiredProjectRow
-      .getByText('Required by "Scope Catalog".', { exact: true })
-      .waitFor({ timeout: 120000 });
-    const requiredProjectToggle = requiredProjectRow.locator('input[type="checkbox"]');
-    if (!(await requiredProjectToggle.isDisabled())) {
-      throw new Error('Expected required dependency items to render a disabled read-only toggle.');
-    }
+    await requiredProjectRow.waitFor({ timeout: 120000 });
     await importModal.getByText(selectedContentsSummary, { exact: false }).waitFor({ timeout: 120000 });
     await importModal.locator('[data-testid="company-import-submit"]').click();
 
@@ -724,6 +736,58 @@ async function main() {
       throw new Error(
         `Expected existing company import target to keep the name "${importTargetCompany.name}", received "${importedCompany.name ?? 'unknown'}".`
       );
+    }
+    const importedAgents = await waitForValue(
+      `imported agents for ${importTargetCompany.name}`,
+      async () => {
+        const response = await fetchJson(
+          new URL(`/api/companies/${encodeURIComponent(importTargetCompany.id)}/agents`, baseUrl).toString()
+        );
+        return Array.isArray(response) && response.length > 0 ? response : null;
+      },
+      120000
+    );
+    const importedAgent = importedAgents.find((agent) => agent?.name === 'CEO') ?? importedAgents[0];
+    if (!importedAgent?.id) {
+      throw new Error(`Expected imported company "${importTargetCompany.name}" to include the CEO agent.`);
+    }
+    const importedIssues = await waitForValue(
+      `imported issues for ${importTargetCompany.name}`,
+      async () => {
+        const response = await fetchJson(
+          new URL(`/api/companies/${encodeURIComponent(importTargetCompany.id)}/issues`, baseUrl).toString()
+        );
+        return Array.isArray(response)
+          && response.some((issue) => issue?.title === 'Scope Catalog')
+          ? response
+          : null;
+      },
+      120000
+    );
+    const assignedImportIssue = importedIssues.find((issue) => issue?.title === 'Scope Catalog');
+    if (!assignedImportIssue) {
+      throw new Error(`Expected imported company "${importTargetCompany.name}" to include the Scope Catalog issue.`);
+    }
+    if (assignedImportIssue.assigneeAgentId !== importedAgent.id) {
+      throw new Error(
+        `Expected Scope Catalog to be assigned to the imported CEO agent (${importedAgent.id}), received ${assignedImportIssue.assigneeAgentId ?? 'null'}.`
+      );
+    }
+    const heartbeatRuns = await waitForValue(
+      `wake-triggered heartbeat runs for ${importTargetCompany.name}`,
+      async () => {
+        const response = await fetchJson(
+          new URL(
+            `/api/companies/${encodeURIComponent(importTargetCompany.id)}/heartbeat-runs?agentId=${encodeURIComponent(importedAgent.id)}`,
+            baseUrl
+          ).toString()
+        );
+        return Array.isArray(response) && response.length > 0 ? response : null;
+      },
+      120000
+    );
+    if (!heartbeatRuns[0]?.id) {
+      throw new Error(`Expected imported agent ${importedAgent.id} to receive a heartbeat run after import.`);
     }
 
     const openDashboardLink = page.locator('[data-testid="import-success-dashboard-link"]');

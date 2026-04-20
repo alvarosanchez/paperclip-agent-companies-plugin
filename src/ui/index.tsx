@@ -1525,6 +1525,27 @@ interface PaperclipCompanyRecord {
   issuePrefix?: string | null;
 }
 
+interface PaperclipIssueSnapshot {
+  id?: string;
+  identifier?: string | null;
+  title?: string | null;
+  status?: string | null;
+  assigneeAgentId?: string | null;
+}
+
+interface PaperclipAgentSnapshot {
+  id?: string;
+  name?: string | null;
+  urlKey?: string | null;
+  status?: string | null;
+  role?: string | null;
+  title?: string | null;
+}
+
+interface PaperclipApprovalRecord {
+  id?: string;
+}
+
 interface ImportTargetCompany {
   id: string;
   name: string;
@@ -1694,6 +1715,178 @@ function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
   }
 
   visit(value);
+  return lines;
+}
+
+function hasSelectedImportItems(selection: CompanyImportPartSelection): boolean {
+  if (selection.mode === "all") {
+    return true;
+  }
+
+  if (selection.mode === "selected") {
+    return (selection.itemPaths?.length ?? 0) > 0;
+  }
+
+  return false;
+}
+
+function normalizePaperclipSlug(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || null;
+}
+
+function getSelectedCompanyContentSlugs(
+  items: CompanyContentItem[],
+  selection: CompanyImportPartSelection
+): Set<string> {
+  const selectedSlugs = new Set<string>();
+
+  if (selection.mode === "all") {
+    for (const item of items) {
+      const slug = normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2));
+      if (slug) {
+        selectedSlugs.add(slug);
+      }
+    }
+
+    return selectedSlugs;
+  }
+
+  if (selection.mode === "selected") {
+    for (const itemPath of selection.itemPaths ?? []) {
+      const slug = normalizePaperclipSlug(itemPath.split("/").filter(Boolean).at(-2));
+      if (slug) {
+        selectedSlugs.add(slug);
+      }
+    }
+  }
+
+  return selectedSlugs;
+}
+
+function normalizePaperclipAgentSnapshots(value: unknown): Array<{
+  id: string;
+  name: string;
+  urlKey: string | null;
+  status: string | null;
+  role: string | null;
+  title: string | null;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalizedAgents: Array<{
+    id: string;
+    name: string;
+    urlKey: string | null;
+    status: string | null;
+    role: string | null;
+    title: string | null;
+  }> = [];
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const id =
+      typeof candidate.id === "string" && candidate.id.trim()
+        ? candidate.id.trim()
+        : null;
+    const name =
+      typeof candidate.name === "string" && candidate.name.trim()
+        ? candidate.name.trim()
+        : null;
+
+    if (!id || !name) {
+      continue;
+    }
+
+    normalizedAgents.push({
+      id,
+      name,
+      urlKey:
+        typeof candidate.urlKey === "string" && candidate.urlKey.trim()
+          ? candidate.urlKey.trim()
+          : null,
+      status:
+        typeof candidate.status === "string" && candidate.status.trim()
+          ? candidate.status.trim()
+          : null,
+      role:
+        typeof candidate.role === "string" && candidate.role.trim()
+          ? candidate.role.trim()
+          : null,
+      title:
+        typeof candidate.title === "string" && candidate.title.trim()
+          ? candidate.title.trim()
+          : null
+    });
+  }
+
+  return normalizedAgents;
+}
+
+function buildPaperclipImportInclude(
+  selection: CompanyImportSelection,
+  targetMode: ImportTargetMode,
+  includeIssues: boolean
+): {
+  company: boolean;
+  agents: boolean;
+  projects: boolean;
+  issues: boolean;
+  skills: boolean;
+} {
+  return {
+    company: targetMode === "new_company" && !includeIssues,
+    agents: !includeIssues && hasSelectedImportItems(selection.agents),
+    projects: !includeIssues && hasSelectedImportItems(selection.projects),
+    issues:
+      includeIssues
+      && (
+        hasSelectedImportItems(selection.tasks)
+        || hasSelectedImportItems(selection.issues)
+      ),
+    skills: !includeIssues && hasSelectedImportItems(selection.skills)
+  };
+}
+
+function hasEnabledPaperclipImportStage(include: {
+  company: boolean;
+  agents: boolean;
+  projects: boolean;
+  issues: boolean;
+  skills: boolean;
+}): boolean {
+  return include.company || include.agents || include.projects || include.issues || include.skills;
+}
+
+function mergePaperclipImportWarnings(...values: unknown[]): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    for (const line of getStructuredMessageLines(value, 8)) {
+      if (seen.has(line)) {
+        continue;
+      }
+
+      seen.add(line);
+      lines.push(line);
+    }
+  }
+
   return lines;
 }
 
@@ -4162,6 +4355,36 @@ export function AgentCompaniesSettingsPage({
         companyId: importCompany.id,
         selection: importDialog.selection
       }) as CatalogPreparedCompanyImport;
+      const postImportDetails: string[] = [];
+      const selectedAgentSlugs = getSelectedCompanyContentSlugs(
+        importCompany.contents.agents,
+        preparedImport.selection.agents
+      );
+      const preIssueImportInclude = buildPaperclipImportInclude(
+        preparedImport.selection,
+        importDialog.targetMode,
+        false
+      );
+      const issueOnlyImportInclude = buildPaperclipImportInclude(
+        preparedImport.selection,
+        importDialog.targetMode,
+        true
+      );
+      let issuesBeforeImport: PaperclipIssueSnapshot[] | null =
+        importDialog.targetMode === "new_company" ? [] : null;
+
+      if (importDialog.targetMode !== "new_company" && importDialog.targetCompanyId) {
+        try {
+          issuesBeforeImport = await fetchHostJson<PaperclipIssueSnapshot[]>(
+            `/api/companies/${encodeURIComponent(importDialog.targetCompanyId)}/issues`
+          );
+        } catch (snapshotError) {
+          issuesBeforeImport = null;
+          postImportDetails.push(
+            `Assigned issue wake snapshot unavailable before import: ${getErrorMessage(snapshotError)}`
+          );
+        }
+      }
 
       setImportState({
         kind: "importing",
@@ -4179,38 +4402,130 @@ export function AgentCompaniesSettingsPage({
               companyId: importDialog.targetCompanyId
             };
 
-      const includeCompanyMetadata = importDialog.targetMode === "new_company";
-      const importedCompany = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
-        method: "POST",
-        body: JSON.stringify({
-          source: preparedImport.source,
-          include: {
-            company: includeCompanyMetadata,
-            agents: true,
-            projects: true,
-            issues: true,
-            skills: true
-          },
-          target,
-          collisionStrategy: importDialog.collisionStrategy
-        })
-      });
+      let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
+      if (hasEnabledPaperclipImportStage(preIssueImportInclude)) {
+        importedPhaseOneResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
+          method: "POST",
+          body: JSON.stringify({
+            source: preparedImport.source,
+            include: preIssueImportInclude,
+            target,
+            collisionStrategy: importDialog.collisionStrategy
+          })
+        });
+      }
       const importedCompanyName =
         importDialog.targetMode === "new_company"
-          ? importedCompany.company?.name?.trim() || nextCompanyName || "selected company"
+          ? importedPhaseOneResult?.company?.name?.trim() || nextCompanyName || "selected company"
           : importDialog.targetCompanyName
             || importTargetCompany?.importedCompany.name
-            || importedCompany.company?.name?.trim()
+            || importedPhaseOneResult?.company?.name?.trim()
             || "selected company";
       const importedCompanyId =
-        importedCompany.company?.id?.trim()
+        importedPhaseOneResult?.company?.id?.trim()
         || importDialog.targetCompanyId
         || null;
-      const postImportDetails: string[] = [];
       let importedCompanyIssuePrefix: string | null =
         importTargetCompany?.importedCompany.issuePrefix ?? null;
 
       if (importedCompanyId) {
+        if (issueOnlyImportInclude.issues && preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
+          try {
+            const importedAgents = normalizePaperclipAgentSnapshots(
+              await fetchHostJson<PaperclipAgentSnapshot[]>(
+                `/api/companies/${encodeURIComponent(importedCompanyId)}/agents`
+              )
+            );
+            const pendingImportedAgents = importedAgents.filter((agent) => {
+              const agentSlug = normalizePaperclipSlug(agent.urlKey ?? agent.name);
+              return agent.status === "pending_approval"
+                && agentSlug !== null
+                && selectedAgentSlugs.has(agentSlug);
+            });
+
+            for (const agent of pendingImportedAgents) {
+              try {
+                const approval = await fetchHostJson<PaperclipApprovalRecord>(
+                  `/api/companies/${encodeURIComponent(importedCompanyId)}/approvals`,
+                  {
+                    method: "POST",
+                    body: JSON.stringify({
+                      type: "hire_agent",
+                      payload: {
+                        agentId: agent.id,
+                        name: agent.name,
+                        role: agent.role,
+                        title: agent.title
+                      }
+                    })
+                  }
+                );
+
+                if (!approval.id) {
+                  throw new Error("Paperclip did not return an approval id.");
+                }
+
+                await fetchHostJson(
+                  `/api/approvals/${encodeURIComponent(approval.id)}/approve`,
+                  {
+                    method: "POST",
+                    body: JSON.stringify({
+                      decisionNote: `Approved automatically after importing "${agent.name}" so assigned tasks can wake the agent immediately.`
+                    })
+                  }
+                );
+              } catch (approvalError) {
+                postImportDetails.push(
+                  `Imported agent "${agent.name}" still needs approval before assigned tasks can wake automatically: ${getErrorMessage(approvalError)}`
+                );
+              }
+            }
+          } catch (agentLookupError) {
+            postImportDetails.push(
+              `Imported agent approval check unavailable: ${getErrorMessage(agentLookupError)}`
+            );
+          }
+        }
+
+        let importedPhaseTwoResult: PaperclipCompanyImportResult | null = null;
+        if (hasEnabledPaperclipImportStage(issueOnlyImportInclude)) {
+          importedPhaseTwoResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
+            method: "POST",
+            body: JSON.stringify({
+              source: preparedImport.source,
+              include: issueOnlyImportInclude,
+              target: {
+                mode: "existing_company",
+                companyId: importedCompanyId
+              },
+              collisionStrategy: importDialog.collisionStrategy
+            })
+          });
+        }
+        const importedCompany: PaperclipCompanyImportResult = {
+          company: importedPhaseTwoResult?.company ?? importedPhaseOneResult?.company ?? null,
+          agents: [
+            ...(importedPhaseOneResult?.agents ?? []),
+            ...(importedPhaseTwoResult?.agents ?? [])
+          ],
+          projects: [
+            ...(importedPhaseOneResult?.projects ?? []),
+            ...(importedPhaseTwoResult?.projects ?? [])
+          ],
+          issues: [
+            ...(importedPhaseOneResult?.issues ?? []),
+            ...(importedPhaseTwoResult?.issues ?? [])
+          ],
+          skills: [
+            ...(importedPhaseOneResult?.skills ?? []),
+            ...(importedPhaseTwoResult?.skills ?? [])
+          ],
+          warnings: mergePaperclipImportWarnings(
+            importedPhaseOneResult?.warnings,
+            importedPhaseTwoResult?.warnings
+          )
+        };
+
         try {
           const importedCompanyRecord = await fetchHostJson<PaperclipCompanyRecord>(
             `/api/companies/${encodeURIComponent(importedCompanyId)}`
@@ -4229,7 +4544,8 @@ export function AgentCompaniesSettingsPage({
             importedCompanyName,
             importedCompanyIssuePrefix,
             selection: preparedImport.selection,
-            syncCollisionStrategy: importDialog.collisionStrategy
+            syncCollisionStrategy: importDialog.collisionStrategy,
+            issuesBeforeImport
           });
           refresh();
           void loadPaperclipCompanies();
@@ -4238,68 +4554,68 @@ export function AgentCompaniesSettingsPage({
             `Import tracking could not be saved: ${getErrorMessage(recordError)}`
           );
         }
+        const warningDetails = getStructuredMessageLines(importedCompany.warnings, 3);
+        const warningCount = Array.isArray(importedCompany.warnings)
+          ? importedCompany.warnings.length
+          : warningDetails.length;
+        const importDetails = [
+          `Selected contents: ${buildCompanyImportSelectionSummary(preparedImport.selection, importCompany.contents)}`,
+          getRecurringTaskImportHint(importCompany.contents),
+          "Auto-sync: enabled daily by default after import.",
+          importDialog.collisionStrategy === "replace"
+            ? "Sync mode: overwrite existing content."
+            : `Sync mode: ${importDialog.collisionStrategy}.`,
+          importDialog.targetMode === "existing_company"
+            ? `Existing company adoption: ${importDialog.targetCompanyName} is now tracked for future sync.`
+            : importDialog.targetMode === "existing_import"
+              ? "Tracked import contract updated for future sync."
+              : null,
+          (() => {
+            const companyAction = normalizeImportAction(importedCompany.company?.action);
+            return companyAction ? `Company record: ${companyAction}` : null;
+          })(),
+          formatImportResultSummary("Agents", importedCompany.agents),
+          formatImportResultSummary("Projects", importedCompany.projects),
+          formatImportResultSummary("Paperclip issues", importedCompany.issues),
+          formatImportResultSummary("Skills", importedCompany.skills),
+          warningCount > 0
+            ? `Warnings: ${warningCount} returned during import.`
+            : null,
+          ...warningDetails.map((detail) => `Warning detail: ${detail}`),
+          ...postImportDetails
+        ].filter((detail): detail is string => Boolean(detail));
+
+        setImportDialog(null);
+        setImportError(null);
+        setNotice({
+          tone: "success",
+          title: importDialog.targetMode === "existing_import" ? "Company re-imported" : "Company imported",
+          text:
+            warningCount > 0
+              ? importDialog.targetMode === "existing_import"
+                ? `Re-imported "${importCompany.name}" into "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
+                : importDialog.targetMode === "existing_company"
+                  ? `Imported "${importCompany.name}" into "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
+                  : `Imported "${importCompany.name}" as "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
+              : importDialog.targetMode === "existing_import"
+                ? `Re-imported "${importCompany.name}" into "${importedCompanyName}".`
+                : importDialog.targetMode === "existing_company"
+                  ? `Imported "${importCompany.name}" into "${importedCompanyName}".`
+                  : `Imported "${importCompany.name}" as "${importedCompanyName}".`,
+          details: importDetails,
+          action: importedCompanyIssuePrefix
+            ? {
+                href: `/${encodeURIComponent(importedCompanyIssuePrefix)}/dashboard`,
+                label: "Open dashboard"
+              }
+            : undefined
+        });
       } else {
         postImportDetails.push(
           "Import tracking could not be saved because Paperclip did not return a company id."
         );
+        throw new Error(postImportDetails[postImportDetails.length - 1] ?? "Paperclip did not return a company id.");
       }
-
-      const warningDetails = getStructuredMessageLines(importedCompany.warnings, 3);
-      const warningCount = Array.isArray(importedCompany.warnings)
-        ? importedCompany.warnings.length
-        : warningDetails.length;
-      const importDetails = [
-        `Selected contents: ${buildCompanyImportSelectionSummary(preparedImport.selection, importCompany.contents)}`,
-        getRecurringTaskImportHint(importCompany.contents),
-        "Auto-sync: enabled daily by default after import.",
-        importDialog.collisionStrategy === "replace"
-          ? "Sync mode: overwrite existing content."
-          : `Sync mode: ${importDialog.collisionStrategy}.`,
-        importDialog.targetMode === "existing_company"
-          ? `Existing company adoption: ${importDialog.targetCompanyName} is now tracked for future sync.`
-          : importDialog.targetMode === "existing_import"
-            ? "Tracked import contract updated for future sync."
-            : null,
-        (() => {
-          const companyAction = normalizeImportAction(importedCompany.company?.action);
-          return companyAction ? `Company record: ${companyAction}` : null;
-        })(),
-        formatImportResultSummary("Agents", importedCompany.agents),
-        formatImportResultSummary("Projects", importedCompany.projects),
-        formatImportResultSummary("Paperclip issues", importedCompany.issues),
-        formatImportResultSummary("Skills", importedCompany.skills),
-        warningCount > 0
-          ? `Warnings: ${warningCount} returned during import.`
-          : null,
-        ...warningDetails.map((detail) => `Warning detail: ${detail}`),
-        ...postImportDetails
-      ].filter((detail): detail is string => Boolean(detail));
-
-      setImportDialog(null);
-      setImportError(null);
-      setNotice({
-        tone: "success",
-        title: importDialog.targetMode === "existing_import" ? "Company re-imported" : "Company imported",
-        text:
-          warningCount > 0
-            ? importDialog.targetMode === "existing_import"
-              ? `Re-imported "${importCompany.name}" into "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
-              : importDialog.targetMode === "existing_company"
-                ? `Imported "${importCompany.name}" into "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
-                : `Imported "${importCompany.name}" as "${importedCompanyName}" with ${warningCount} warning${warningCount === 1 ? "" : "s"}.`
-            : importDialog.targetMode === "existing_import"
-              ? `Re-imported "${importCompany.name}" into "${importedCompanyName}".`
-              : importDialog.targetMode === "existing_company"
-                ? `Imported "${importCompany.name}" into "${importedCompanyName}".`
-                : `Imported "${importCompany.name}" as "${importedCompanyName}".`,
-        details: importDetails,
-        action: importedCompanyIssuePrefix
-          ? {
-              href: `/${encodeURIComponent(importedCompanyIssuePrefix)}/dashboard`,
-              label: "Open dashboard"
-            }
-          : undefined
-      });
     } catch (actionError) {
       setImportError(getErrorMessage(actionError));
     } finally {
