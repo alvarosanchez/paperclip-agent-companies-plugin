@@ -3066,7 +3066,12 @@ function buildSyncPaperclipImportInclude(
     company: false,
     agents: !includeIssues && hasSelectedCompanyImportPart(selection.agents),
     projects: !includeIssues && hasSelectedCompanyImportPart(selection.projects),
-    issues: includeIssues && hasSelectedCompanyImportPart(selection.tasks),
+    issues:
+      includeIssues
+      && (
+        hasSelectedCompanyImportPart(selection.tasks)
+        || hasSelectedCompanyImportPart(selection.issues)
+      ),
     skills: !includeIssues && hasSelectedCompanyImportPart(selection.skills)
   };
 }

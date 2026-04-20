@@ -1852,7 +1852,12 @@ function buildPaperclipImportInclude(
     company: targetMode === "new_company" && !includeIssues,
     agents: !includeIssues && hasSelectedImportItems(selection.agents),
     projects: !includeIssues && hasSelectedImportItems(selection.projects),
-    issues: includeIssues && hasSelectedImportItems(selection.tasks),
+    issues:
+      includeIssues
+      && (
+        hasSelectedImportItems(selection.tasks)
+        || hasSelectedImportItems(selection.issues)
+      ),
     skills: !includeIssues && hasSelectedImportItems(selection.skills)
   };
 }
