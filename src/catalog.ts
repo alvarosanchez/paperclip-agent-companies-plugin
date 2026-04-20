@@ -9,6 +9,7 @@ export const DEFAULT_SYNC_COLLISION_STRATEGY = "replace" as const;
 export const AUTO_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export type CompanyContentKey = (typeof COMPANY_CONTENT_KEYS)[number];
+export type CompanyImportSelectionMode = "all" | "selected" | "none";
 export type CatalogSyncCollisionStrategy = "rename" | "skip" | "replace";
 export type CatalogCompanySyncStatus = "idle" | "running" | "succeeded" | "failed";
 
@@ -17,6 +18,7 @@ export type RepositoryScanStatus = "idle" | "ready" | "error";
 export interface CompanyContentItem {
   name: string;
   path: string;
+  dependencyPaths?: string[];
   paperclipAgentIcon?: string | null;
   recurring?: boolean;
   paperclipRoutineStatus?: string | null;
@@ -29,6 +31,36 @@ export interface CompanyContents {
   tasks: CompanyContentItem[];
   issues: CompanyContentItem[];
   skills: CompanyContentItem[];
+}
+
+export type CompanyContentSectionId = "agents" | "projects" | "tasks" | "skills";
+
+export interface CompanyContentSectionDefinition {
+  id: CompanyContentSectionId;
+  label: string;
+  singular: string;
+  plural: string;
+  contentKeys: CompanyContentKey[];
+}
+
+export interface CompanyContentSectionItem {
+  kind: CompanyContentKey;
+  item: CompanyContentItem;
+}
+
+export type CompanyContentRequirementLookup = Map<string, CompanyContentSectionItem[]>;
+
+export interface CompanyImportPartSelection {
+  mode: CompanyImportSelectionMode;
+  itemPaths?: string[];
+}
+
+export interface CompanyImportSelection {
+  agents: CompanyImportPartSelection;
+  projects: CompanyImportPartSelection;
+  tasks: CompanyImportPartSelection;
+  issues: CompanyImportPartSelection;
+  skills: CompanyImportPartSelection;
 }
 
 export interface CatalogCompanyContentDetail {
@@ -56,6 +88,7 @@ export type PortableCatalogFileEntry =
 export interface CatalogPreparedCompanyImport {
   companyId: string;
   companyName: string;
+  selection: CompanyImportSelection;
   source: {
     type: "inline";
     files: Record<string, PortableCatalogFileEntry>;
@@ -95,6 +128,7 @@ export interface ImportedCatalogCompanyRecord {
   importedCompanyIssuePrefix: string | null;
   importedSourceVersion: string | null;
   importedAt: string | null;
+  selection: CompanyImportSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
   lastSyncStatus: CatalogCompanySyncStatus;
@@ -111,6 +145,7 @@ export interface CatalogCompanyImportStatus {
   importedSourceVersion: string | null;
   latestSourceVersion: string | null;
   importedAt: string | null;
+  selection: CompanyImportSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
   syncStatus: CatalogCompanySyncStatus;
@@ -228,6 +263,383 @@ function normalizeCatalogSyncCollisionStrategy(value: unknown): CatalogSyncColli
 
 function normalizeCatalogCompanySyncStatus(value: unknown): CatalogCompanySyncStatus {
   return value === "running" || value === "succeeded" || value === "failed" ? value : "idle";
+}
+
+export function createDefaultCompanyImportSelection(): CompanyImportSelection {
+  return {
+    agents: { mode: "all" },
+    projects: { mode: "all" },
+    tasks: { mode: "all" },
+    issues: { mode: "all" },
+    skills: { mode: "all" }
+  };
+}
+
+function normalizeCompanyImportPartSelection(value: unknown): CompanyImportPartSelection {
+  if (!isRecord(value)) {
+    return { mode: "all" };
+  }
+
+  const mode =
+    value.mode === "selected" || value.mode === "none"
+      ? value.mode
+      : "all";
+  const itemPaths = Array.isArray(value.itemPaths)
+    ? [...new Set(
+        value.itemPaths
+          .map((itemPath) =>
+            typeof itemPath === "string" ? normalizeCompanyContentPath(itemPath) : null
+          )
+          .filter((itemPath): itemPath is string => itemPath !== null)
+      )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+    : [];
+
+  if (mode === "selected") {
+    return itemPaths.length > 0
+      ? {
+          mode,
+          itemPaths
+        }
+      : { mode: "none" };
+  }
+
+  return {
+    mode
+  };
+}
+
+export function normalizeCompanyImportSelection(value: unknown): CompanyImportSelection {
+  if (!isRecord(value)) {
+    return createDefaultCompanyImportSelection();
+  }
+
+  const selection = createDefaultCompanyImportSelection();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    selection[key] = normalizeCompanyImportPartSelection(value[key]);
+  }
+
+  return selection;
+}
+
+export function isCompanyImportSelectionEmpty(selection: CompanyImportSelection): boolean {
+  return COMPANY_CONTENT_KEYS.every((key) => selection[key].mode === "none");
+}
+
+export function normalizeSelectionPartForCompanyItems(
+  items: CompanyContentItem[],
+  selection: CompanyImportPartSelection
+): CompanyImportPartSelection {
+  if (items.length === 0) {
+    return { mode: "none" };
+  }
+
+  if (selection.mode === "all") {
+    return { mode: "all" };
+  }
+
+  if (selection.mode === "none") {
+    return { mode: "none" };
+  }
+
+  const itemPaths = [...new Set(
+    selection.itemPaths?.filter((itemPath) => items.some((item) => item.path === itemPath)) ?? []
+  )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+
+  if (itemPaths.length === 0) {
+    return { mode: "none" };
+  }
+
+  return {
+    mode: "selected",
+    itemPaths
+  };
+}
+
+function getSelectedCompanyContentItemPaths(
+  items: CompanyContentItem[],
+  selection: CompanyImportPartSelection
+): string[] {
+  if (selection.mode === "all") {
+    return items.map((item) => item.path);
+  }
+
+  if (selection.mode === "selected") {
+    return selection.itemPaths?.filter((itemPath) => items.some((item) => item.path === itemPath)) ?? [];
+  }
+
+  return [];
+}
+
+function isCompanyContentItemSelected(
+  selection: CompanyImportPartSelection,
+  itemPath: string
+): boolean {
+  if (selection.mode === "all") {
+    return true;
+  }
+
+  if (selection.mode !== "selected") {
+    return false;
+  }
+
+  return selection.itemPaths?.includes(itemPath) ?? false;
+}
+
+export function expandCompanyImportSelectionDependencies(
+  contents: CompanyContents,
+  selection: CompanyImportSelection
+): CompanyImportSelection {
+  const itemsByPath = new Map<string, CompanyContentSectionItem>();
+  const selectedPathsByKind = new Map<CompanyContentKey, Set<string>>();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    const items = contents[key];
+    selectedPathsByKind.set(
+      key,
+      new Set(getSelectedCompanyContentItemPaths(items, selection[key]))
+    );
+
+    for (const item of items) {
+      itemsByPath.set(item.path, {
+        kind: key,
+        item
+      });
+    }
+  }
+
+  const pendingPaths = [...new Set(
+    COMPANY_CONTENT_KEYS.flatMap((key) => [...(selectedPathsByKind.get(key) ?? new Set<string>())])
+  )];
+  const visitedPaths = new Set<string>();
+
+  while (pendingPaths.length > 0) {
+    const currentPath = pendingPaths.pop();
+    if (!currentPath || visitedPaths.has(currentPath)) {
+      continue;
+    }
+
+    visitedPaths.add(currentPath);
+    const currentItem = itemsByPath.get(currentPath);
+    if (!currentItem) {
+      continue;
+    }
+
+    for (const dependencyPath of currentItem.item.dependencyPaths ?? []) {
+      const dependency = itemsByPath.get(dependencyPath);
+      if (!dependency) {
+        continue;
+      }
+
+      const selectedDependencyPaths = selectedPathsByKind.get(dependency.kind);
+      if (selectedDependencyPaths?.has(dependencyPath)) {
+        continue;
+      }
+
+      selectedDependencyPaths?.add(dependencyPath);
+      pendingPaths.push(dependencyPath);
+    }
+  }
+
+  const nextSelection = createDefaultCompanyImportSelection();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    const selectedItemPaths = [...(selectedPathsByKind.get(key) ?? new Set<string>())].sort(
+      (left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })
+    );
+
+    if (selectedItemPaths.length === 0) {
+      nextSelection[key] = { mode: "none" };
+      continue;
+    }
+
+    if (selection[key].mode === "all" && selectedItemPaths.length === contents[key].length) {
+      nextSelection[key] = { mode: "all" };
+      continue;
+    }
+
+    nextSelection[key] = {
+      mode: "selected",
+      itemPaths: selectedItemPaths
+    };
+  }
+
+  return nextSelection;
+}
+
+export function resolveCompanyImportSelection(
+  contents: CompanyContents,
+  value: unknown
+): CompanyImportSelection {
+  const normalizedSelection = normalizeCompanyImportSelection(value);
+  const nextSelection = createDefaultCompanyImportSelection();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    nextSelection[key] = normalizeSelectionPartForCompanyItems(contents[key], normalizedSelection[key]);
+  }
+
+  return expandCompanyImportSelectionDependencies(contents, nextSelection);
+}
+
+export const COMPANY_CONTENT_SECTION_DEFINITIONS: readonly CompanyContentSectionDefinition[] = [
+  {
+    id: "agents",
+    label: "Agents",
+    singular: "agent",
+    plural: "agents",
+    contentKeys: ["agents"]
+  },
+  {
+    id: "projects",
+    label: "Projects",
+    singular: "project",
+    plural: "projects",
+    contentKeys: ["projects"]
+  },
+  {
+    id: "tasks",
+    label: "Tasks",
+    singular: "task",
+    plural: "tasks",
+    contentKeys: ["tasks", "issues"]
+  },
+  {
+    id: "skills",
+    label: "Skills",
+    singular: "skill",
+    plural: "skills",
+    contentKeys: ["skills"]
+  }
+] as const;
+
+export function getCompanyContentSectionForKey(
+  key: CompanyContentKey
+): CompanyContentSectionDefinition {
+  return (
+    COMPANY_CONTENT_SECTION_DEFINITIONS.find((section) => section.contentKeys.includes(key))
+    ?? COMPANY_CONTENT_SECTION_DEFINITIONS[0]
+  );
+}
+
+export function getCompanyContentSectionItemCount(
+  contents: CompanyContents,
+  section: CompanyContentSectionDefinition
+): number {
+  return section.contentKeys.reduce((count, key) => count + contents[key].length, 0);
+}
+
+export function listCompanyContentSectionItems(
+  contents: CompanyContents,
+  section: CompanyContentSectionDefinition
+): CompanyContentSectionItem[] {
+  return section.contentKeys
+    .flatMap((key) =>
+      contents[key].map((item) => ({
+        kind: key,
+        item
+      }))
+    )
+    .sort(
+      (left, right) =>
+        left.item.path.localeCompare(right.item.path, undefined, { sensitivity: "base" })
+        || left.item.name.localeCompare(right.item.name, undefined, { sensitivity: "base" })
+    );
+}
+
+export function getVisibleCompanyContentSections(
+  contents: CompanyContents
+): CompanyContentSectionDefinition[] {
+  return COMPANY_CONTENT_SECTION_DEFINITIONS.filter(
+    (section) => getCompanyContentSectionItemCount(contents, section) > 0
+  );
+}
+
+export function getCompanyContentItemRequirementLookup(
+  contents: CompanyContents,
+  selection: CompanyImportSelection
+): CompanyContentRequirementLookup {
+  const resolvedSelection = resolveCompanyImportSelection(contents, selection);
+  const selectedEntries: CompanyContentSectionItem[] = [];
+  const itemsByPath = new Map<string, CompanyContentSectionItem>();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    for (const item of contents[key]) {
+      const entry = {
+        kind: key,
+        item
+      };
+
+      itemsByPath.set(item.path, entry);
+      if (isCompanyContentItemSelected(resolvedSelection[key], item.path)) {
+        selectedEntries.push(entry);
+      }
+    }
+  }
+
+  const selectedPaths = new Set(selectedEntries.map((entry) => entry.item.path));
+  const requirementSourcesByPath: CompanyContentRequirementLookup = new Map();
+
+  for (const entry of selectedEntries) {
+    const visitedDependencyPaths = new Set<string>();
+    const pendingDependencyPaths = [...(entry.item.dependencyPaths ?? [])];
+
+    while (pendingDependencyPaths.length > 0) {
+      const dependencyPath = pendingDependencyPaths.pop();
+      if (
+        !dependencyPath
+        || visitedDependencyPaths.has(dependencyPath)
+        || !selectedPaths.has(dependencyPath)
+      ) {
+        continue;
+      }
+
+      visitedDependencyPaths.add(dependencyPath);
+
+      const existingSources = requirementSourcesByPath.get(dependencyPath);
+      if (existingSources) {
+        existingSources.push(entry);
+      } else {
+        requirementSourcesByPath.set(dependencyPath, [entry]);
+      }
+
+      const dependencyEntry = itemsByPath.get(dependencyPath);
+      if (dependencyEntry?.item.dependencyPaths?.length) {
+        pendingDependencyPaths.push(...dependencyEntry.item.dependencyPaths);
+      }
+    }
+  }
+
+  for (const sources of requirementSourcesByPath.values()) {
+    sources.sort(
+      (left, right) =>
+        left.item.name.localeCompare(right.item.name, undefined, { sensitivity: "base" })
+        || left.item.path.localeCompare(right.item.path, undefined, { sensitivity: "base" })
+    );
+  }
+
+  return requirementSourcesByPath;
+}
+
+export function getCompanyContentItemRequirementSources(
+  contents: CompanyContents,
+  selection: CompanyImportSelection,
+  itemPath: string
+): CompanyContentSectionItem[] {
+  return getCompanyContentItemRequirementLookup(contents, selection).get(itemPath) ?? [];
+}
+
+export function isCompanyContentItemRequiredBySelection(
+  contents: CompanyContents,
+  selection: CompanyImportSelection,
+  kind: CompanyContentKey,
+  itemPath: string
+): boolean {
+  const resolvedSelection = resolveCompanyImportSelection(contents, selection);
+  if (!isCompanyContentItemSelected(resolvedSelection[kind], itemPath)) {
+    return false;
+  }
+
+  return (getCompanyContentItemRequirementLookup(contents, resolvedSelection).get(itemPath)?.length ?? 0) > 0;
 }
 
 function addMillisecondsToIso(timestamp: string, deltaMs: number): string | null {
@@ -419,10 +831,19 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
   const paperclipAgentIcon = asNonEmptyString(value.paperclipAgentIcon);
   const paperclipRoutineStatus = asNonEmptyString(value.paperclipRoutineStatus);
   const paperclipRoutineTriggerCount = asNonNegativeInteger(value.paperclipRoutineTriggerCount);
+  const dependencyPaths = [...new Set(
+    (Array.isArray(value.dependencyPaths) ? value.dependencyPaths : [])
+      .map((dependencyPath) =>
+        typeof dependencyPath === "string" ? normalizeCompanyContentPath(dependencyPath) : null
+      )
+      .filter((dependencyPath): dependencyPath is string => Boolean(dependencyPath))
+      .filter((dependencyPath) => dependencyPath !== path)
+  )].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
 
   return {
     name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),
     path,
+    ...(dependencyPaths.length > 0 ? { dependencyPaths } : {}),
     ...(paperclipAgentIcon ? { paperclipAgentIcon } : {}),
     ...(value.recurring === true ? { recurring: true } : {}),
     ...(paperclipRoutineStatus ? { paperclipRoutineStatus } : {}),
@@ -700,6 +1121,7 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
       asNonEmptyString(value.sourceVersion) ??
       asNonEmptyString(value.version),
     importedAt,
+    selection: normalizeCompanyImportSelection(value.selection),
     autoSyncEnabled:
       typeof value.autoSyncEnabled === "boolean"
         ? value.autoSyncEnabled
@@ -890,6 +1312,7 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
               importedSourceVersion: importedCompany.importedSourceVersion,
               latestSourceVersion,
               importedAt: importedCompany.importedAt,
+              selection: importedCompany.selection,
               autoSyncEnabled: importedCompany.autoSyncEnabled,
               syncCollisionStrategy: importedCompany.syncCollisionStrategy,
               syncStatus: importedCompany.lastSyncStatus,
