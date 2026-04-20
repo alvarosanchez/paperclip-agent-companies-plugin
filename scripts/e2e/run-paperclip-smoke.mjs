@@ -690,7 +690,7 @@ async function main() {
     }
     await importModal
       .locator('.agent-companies-settings__selection-item')
-      .filter({ hasText: 'Follow-up Review' })
+      .filter({ hasText: 'issues/follow-up-review/ISSUE.md' })
       .locator('input[type="checkbox"]')
       .uncheck();
     const requiredProjectRow = importModal

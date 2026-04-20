@@ -71,11 +71,10 @@ import {
   type CatalogSnapshot,
   type PaperclipCompanyImportResult,
   createDefaultCompanyImportSelection,
-  getCompanyContentItemRequirementSources,
+  getCompanyContentItemRequirementLookup,
   getCompanyContentSectionForKey,
   getCompanyContentSectionItemCount,
   getVisibleCompanyContentSections,
-  isCompanyContentItemRequiredBySelection,
   listCompanyContentSectionItems,
   resolveCompanyImportSelection
 } from "../catalog.js";
@@ -3451,6 +3450,10 @@ function ImportCompanyDialog(props: {
   const isExistingCompanyImport = dialogState.targetMode === "existing_company";
   const selectionSummary = buildCompanyImportSelectionSummary(dialogState.selection, company.contents);
   const visibleSections = getVisibleCompanyContentSections(company.contents);
+  const requirementLookup = getCompanyContentItemRequirementLookup(
+    company.contents,
+    dialogState.selection
+  );
 
   return (
     <div
@@ -3550,15 +3553,10 @@ function ImportCompanyDialog(props: {
                     dialogState.selection,
                     company.contents
                   );
-                  const requiredItems = items.filter(({ kind, item }) =>
-                    isCompanyContentItemRequiredBySelection(
-                      company.contents,
-                      dialogState.selection,
-                      kind,
-                      item.path
-                    )
+                  const requiredCount = items.reduce(
+                    (count, { item }) => count + (requirementLookup.has(item.path) ? 1 : 0),
+                    0
                   );
-                  const requiredCount = requiredItems.length;
                   const sectionToggleReadOnly =
                     !isBusy && isSectionDeselectReadOnly(section, dialogState.selection, company.contents);
                   const sectionHint =
@@ -3601,19 +3599,8 @@ function ImportCompanyDialog(props: {
                             Included {section.plural}
                           </div>
                           {items.map(({ kind, item }) => {
-                            const itemRequired = isCompanyContentItemRequiredBySelection(
-                              company.contents,
-                              dialogState.selection,
-                              kind,
-                              item.path
-                            );
-                            const requirementSources = itemRequired
-                              ? getCompanyContentItemRequirementSources(
-                                  company.contents,
-                                  dialogState.selection,
-                                  item.path
-                                )
-                              : [];
+                            const requirementSources = requirementLookup.get(item.path) ?? [];
+                            const itemRequired = requirementSources.length > 0;
                             const requirementHint = formatRequirementSourcesHint(requirementSources);
 
                             return (

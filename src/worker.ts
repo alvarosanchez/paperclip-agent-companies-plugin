@@ -1511,8 +1511,14 @@ function normalizeRequestedCompanyImportSelection(
   return resolveCompanyImportSelection(company.contents, selection);
 }
 
-function isFullCompanyImportSelection(selection: CompanyImportSelection): boolean {
-  return COMPANY_CONTENT_KEYS.every((key) => selection[key].mode === "all");
+function isFullCompanyImportSelection(
+  company: DiscoveredAgentCompany,
+  selection: CompanyImportSelection
+): boolean {
+  return COMPANY_CONTENT_KEYS.every((key) => {
+    const items = company.contents[key];
+    return items.length === 0 || items.every((item) => isSelectedCompanyImportItem(selection, key, item.path));
+  });
 }
 
 function isSelectedCompanyImportItem(
@@ -2720,7 +2726,7 @@ async function buildCatalogCompanyImportSource(
     ? resolveRepositoryRelativePath(repositoryRoot, companyRelativeRoot)
     : repositoryRoot;
   const discoveredFilePaths = await findPortableCompanyFilePaths(companyRoot);
-  const filePaths = isFullCompanyImportSelection(selection)
+  const filePaths = isFullCompanyImportSelection(match.company, selection)
     ? discoveredFilePaths
     : filterPortableCompanyFilePaths(match.company, discoveredFilePaths, selection);
 

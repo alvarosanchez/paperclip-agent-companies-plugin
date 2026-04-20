@@ -48,6 +48,8 @@ export interface CompanyContentSectionItem {
   item: CompanyContentItem;
 }
 
+export type CompanyContentRequirementLookup = Map<string, CompanyContentSectionItem[]>;
+
 export interface CompanyImportPartSelection {
   mode: CompanyImportSelectionMode;
   itemPaths?: string[];
@@ -384,27 +386,6 @@ function isCompanyContentItemSelected(
   return selection.itemPaths?.includes(itemPath) ?? false;
 }
 
-function removeCompanyContentItemFromSelection(
-  contents: CompanyContents,
-  selection: CompanyImportSelection,
-  kind: CompanyContentKey,
-  itemPath: string
-): CompanyImportSelection {
-  const nextSelection = {
-    ...selection
-  };
-  const nextItemPaths = getSelectedCompanyContentItemPaths(contents[kind], selection[kind]).filter(
-    (currentPath) => currentPath !== itemPath
-  );
-
-  nextSelection[kind] = normalizeSelectionPartForCompanyItems(contents[kind], {
-    mode: "selected",
-    itemPaths: nextItemPaths
-  });
-
-  return nextSelection;
-}
-
 export function expandCompanyImportSelectionDependencies(
   contents: CompanyContents,
   selection: CompanyImportSelection
@@ -573,33 +554,78 @@ export function getVisibleCompanyContentSections(
   );
 }
 
+export function getCompanyContentItemRequirementLookup(
+  contents: CompanyContents,
+  selection: CompanyImportSelection
+): CompanyContentRequirementLookup {
+  const resolvedSelection = resolveCompanyImportSelection(contents, selection);
+  const selectedEntries: CompanyContentSectionItem[] = [];
+  const itemsByPath = new Map<string, CompanyContentSectionItem>();
+
+  for (const key of COMPANY_CONTENT_KEYS) {
+    for (const item of contents[key]) {
+      const entry = {
+        kind: key,
+        item
+      };
+
+      itemsByPath.set(item.path, entry);
+      if (isCompanyContentItemSelected(resolvedSelection[key], item.path)) {
+        selectedEntries.push(entry);
+      }
+    }
+  }
+
+  const selectedPaths = new Set(selectedEntries.map((entry) => entry.item.path));
+  const requirementSourcesByPath: CompanyContentRequirementLookup = new Map();
+
+  for (const entry of selectedEntries) {
+    const visitedDependencyPaths = new Set<string>();
+    const pendingDependencyPaths = [...(entry.item.dependencyPaths ?? [])];
+
+    while (pendingDependencyPaths.length > 0) {
+      const dependencyPath = pendingDependencyPaths.pop();
+      if (
+        !dependencyPath
+        || visitedDependencyPaths.has(dependencyPath)
+        || !selectedPaths.has(dependencyPath)
+      ) {
+        continue;
+      }
+
+      visitedDependencyPaths.add(dependencyPath);
+
+      const existingSources = requirementSourcesByPath.get(dependencyPath);
+      if (existingSources) {
+        existingSources.push(entry);
+      } else {
+        requirementSourcesByPath.set(dependencyPath, [entry]);
+      }
+
+      const dependencyEntry = itemsByPath.get(dependencyPath);
+      if (dependencyEntry?.item.dependencyPaths?.length) {
+        pendingDependencyPaths.push(...dependencyEntry.item.dependencyPaths);
+      }
+    }
+  }
+
+  for (const sources of requirementSourcesByPath.values()) {
+    sources.sort(
+      (left, right) =>
+        left.item.name.localeCompare(right.item.name, undefined, { sensitivity: "base" })
+        || left.item.path.localeCompare(right.item.path, undefined, { sensitivity: "base" })
+    );
+  }
+
+  return requirementSourcesByPath;
+}
+
 export function getCompanyContentItemRequirementSources(
   contents: CompanyContents,
   selection: CompanyImportSelection,
   itemPath: string
 ): CompanyContentSectionItem[] {
-  return COMPANY_CONTENT_KEYS
-    .flatMap((key) =>
-      contents[key].flatMap((item) => {
-        if (!isCompanyContentItemSelected(selection[key], item.path)) {
-          return [];
-        }
-
-        return item.dependencyPaths?.includes(itemPath)
-          ? [
-              {
-                kind: key,
-                item
-              }
-            ]
-          : [];
-      })
-    )
-    .sort(
-      (left, right) =>
-        left.item.name.localeCompare(right.item.name, undefined, { sensitivity: "base" })
-        || left.item.path.localeCompare(right.item.path, undefined, { sensitivity: "base" })
-    );
+  return getCompanyContentItemRequirementLookup(contents, selection).get(itemPath) ?? [];
 }
 
 export function isCompanyContentItemRequiredBySelection(
@@ -608,16 +634,12 @@ export function isCompanyContentItemRequiredBySelection(
   kind: CompanyContentKey,
   itemPath: string
 ): boolean {
-  if (!isCompanyContentItemSelected(selection[kind], itemPath)) {
+  const resolvedSelection = resolveCompanyImportSelection(contents, selection);
+  if (!isCompanyContentItemSelected(resolvedSelection[kind], itemPath)) {
     return false;
   }
 
-  const resolvedSelection = resolveCompanyImportSelection(
-    contents,
-    removeCompanyContentItemFromSelection(contents, selection, kind, itemPath)
-  );
-
-  return isCompanyContentItemSelected(resolvedSelection[kind], itemPath);
+  return (getCompanyContentItemRequirementLookup(contents, resolvedSelection).get(itemPath)?.length ?? 0) > 0;
 }
 
 function addMillisecondsToIso(timestamp: string, deltaMs: number): string | null {

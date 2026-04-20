@@ -993,6 +993,52 @@ describe("agent companies plugin", () => {
     expect(filePaths).not.toContain(".ssh/id_ed25519");
   });
 
+  it("keeps non-item files when the default selection covers every available item", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await mkdir(join(repositoryPath, "nested", "beta", "docs"), { recursive: true });
+    await writeFile(join(repositoryPath, "nested", "beta", "docs", "overview.md"), "# Beta Overview\n");
+
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:12.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "beta-works");
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id
+      }
+    );
+
+    expect(prepared.selection).toEqual({
+      agents: { mode: "all" },
+      projects: { mode: "none" },
+      tasks: { mode: "none" },
+      issues: { mode: "none" },
+      skills: { mode: "none" }
+    });
+    expect(Object.keys(prepared.source.files).sort()).toEqual([
+      "COMPANY.md",
+      "agents/operator/AGENTS.md",
+      "docs/overview.md"
+    ]);
+  });
+
   it("merges metadata.paperclip.agentIcon into the inline Paperclip extension", async () => {
     const repositoryPath = await createRepositoryFixture();
     await addPaperclipAgentIconFixture(repositoryPath);
