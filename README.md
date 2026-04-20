@@ -102,7 +102,8 @@ During import, the plugin packages the selected company contents as an inline Pa
 - **Import into...** lists only existing Paperclip companies that are not already tracked synced imports.
 - Already tracked imported companies must use **Re-import / Edit selection** to change that contract; the tracked company card itself does not expose inline selection toggles.
 - Importing into an existing non-synced company, including the current company when applicable, adopts that company as a tracked synced import after the import completes.
-- When sync lands newly assigned imported issues on existing active agents, the plugin queues explicit Paperclip wake requests so those agents can pick up the work even if scheduled heartbeats are disabled.
+- Initial imports and later syncs queue explicit Paperclip wake requests for newly assigned imported issues so those agents can pick up the work even if scheduled heartbeats are disabled.
+- Hosted imports that include assigned tasks stage agent creation before task import so newly imported assignees can be approved in time for Paperclip to preserve the task assignment and wake the agent.
 - Recurring tasks are imported through Paperclip's company portability flow as routines rather than one-time starter issues, while keeping any `.paperclip.yaml` routine sidecar metadata in the portable package.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
