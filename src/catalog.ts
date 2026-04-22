@@ -1,3 +1,5 @@
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+
 export const PLUGIN_ID = "paperclip-agent-companies-plugin";
 export const PLUGIN_DISPLAY_NAME = "Agent Companies Plugin";
 export const DEFAULT_REPOSITORY_URL = "https://github.com/paperclipai/companies";
@@ -239,9 +241,84 @@ export interface CatalogSnapshot {
 
 const GIT_SSH_REPOSITORY_PATTERN = /^git@([^:]+):(.+)$/i;
 const GITHUB_SHORTHAND_REPOSITORY_PATTERN = /^(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+?)(?:\.git)?$/u;
+const PORTABLE_PAPERCLIP_EXTENSION_PATHS = [".paperclip.yaml", ".paperclip.yml"] as const;
+
+export type PaperclipImportStage = "pre_issues" | "issues";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function findPortablePaperclipExtensionPath(
+  files: Record<string, PortableCatalogFileEntry>
+): string | null {
+  for (const filePath of PORTABLE_PAPERCLIP_EXTENSION_PATHS) {
+    if (Object.prototype.hasOwnProperty.call(files, filePath)) {
+      return filePath;
+    }
+  }
+
+  return null;
+}
+
+export function buildStagedPaperclipImportSource(
+  source: CatalogPreparedCompanyImport["source"],
+  stage: PaperclipImportStage
+): CatalogPreparedCompanyImport["source"] {
+  const extensionPath = findPortablePaperclipExtensionPath(source.files);
+  if (!extensionPath) {
+    return source;
+  }
+
+  const extension = source.files[extensionPath];
+  if (typeof extension !== "string") {
+    return source;
+  }
+
+  let parsedExtension: unknown;
+  try {
+    parsedExtension = parseYaml(extension);
+  } catch {
+    return source;
+  }
+
+  if (!isRecord(parsedExtension)) {
+    return source;
+  }
+
+  const nextExtension: Record<string, unknown> = {
+    ...parsedExtension
+  };
+  let didChange = false;
+
+  if (stage === "pre_issues" && Object.prototype.hasOwnProperty.call(nextExtension, "routines")) {
+    delete nextExtension.routines;
+    didChange = true;
+  }
+
+  if (stage === "issues" && Object.prototype.hasOwnProperty.call(nextExtension, "agents")) {
+    delete nextExtension.agents;
+    didChange = true;
+  }
+
+  if (!didChange) {
+    return source;
+  }
+
+  const nextFiles = {
+    ...source.files
+  };
+
+  if (Object.keys(nextExtension).length === 0) {
+    delete nextFiles[extensionPath];
+  } else {
+    nextFiles[extensionPath] = `${stringifyYaml(nextExtension).trimEnd()}\n`;
+  }
+
+  return {
+    ...source,
+    files: nextFiles
+  };
 }
 
 function asNonEmptyString(value: unknown): string | null {
