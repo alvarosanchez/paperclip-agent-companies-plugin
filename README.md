@@ -93,11 +93,13 @@ During import, the plugin packages the selected company contents as an inline Pa
 ## Sync Behavior
 
 - The plugin records the imported source version from `COMPANY.md` per tracked imported company.
+- Tracked imported company cards show the version each company was imported from, and surface a newer source version when one is available.
 - Imported companies default to daily auto-sync.
 - Manual sync is available whenever the source version changes or cannot be compared safely.
 - Each tracked import saves the selected subset of the source package as its long-term sync contract.
 - When selected tasks depend on specific projects or assignees, the saved sync contract automatically includes those required projects and agents.
 - Sync uses the saved selection contract plus the current collision strategy, with overwrite mode selected by default so the imported Paperclip company stays aligned with the source package.
+- For recurring-task imports, overwrite-mode re-imports and syncs reconcile duplicate active routines by archiving older matching copies after a successful import.
 - Discovered source packages expose separate **Import as new company** and **Import into...** actions.
 - **Import into...** lists only existing Paperclip companies that are not already tracked synced imports.
 - Already tracked imported companies must use **Re-import / Edit selection** to change that contract; the tracked company card itself does not expose inline selection toggles.

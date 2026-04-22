@@ -9,6 +9,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   AGENT_COMPANIES_SCHEMA,
   buildCatalogSnapshot,
+  buildStagedPaperclipImportSource,
   CATALOG_STATE_KEY,
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
@@ -43,6 +44,11 @@ import {
   type CatalogState
 } from "./catalog.js";
 import { requiresPaperclipBoardAccess } from "./paperclip-health.js";
+import {
+  extractPortableRecurringTaskDefinitions,
+  findArchivableImportedRoutineIds,
+  type ImportedRoutineSnapshot
+} from "./portable-routines.js";
 
 const CATALOG_SCOPE: ScopeKey = {
   scopeKind: "instance",
@@ -272,6 +278,8 @@ interface PaperclipAgentRecord {
   role: string | null;
   title: string | null;
 }
+
+interface PaperclipRoutineRecord extends ImportedRoutineSnapshot {}
 
 interface PaperclipIssueWakeTarget {
   agentId: string;
@@ -2835,11 +2843,19 @@ async function executeDefaultSyncImport(
     input.preparedImport.selection,
     true
   );
+  const preIssueImportSource = buildStagedPaperclipImportSource(
+    input.preparedImport.source,
+    "pre_issues"
+  );
+  const issueOnlyImportSource = buildStagedPaperclipImportSource(
+    input.preparedImport.source,
+    "issues"
+  );
   const selectedAgentSlugs = getPortableImportedAgentSlugs(input.preparedImport.source.files);
   let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
   if (hasEnabledPaperclipImportStage(preIssueImportInclude)) {
     importedPhaseOneResult = await postPaperclipCompanyImport(connection, {
-      source: input.preparedImport.source,
+      source: preIssueImportSource,
       include: preIssueImportInclude,
       target: {
         mode: "existing_company",
@@ -2879,7 +2895,7 @@ async function executeDefaultSyncImport(
   let importedPhaseTwoResult: PaperclipCompanyImportResult | null = null;
   if (hasEnabledPaperclipImportStage(issueOnlyImportInclude)) {
     importedPhaseTwoResult = await postPaperclipCompanyImport(connection, {
-      source: input.preparedImport.source,
+      source: issueOnlyImportSource,
       include: issueOnlyImportInclude,
       target: {
         mode: "existing_company",
@@ -2888,6 +2904,15 @@ async function executeDefaultSyncImport(
       collisionStrategy: input.collisionStrategy
     });
   }
+  const routineDedupeWarnings =
+    input.collisionStrategy === "replace"
+      ? await archiveImportedRoutineDuplicatesAfterReplaceImport(
+          ctx,
+          connection,
+          input.importedCompanyId,
+          input.preparedImport.source.files
+        )
+      : [];
 
   return {
     company: importedPhaseTwoResult?.company ?? importedPhaseOneResult?.company ?? null,
@@ -2910,6 +2935,7 @@ async function executeDefaultSyncImport(
     warnings: mergePaperclipImportWarnings(
       importedPhaseOneResult?.warnings,
       importedPhaseTwoResult?.warnings,
+      routineDedupeWarnings,
       additionalWarnings
     )
   };
@@ -3045,6 +3071,107 @@ function normalizePaperclipAgentList(value: unknown): PaperclipAgentRecord[] | n
   return value
     .map((agent) => normalizePaperclipAgent(agent))
     .filter((agent): agent is PaperclipAgentRecord => agent !== null);
+}
+
+function normalizePaperclipRoutine(value: unknown): PaperclipRoutineRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asNonEmptyString(value.id);
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    title: asNonEmptyString(value.title),
+    description: asNonEmptyString(value.description),
+    status: asNonEmptyString(value.status),
+    createdAt: asIsoTimestamp(value.createdAt),
+    updatedAt: asIsoTimestamp(value.updatedAt)
+  };
+}
+
+function normalizePaperclipRoutineList(value: unknown): PaperclipRoutineRecord[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value
+    .map((routine) => normalizePaperclipRoutine(routine))
+    .filter((routine): routine is PaperclipRoutineRecord => routine !== null);
+}
+
+async function fetchPaperclipCompanyRoutines(
+  connection: PaperclipApiConnection,
+  companyId: string
+): Promise<PaperclipRoutineRecord[]> {
+  const payload = await fetchPaperclipApiJson(
+    connection,
+    `/api/companies/${encodeURIComponent(companyId)}/routines`
+  );
+  const routines = normalizePaperclipRoutineList(payload);
+  if (!routines) {
+    throw new Error("Paperclip returned an unexpected routines response.");
+  }
+
+  return routines;
+}
+
+async function archivePaperclipRoutine(
+  connection: PaperclipApiConnection,
+  routineId: string
+): Promise<void> {
+  await fetchPaperclipApiJson(connection, `/api/routines/${encodeURIComponent(routineId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      status: "archived"
+    })
+  });
+}
+
+async function archiveImportedRoutineDuplicatesAfterReplaceImport(
+  ctx: PluginContext,
+  connection: PaperclipApiConnection,
+  companyId: string,
+  files: Record<string, PortableCatalogFileEntry>
+): Promise<string[]> {
+  const recurringTasks = extractPortableRecurringTaskDefinitions(files);
+  if (recurringTasks.length === 0) {
+    return [];
+  }
+
+  let routines: PaperclipRoutineRecord[];
+  try {
+    routines = await fetchPaperclipCompanyRoutines(connection, companyId);
+  } catch (error) {
+    return [
+      `Imported routines could not be verified for duplicate cleanup: ${summarizeErrorMessage(error)}`
+    ];
+  }
+
+  const routineIdsToArchive = findArchivableImportedRoutineIds(recurringTasks, routines);
+  if (routineIdsToArchive.length === 0) {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  for (const routineId of routineIdsToArchive) {
+    try {
+      await archivePaperclipRoutine(connection, routineId);
+      ctx.logger.info("Archived duplicate imported Paperclip routine after replace-mode sync", {
+        companyId,
+        routineId
+      });
+    } catch (error) {
+      warnings.push(
+        `Imported routine duplicate cleanup failed for ${routineId}: ${summarizeErrorMessage(error)}`
+      );
+    }
+  }
+
+  return warnings;
 }
 
 function hasSelectedCompanyImportPart(selection: CompanyImportPartSelection): boolean {

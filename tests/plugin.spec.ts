@@ -15,6 +15,8 @@ import {
   type CatalogCompanyContentDetail,
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
+  buildStagedPaperclipImportSource,
+  compareCatalogSourceVersions,
   createRepositorySource,
   createEmptyCompanyContents,
   getCompanyContentItemRequirementSources,
@@ -38,6 +40,11 @@ import {
   shouldStartWorkerHost
 } from "../src/worker.js";
 import { requiresPaperclipBoardAccess } from "../src/paperclip-health.js";
+import {
+  extractPortableRecurringTaskDefinitions,
+  findArchivableImportedRoutineIds
+} from "../src/portable-routines.js";
+import { getImportedCompanyVersionInfo } from "../src/ui/version-status.js";
 
 const tempDirectories: string[] = [];
 const CATALOG_SCOPE = {
@@ -716,6 +723,156 @@ describe("agent companies plugin", () => {
     expect(detail?.item.paperclipRoutineTriggerCount).toBe(2);
     expect(detail?.item.frontmatter).toContain("recurring: true");
     expect(detail?.item.markdown).toContain("Review pipeline health.");
+  });
+
+  it("stages Paperclip extension metadata so routines only ship during the issue pass", () => {
+    const source: CatalogPreparedCompanyImport["source"] = {
+      type: "inline",
+      files: {
+        "COMPANY.md": `---
+name: Alpha Labs
+schema: ${AGENT_COMPANIES_SCHEMA}
+---
+`,
+        ".paperclip.yaml": `schema: paperclip/v1
+agents:
+  ceo:
+    icon: crown
+routines:
+  monday-review:
+    status: paused
+`
+      }
+    };
+
+    const preIssueSource = buildStagedPaperclipImportSource(source, "pre_issues");
+    const issueSource = buildStagedPaperclipImportSource(source, "issues");
+
+    expect(parseYaml(source.files[".paperclip.yaml"] as string)).toEqual({
+      schema: "paperclip/v1",
+      agents: {
+        ceo: {
+          icon: "crown"
+        }
+      },
+      routines: {
+        "monday-review": {
+          status: "paused"
+        }
+      }
+    });
+    expect(parseYaml(preIssueSource.files[".paperclip.yaml"] as string)).toEqual({
+      schema: "paperclip/v1",
+      agents: {
+        ceo: {
+          icon: "crown"
+        }
+      }
+    });
+    expect(parseYaml(issueSource.files[".paperclip.yaml"] as string)).toEqual({
+      schema: "paperclip/v1",
+      routines: {
+        "monday-review": {
+          status: "paused"
+        }
+      }
+    });
+  });
+
+  it("builds imported company version labels for up-to-date imports", () => {
+    expect(getImportedCompanyVersionInfo("1.0.0", "1.0.0")).toEqual({
+      importedBadgeText: "Imported v1.0.0",
+      latestBadgeText: null,
+      summaryText: "Imported from v1.0.0"
+    });
+  });
+
+  it("builds imported company version labels when a newer source version is available", () => {
+    expect(getImportedCompanyVersionInfo("1.0.0", "1.1.0")).toEqual({
+      importedBadgeText: "Imported v1.0.0",
+      latestBadgeText: "Latest v1.1.0",
+      summaryText: "Imported from v1.0.0; source now at v1.1.0"
+    });
+  });
+
+  it("treats non-comparable source versions as unknown rather than newer", () => {
+    expect(compareCatalogSourceVersions("release-2026-04", "release-2026-05")).toBe("different_unknown");
+    expect(getImportedCompanyVersionInfo("release-2026-04", "release-2026-05")).toEqual({
+      importedBadgeText: "Imported vrelease-2026-04",
+      latestBadgeText: "Source vrelease-2026-05",
+      summaryText: "Imported from vrelease-2026-04; source currently reports vrelease-2026-05"
+    });
+  });
+
+  it("extracts recurring task definitions from a portable import source", () => {
+    expect(
+      extractPortableRecurringTaskDefinitions({
+        "tasks/daily-review/TASK.md": `---
+name: Daily Review
+recurring: true
+---
+
+Check the queue.
+`,
+        "tasks/one-off/TASK.md": `---
+name: One Off
+---
+
+Only do this once.
+`,
+        ".paperclip.yaml": `schema: paperclip/v1
+routines:
+  daily-review:
+    status: active
+`
+      })
+    ).toEqual([
+      {
+        slug: "daily-review",
+        title: "Daily Review",
+        description: "Check the queue."
+      }
+    ]);
+  });
+
+  it("selects older matching routines for archival after a replace import", () => {
+    expect(
+      findArchivableImportedRoutineIds(
+        [
+          {
+            slug: "daily-review",
+            title: "Daily Review",
+            description: "Check the queue."
+          }
+        ],
+        [
+          {
+            id: "routine-new",
+            title: "Daily Review",
+            description: "Check the queue.",
+            status: "active",
+            createdAt: "2026-04-22T05:16:44.000Z",
+            updatedAt: "2026-04-22T05:16:44.000Z"
+          },
+          {
+            id: "routine-old",
+            title: "Daily Review",
+            description: "Check the queue.",
+            status: "active",
+            createdAt: "2026-04-22T05:16:26.000Z",
+            updatedAt: "2026-04-22T05:16:26.000Z"
+          },
+          {
+            id: "routine-other",
+            title: "Weekly Review",
+            description: "Check something else.",
+            status: "active",
+            createdAt: "2026-04-22T05:16:26.000Z",
+            updatedAt: "2026-04-22T05:16:26.000Z"
+          }
+        ]
+      )
+    ).toEqual(["routine-old"]);
   });
 
   it("packages a discovered company as an inline import source", async () => {
@@ -2600,6 +2757,298 @@ describe("agent companies plugin", () => {
               issueId: "issue-1"
             }
           }
+        }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("archives older duplicate routines after a replace-mode recurring task sync", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addRecurringTaskFixture(repositoryPath);
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "agent-123",
+              name: "Alpha CEO",
+              urlKey: "ceo",
+              status: "pending_approval",
+              role: "ceo",
+              title: "Chief Executive Officer"
+            }
+          ]),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals") {
+        return new Response(JSON.stringify({ id: "approval-123" }), {
+          status: 201,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/approvals/approval-123/approve") {
+        return new Response(JSON.stringify({ id: "approval-123", status: "approved" }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        const parsedBody = bodyText ? JSON.parse(bodyText) : null;
+        const issuesIncluded = parsedBody?.include?.issues === true;
+
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            agents: issuesIncluded ? [] : [{ action: "updated" }],
+            projects: issuesIncluded ? [] : [{ action: "updated" }],
+            issues: issuesIncluded ? [{ action: "updated" }] : [],
+            skills: issuesIncluded ? [] : [{ action: "updated" }],
+            warnings: []
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/routines") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "routine-old",
+              title: "Monday Review",
+              description: "Review pipeline health.",
+              status: "active",
+              createdAt: "2026-04-22T05:16:26.000Z",
+              updatedAt: "2026-04-22T05:16:26.000Z"
+            },
+            {
+              id: "routine-new",
+              title: "Monday Review",
+              description: "Review pipeline health.",
+              status: "active",
+              createdAt: "2026-04-22T05:16:44.000Z",
+              updatedAt: "2026-04-22T05:16:44.000Z"
+            }
+          ]),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/routines/routine-old") {
+        return new Response(
+          JSON.stringify({
+            id: "routine-old",
+            status: "archived"
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-15T10:00:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      });
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-123",
+        paperclipBoardApiTokenRef: "secret-board-token-ref",
+        identity: "Agent Operator"
+      });
+
+      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
+        expect(secretRef).toBe("secret-board-token-ref");
+        return "paperclip-board-token";
+      };
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      expect(fetchRequests).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        expect.objectContaining({
+          url: "http://127.0.0.1:3210/api/companies/import",
+          authorization: "Bearer paperclip-board-token",
+          body: expect.objectContaining({
+            include: {
+              company: false,
+              agents: true,
+              projects: true,
+              issues: false,
+              skills: true
+            }
+          })
+        }),
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
+          authorization: "Bearer paperclip-board-token",
+          body: {
+            type: "hire_agent",
+            payload: {
+              agentId: "agent-123",
+              name: "Alpha CEO",
+              role: "ceo",
+              title: "Chief Executive Officer"
+            }
+          }
+        },
+        {
+          url: "http://127.0.0.1:3210/api/approvals/approval-123/approve",
+          authorization: "Bearer paperclip-board-token",
+          body: {
+            decisionNote: "Approved automatically during Agent Company sync so imported tasks can wake Alpha CEO immediately."
+          }
+        },
+        expect.objectContaining({
+          url: "http://127.0.0.1:3210/api/companies/import",
+          authorization: "Bearer paperclip-board-token",
+          body: expect.objectContaining({
+            source: {
+              type: "inline",
+              files: expect.objectContaining({
+                ".paperclip.yaml": expect.any(String),
+                "COMPANY.md": expect.any(String),
+                "tasks/monday-review/TASK.md": expect.any(String)
+              })
+            },
+            include: {
+              company: false,
+              agents: false,
+              projects: false,
+              issues: true,
+              skills: false
+            },
+            target: {
+              mode: "existing_company",
+              companyId: "paperclip-company-123"
+            },
+            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
+          })
+        }),
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/routines",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/routines/routine-old",
+          authorization: "Bearer paperclip-board-token",
+          body: {
+            status: "archived"
+          }
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          authorization: "Bearer paperclip-board-token",
+          body: null
         }
       ]);
     } finally {

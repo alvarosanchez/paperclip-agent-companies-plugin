@@ -70,6 +70,7 @@ import {
   type CatalogRepositorySummary,
   type CatalogSnapshot,
   type PaperclipCompanyImportResult,
+  buildStagedPaperclipImportSource,
   createDefaultCompanyImportSelection,
   getCompanyContentItemRequirementLookup,
   getCompanyContentSectionForKey,
@@ -83,6 +84,12 @@ import {
   requiresPaperclipBoardAccess,
   type PaperclipHealthResponse
 } from "../paperclip-health.js";
+import {
+  extractPortableRecurringTaskDefinitions,
+  findArchivableImportedRoutineIds,
+  type ImportedRoutineSnapshot
+} from "../portable-routines.js";
+import { getImportedCompanyVersionInfo } from "./version-status.js";
 
 const EMPTY_CATALOG: CatalogSnapshot = {
   repositories: [],
@@ -1546,6 +1553,8 @@ interface PaperclipApprovalRecord {
   id?: string;
 }
 
+interface PaperclipRoutineSnapshot extends ImportedRoutineSnapshot {}
+
 interface ImportTargetCompany {
   id: string;
   name: string;
@@ -1837,6 +1846,54 @@ function normalizePaperclipAgentSnapshots(value: unknown): Array<{
   return normalizedAgents;
 }
 
+function normalizePaperclipRoutineSnapshots(value: unknown): PaperclipRoutineSnapshot[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalizedRoutines: PaperclipRoutineSnapshot[] = [];
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const id =
+      typeof candidate.id === "string" && candidate.id.trim()
+        ? candidate.id.trim()
+        : null;
+    if (!id) {
+      continue;
+    }
+
+    normalizedRoutines.push({
+      id,
+      title:
+        typeof candidate.title === "string" && candidate.title.trim()
+          ? candidate.title.trim()
+          : null,
+      description:
+        typeof candidate.description === "string" && candidate.description.trim()
+          ? candidate.description.trim()
+          : null,
+      status:
+        typeof candidate.status === "string" && candidate.status.trim()
+          ? candidate.status.trim()
+          : null,
+      createdAt:
+        typeof candidate.createdAt === "string" && candidate.createdAt.trim()
+          ? candidate.createdAt.trim()
+          : null,
+      updatedAt:
+        typeof candidate.updatedAt === "string" && candidate.updatedAt.trim()
+          ? candidate.updatedAt.trim()
+          : null
+    });
+  }
+
+  return normalizedRoutines;
+}
+
 function buildPaperclipImportInclude(
   selection: CompanyImportSelection,
   targetMode: ImportTargetMode,
@@ -1986,6 +2043,39 @@ async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<
   }
 
   return payload as T;
+}
+
+async function archiveDuplicateImportedRoutines(
+  companyId: string,
+  source: CatalogPreparedCompanyImport["source"]
+): Promise<string[]> {
+  const recurringTasks = extractPortableRecurringTaskDefinitions(source.files);
+  if (recurringTasks.length === 0) {
+    return [];
+  }
+
+  const routines = normalizePaperclipRoutineSnapshots(
+    await fetchHostJson<unknown>(`/api/companies/${encodeURIComponent(companyId)}/routines`)
+  );
+  const routineIdsToArchive = findArchivableImportedRoutineIds(recurringTasks, routines);
+  const warnings: string[] = [];
+
+  for (const routineId of routineIdsToArchive) {
+    try {
+      await fetchHostJson(`/api/routines/${encodeURIComponent(routineId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "archived"
+        })
+      });
+    } catch (error) {
+      warnings.push(
+        `Imported routine duplicate cleanup failed for ${routineId}: ${getErrorMessage(error)}`
+      );
+    }
+  }
+
+  return warnings;
 }
 
 async function fetchPaperclipHealth(): Promise<PaperclipHealthResponse | null> {
@@ -2628,6 +2718,14 @@ function formatTimestamp(timestamp: string | null, emptyLabel = "Not scanned yet
 function getCompanySyncSummary(company: CatalogImportedCompanySummary): string | null {
   const { importedCompany } = company;
   const parts: string[] = [];
+  const versionInfo = getImportedCompanyVersionInfo(
+    importedCompany.importedSourceVersion,
+    importedCompany.latestSourceVersion
+  );
+
+  if (versionInfo.summaryText) {
+    parts.push(versionInfo.summaryText);
+  }
 
   if (importedCompany.syncStatus === "running") {
     parts.push(`Syncing since ${formatTimestamp(importedCompany.syncRunningSince, "just now")}`);
@@ -3236,6 +3334,10 @@ function ImportedCompanyCard(props: {
     onToggleAutoSync
   } = props;
   const importedCompanyLabel = getImportedCompanyLabel(company);
+  const versionInfo = getImportedCompanyVersionInfo(
+    company.importedCompany.importedSourceVersion,
+    company.importedCompany.latestSourceVersion
+  );
 
   return (
     <article className="agent-companies-settings__company-card" data-testid="imported-company-card">
@@ -3251,8 +3353,11 @@ function ImportedCompanyCard(props: {
             <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
               {company.repositoryLabel}
             </span>
-            {company.version ? (
-              <span className="agent-companies-settings__badge">Version {company.version}</span>
+            {versionInfo.importedBadgeText ? (
+              <span className="agent-companies-settings__badge">{versionInfo.importedBadgeText}</span>
+            ) : null}
+            {versionInfo.latestBadgeText ? (
+              <span className="agent-companies-settings__badge">{versionInfo.latestBadgeText}</span>
             ) : null}
             {importedCompanyLabel ? (
               <span className="agent-companies-settings__badge">Target {importedCompanyLabel}</span>
@@ -4370,6 +4475,14 @@ export function AgentCompaniesSettingsPage({
         importDialog.targetMode,
         true
       );
+      const preIssueImportSource = buildStagedPaperclipImportSource(
+        preparedImport.source,
+        "pre_issues"
+      );
+      const issueOnlyImportSource = buildStagedPaperclipImportSource(
+        preparedImport.source,
+        "issues"
+      );
       let issuesBeforeImport: PaperclipIssueSnapshot[] | null =
         importDialog.targetMode === "new_company" ? [] : null;
 
@@ -4407,7 +4520,7 @@ export function AgentCompaniesSettingsPage({
         importedPhaseOneResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
           method: "POST",
           body: JSON.stringify({
-            source: preparedImport.source,
+            source: preIssueImportSource,
             include: preIssueImportInclude,
             target,
             collisionStrategy: importDialog.collisionStrategy
@@ -4492,7 +4605,7 @@ export function AgentCompaniesSettingsPage({
           importedPhaseTwoResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
             method: "POST",
             body: JSON.stringify({
-              source: preparedImport.source,
+              source: issueOnlyImportSource,
               include: issueOnlyImportInclude,
               target: {
                 mode: "existing_company",
@@ -4525,6 +4638,18 @@ export function AgentCompaniesSettingsPage({
             importedPhaseTwoResult?.warnings
           )
         };
+
+        if (importDialog.collisionStrategy === "replace") {
+          try {
+            postImportDetails.push(
+              ...await archiveDuplicateImportedRoutines(importedCompanyId, preparedImport.source)
+            );
+          } catch (routineCleanupError) {
+            postImportDetails.push(
+              `Imported routine duplicate cleanup unavailable: ${getErrorMessage(routineCleanupError)}`
+            );
+          }
+        }
 
         try {
           const importedCompanyRecord = await fetchHostJson<PaperclipCompanyRecord>(

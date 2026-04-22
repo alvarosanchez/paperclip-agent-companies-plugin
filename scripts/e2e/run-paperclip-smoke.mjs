@@ -804,6 +804,7 @@ async function main() {
     });
     await importedCompanyCard.first().waitFor({ timeout: 120000 });
     await importedCompanyCard.getByText(syncContractSummary, { exact: false }).waitFor({ timeout: 120000 });
+    await importedCompanyCard.getByText('Imported v1.0.0', { exact: false }).waitFor({ timeout: 120000 });
 
     await importIntoTrigger.click();
     const remainingImportTargets = page.locator('[data-testid="company-import-target-option"]');
@@ -843,6 +844,7 @@ async function main() {
       await syncTrigger.elementHandle(),
       { timeout: 120000 }
     );
+    await importedCompanyCard.getByText('Latest v1.1.0', { exact: false }).waitFor({ timeout: 120000 });
 
     await syncTrigger.click();
     await page.getByText('Company synced', { exact: true }).waitFor({ timeout: 120000 });
