@@ -14,6 +14,13 @@ export type CompanyContentKey = (typeof COMPANY_CONTENT_KEYS)[number];
 export type CompanyImportSelectionMode = "all" | "selected" | "none";
 export type CatalogSyncCollisionStrategy = "rename" | "skip" | "replace";
 export type CatalogCompanySyncStatus = "idle" | "running" | "succeeded" | "failed";
+export type CatalogSourceVersionComparison =
+  | "missing_latest"
+  | "missing_imported"
+  | "same"
+  | "latest_newer"
+  | "latest_older"
+  | "different_unknown";
 
 export type RepositoryScanStatus = "idle" | "ready" | "error";
 
@@ -751,56 +758,73 @@ function parseComparableVersion(value: string): {
   };
 }
 
-export function isCatalogCompanySyncAvailable(
+export function compareCatalogSourceVersions(
   importedSourceVersion: string | null,
   latestSourceVersion: string | null
-): boolean {
+): CatalogSourceVersionComparison {
   const importedVersion = asNonEmptyString(importedSourceVersion);
   const latestVersion = asNonEmptyString(latestSourceVersion);
 
   if (!latestVersion) {
-    return true;
+    return "missing_latest";
   }
 
   if (!importedVersion) {
-    return true;
+    return "missing_imported";
   }
 
   if (normalizeComparableVersion(importedVersion) === normalizeComparableVersion(latestVersion)) {
-    return false;
+    return "same";
   }
 
   const parsedImportedVersion = parseComparableVersion(importedVersion);
   const parsedLatestVersion = parseComparableVersion(latestVersion);
   if (!parsedImportedVersion || !parsedLatestVersion) {
-    return true;
+    return "different_unknown";
   }
 
   if (parsedLatestVersion.major !== parsedImportedVersion.major) {
-    return parsedLatestVersion.major > parsedImportedVersion.major;
+    return parsedLatestVersion.major > parsedImportedVersion.major
+      ? "latest_newer"
+      : "latest_older";
   }
 
   if (parsedLatestVersion.minor !== parsedImportedVersion.minor) {
-    return parsedLatestVersion.minor > parsedImportedVersion.minor;
+    return parsedLatestVersion.minor > parsedImportedVersion.minor
+      ? "latest_newer"
+      : "latest_older";
   }
 
   if (parsedLatestVersion.patch !== parsedImportedVersion.patch) {
-    return parsedLatestVersion.patch > parsedImportedVersion.patch;
+    return parsedLatestVersion.patch > parsedImportedVersion.patch
+      ? "latest_newer"
+      : "latest_older";
   }
 
   if (parsedImportedVersion.prerelease === parsedLatestVersion.prerelease) {
-    return false;
+    return "same";
   }
 
   if (parsedImportedVersion.prerelease && !parsedLatestVersion.prerelease) {
-    return true;
+    return "latest_newer";
   }
 
   if (!parsedImportedVersion.prerelease && parsedLatestVersion.prerelease) {
-    return false;
+    return "latest_older";
   }
 
-  return true;
+  return "different_unknown";
+}
+
+export function isCatalogCompanySyncAvailable(
+  importedSourceVersion: string | null,
+  latestSourceVersion: string | null
+): boolean {
+  const comparison = compareCatalogSourceVersions(importedSourceVersion, latestSourceVersion);
+  return comparison === "missing_latest"
+    || comparison === "missing_imported"
+    || comparison === "latest_newer"
+    || comparison === "different_unknown";
 }
 
 export function getCatalogCompanyAutoSyncReferenceAt(

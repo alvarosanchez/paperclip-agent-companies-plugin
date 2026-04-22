@@ -1,4 +1,4 @@
-import { isCatalogCompanySyncAvailable } from "../catalog.js";
+import { compareCatalogSourceVersions } from "../catalog.js";
 
 export interface ImportedCompanyVersionInfo {
   importedBadgeText: string | null;
@@ -16,17 +16,27 @@ export function getImportedCompanyVersionInfo(
 ): ImportedCompanyVersionInfo {
   const importedVersion = asNonEmptyString(importedSourceVersion);
   const latestVersion = asNonEmptyString(latestSourceVersion);
-  const newerVersionAvailable = isCatalogCompanySyncAvailable(importedVersion, latestVersion);
+  const comparison = compareCatalogSourceVersions(importedVersion, latestVersion);
 
   return {
     importedBadgeText: importedVersion ? `Imported v${importedVersion}` : null,
     latestBadgeText:
-      latestVersion && (!importedVersion || newerVersionAvailable)
-        ? `${importedVersion ? "Latest" : "Source"} v${latestVersion}`
+      latestVersion
+        && (
+          comparison === "missing_imported"
+          || comparison === "latest_newer"
+          || comparison === "latest_older"
+          || comparison === "different_unknown"
+        )
+        ? `${comparison === "latest_newer" ? "Latest" : "Source"} v${latestVersion}`
         : null,
     summaryText:
-      importedVersion && latestVersion && newerVersionAvailable
+      importedVersion && latestVersion && comparison === "latest_newer"
         ? `Imported from v${importedVersion}; source now at v${latestVersion}`
+        : importedVersion
+          && latestVersion
+          && (comparison === "latest_older" || comparison === "different_unknown")
+          ? `Imported from v${importedVersion}; source currently reports v${latestVersion}`
         : importedVersion
           ? `Imported from v${importedVersion}`
           : latestVersion

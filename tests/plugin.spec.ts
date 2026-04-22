@@ -16,6 +16,7 @@ import {
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
   buildStagedPaperclipImportSource,
+  compareCatalogSourceVersions,
   createRepositorySource,
   createEmptyCompanyContents,
   getCompanyContentItemRequirementSources,
@@ -791,6 +792,15 @@ routines:
       importedBadgeText: "Imported v1.0.0",
       latestBadgeText: "Latest v1.1.0",
       summaryText: "Imported from v1.0.0; source now at v1.1.0"
+    });
+  });
+
+  it("treats non-comparable source versions as unknown rather than newer", () => {
+    expect(compareCatalogSourceVersions("release-2026-04", "release-2026-05")).toBe("different_unknown");
+    expect(getImportedCompanyVersionInfo("release-2026-04", "release-2026-05")).toEqual({
+      importedBadgeText: "Imported vrelease-2026-04",
+      latestBadgeText: "Source vrelease-2026-05",
+      summaryText: "Imported from vrelease-2026-04; source currently reports vrelease-2026-05"
     });
   });
 
