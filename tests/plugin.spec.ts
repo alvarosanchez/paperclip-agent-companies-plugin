@@ -2623,11 +2623,13 @@ routines:
           url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
           method: "POST",
           body: {
-            source: "assignment",
-            triggerDetail: "system",
-            reason: "Wake for imported issue ALP-1",
+            source: "on_demand",
+            triggerDetail: "manual",
+            reason: "issue_assigned",
             payload: {
-              issueId: "issue-1"
+              issueId: "issue-1",
+              taskId: "issue-1",
+              mutation: "import"
             }
           }
         }
@@ -2750,11 +2752,168 @@ routines:
           url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
           method: "POST",
           body: {
+            source: "on_demand",
+            triggerDetail: "manual",
+            reason: "issue_assigned",
+            payload: {
+              issueId: "issue-1",
+              taskId: "issue-1",
+              mutation: "import"
+            }
+          }
+        }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("falls back to an assignment-style wake when the explicit import wake is skipped", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; method: string; body: unknown }> = [];
+    let wakeRequestCount = 0;
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? "GET";
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        method,
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "issue-1",
+              identifier: "ALP-1",
+              title: "Seed Default Company",
+              status: "backlog",
+              assigneeAgentId: "agent-123"
+            }
+          ]),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/agents/agent-123/wakeup") {
+        wakeRequestCount += 1;
+
+        return new Response(
+          JSON.stringify(
+            wakeRequestCount === 1
+              ? {
+                  status: "skipped",
+                  reason: "wakeup_skipped",
+                  message: "Wakeup was skipped.",
+                  issueId: "issue-1",
+                  executionRunId: null,
+                  executionAgentId: null,
+                  executionAgentName: null
+                }
+              : {
+                  id: "run-123",
+                  status: "queued"
+                }
+          ),
+          {
+            status: 202,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP",
+        issuesBeforeImport: []
+      });
+
+      expect(fetchRequests).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          method: "GET",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
+          method: "POST",
+          body: {
+            source: "on_demand",
+            triggerDetail: "manual",
+            reason: "issue_assigned",
+            payload: {
+              issueId: "issue-1",
+              taskId: "issue-1",
+              mutation: "import"
+            }
+          }
+        },
+        {
+          url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
+          method: "POST",
+          body: {
             source: "assignment",
             triggerDetail: "system",
-            reason: "Wake for imported issue ALP-1",
+            reason: "issue_assigned",
             payload: {
-              issueId: "issue-1"
+              issueId: "issue-1",
+              taskId: "issue-1",
+              mutation: "import"
             }
           }
         }

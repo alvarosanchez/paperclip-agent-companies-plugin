@@ -288,6 +288,30 @@ interface PaperclipIssueWakeTarget {
   issueTitle: string | null;
 }
 
+type PaperclipWakeRequestSource = "on_demand" | "assignment";
+
+interface PaperclipQueuedWakeResponse {
+  kind: "queued";
+  runId: string;
+}
+
+interface PaperclipSkippedWakeResponse {
+  kind: "skipped";
+  reason: string | null;
+  message: string | null;
+  executionRunId: string | null;
+  executionAgentId: string | null;
+  executionAgentName: string | null;
+}
+
+type PaperclipIssueWakeResponse = PaperclipQueuedWakeResponse | PaperclipSkippedWakeResponse;
+
+interface PaperclipIssueWakeRequestResult {
+  source: PaperclipWakeRequestSource;
+  runId: string | null;
+  reusedExistingExecution: boolean;
+}
+
 class PaperclipApiResponseError extends Error {
   status: number;
 
@@ -3401,32 +3425,102 @@ function selectPaperclipIssueWakeTargets(
   return [...wakeTargetsByAgentId.values()];
 }
 
-function buildPaperclipIssueWakeReason(target: PaperclipIssueWakeTarget): string {
+function describePaperclipIssueWakeTarget(target: PaperclipIssueWakeTarget): string {
   return target.issueIdentifier
-    ? `Wake for imported issue ${target.issueIdentifier}`
+    ? `imported issue ${target.issueIdentifier}`
     : target.issueTitle
-      ? `Wake for imported issue ${target.issueTitle}`
-      : `Wake for imported issue ${target.issueId}`;
+      ? `imported issue ${target.issueTitle}`
+      : `imported issue ${target.issueId}`;
+}
+
+function normalizePaperclipIssueWakeResponse(value: unknown): PaperclipIssueWakeResponse {
+  if (!isRecord(value)) {
+    throw new Error("Paperclip returned an unexpected wakeup response.");
+  }
+
+  if (asNonEmptyString(value.status) === "skipped") {
+    return {
+      kind: "skipped",
+      reason: asNonEmptyString(value.reason),
+      message: asNonEmptyString(value.message),
+      executionRunId: asNonEmptyString(value.executionRunId),
+      executionAgentId: asNonEmptyString(value.executionAgentId),
+      executionAgentName: asNonEmptyString(value.executionAgentName)
+    };
+  }
+
+  const runId = asNonEmptyString(value.id);
+  if (!runId) {
+    throw new Error("Paperclip did not return a heartbeat run id.");
+  }
+
+  return {
+    kind: "queued",
+    runId
+  };
+}
+
+function buildPaperclipIssueWakeRequestBody(
+  target: PaperclipIssueWakeTarget,
+  source: PaperclipWakeRequestSource
+): Record<string, unknown> {
+  return {
+    source,
+    triggerDetail: source === "on_demand" ? "manual" : "system",
+    reason: "issue_assigned",
+    payload: {
+      issueId: target.issueId,
+      taskId: target.issueId,
+      mutation: "import"
+    }
+  };
+}
+
+function summarizeSkippedPaperclipIssueWakeResponse(
+  response: PaperclipSkippedWakeResponse
+): string {
+  return response.message ?? response.reason ?? "Wakeup was skipped.";
 }
 
 async function requestPaperclipIssueWake(
   connection: PaperclipApiConnection,
   target: PaperclipIssueWakeTarget
-): Promise<void> {
-  await fetchPaperclipApiJson(
-    connection,
-    `/api/agents/${encodeURIComponent(target.agentId)}/wakeup`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        source: "assignment",
-        triggerDetail: "system",
-        reason: buildPaperclipIssueWakeReason(target),
-        payload: {
-          issueId: target.issueId
+): Promise<PaperclipIssueWakeRequestResult> {
+  const skippedAttemptMessages: string[] = [];
+
+  for (const source of ["on_demand", "assignment"] as const) {
+    const response = normalizePaperclipIssueWakeResponse(
+      await fetchPaperclipApiJson(
+        connection,
+        `/api/agents/${encodeURIComponent(target.agentId)}/wakeup`,
+        {
+          method: "POST",
+          body: JSON.stringify(buildPaperclipIssueWakeRequestBody(target, source))
         }
-      })
+      )
+    );
+
+    if (response.kind === "queued") {
+      return {
+        source,
+        runId: response.runId,
+        reusedExistingExecution: false
+      };
     }
+
+    if (response.executionRunId) {
+      return {
+        source,
+        runId: response.executionRunId,
+        reusedExistingExecution: true
+      };
+    }
+
+    skippedAttemptMessages.push(`${source}: ${summarizeSkippedPaperclipIssueWakeResponse(response)}`);
+  }
+
+  throw new Error(
+    `Paperclip skipped every wake attempt for ${describePaperclipIssueWakeTarget(target)}: ${skippedAttemptMessages.join(" | ")}`
   );
 }
 
@@ -3475,12 +3569,15 @@ async function requestWakeForNewlyAssignedPaperclipIssues(
 
   for (const target of wakeTargets) {
     try {
-      await requestPaperclipIssueWake(connection, target);
+      const wakeResult = await requestPaperclipIssueWake(connection, target);
       ctx.logger.info("Queued Paperclip wake request for a newly assigned imported issue", {
         companyId,
         agentId: target.agentId,
         issueId: target.issueId,
-        issueIdentifier: target.issueIdentifier
+        issueIdentifier: target.issueIdentifier,
+        wakeSource: wakeResult.source,
+        wakeRunId: wakeResult.runId,
+        reusedExistingExecution: wakeResult.reusedExistingExecution
       });
     } catch (error) {
       ctx.logger.warn("Failed to queue a Paperclip wake request for a newly assigned imported issue", {

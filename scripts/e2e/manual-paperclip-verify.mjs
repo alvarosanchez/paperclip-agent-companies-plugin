@@ -527,6 +527,7 @@ async function main() {
   console.log('Import one company into Dummy Company 2 with a partial selection, verify the success message summarizes the selected contents, offers an Open dashboard link, and mentions daily auto-sync plus overwrite mode.');
   console.log('Confirm that Dummy Company 2 disappears from later Import into... dropdowns after it becomes a tracked synced import.');
   console.log('Confirm that the imported company appears in the separate Imported Companies section with an Imported version badge, a disabled Up to date action, a checked Daily auto-sync toggle, a visible Sync contract summary, and a Re-import / Edit selection action.');
+  console.log('When the imported selection includes an assigned task, confirm the imported assignee still shows timer heartbeats disabled and that the agent nevertheless received a recent non-timer heartbeat run for the imported issue after import.');
   console.log('Use Re-import / Edit selection to change the saved selection and verify the Sync contract summary updates on the tracked company card.');
   console.log('Optional: open the plugin from another existing non-synced company and verify that Import into... can adopt that company too when it is not already tracked.');
   console.log('Change the source company version, click Rescan, and confirm the tracked company card shows the newer Latest version badge and the action switches to Sync now.');

@@ -751,6 +751,17 @@ async function main() {
     if (!importedAgent?.id) {
       throw new Error(`Expected imported company "${importTargetCompany.name}" to include the CEO agent.`);
     }
+    const importedAgentHeartbeat = importedAgent.runtimeConfig?.heartbeat ?? null;
+    if (importedAgentHeartbeat?.enabled !== false) {
+      throw new Error(
+        `Expected imported agent ${importedAgent.id} timer heartbeat to remain disabled after import, received ${JSON.stringify(importedAgentHeartbeat)}.`
+      );
+    }
+    if (importedAgentHeartbeat?.wakeOnDemand === false) {
+      throw new Error(
+        `Expected imported agent ${importedAgent.id} to keep on-demand wakeups enabled after import, received ${JSON.stringify(importedAgentHeartbeat)}.`
+      );
+    }
     const importedIssues = await waitForValue(
       `imported issues for ${importTargetCompany.name}`,
       async () => {
@@ -773,8 +784,8 @@ async function main() {
         `Expected Scope Catalog to be assigned to the imported CEO agent (${importedAgent.id}), received ${assignedImportIssue.assigneeAgentId ?? 'null'}.`
       );
     }
-    const heartbeatRuns = await waitForValue(
-      `wake-triggered heartbeat runs for ${importTargetCompany.name}`,
+    const wakeTriggeredHeartbeatRun = await waitForValue(
+      `wake-triggered non-timer heartbeat run for ${importTargetCompany.name}`,
       async () => {
         const response = await fetchJson(
           new URL(
@@ -782,12 +793,25 @@ async function main() {
             baseUrl
           ).toString()
         );
-        return Array.isArray(response) && response.length > 0 ? response : null;
+        if (!Array.isArray(response) || response.length === 0) {
+          return null;
+        }
+        return response.find((run) => {
+          const invocationSource = typeof run?.invocationSource === 'string' ? run.invocationSource : null;
+          const issueId =
+            typeof run?.contextSnapshot?.issueId === 'string'
+              ? run.contextSnapshot.issueId
+              : null;
+          return (invocationSource === 'on_demand' || invocationSource === 'assignment')
+            && issueId === assignedImportIssue.id;
+        }) ?? null;
       },
       120000
     );
-    if (!heartbeatRuns[0]?.id) {
-      throw new Error(`Expected imported agent ${importedAgent.id} to receive a heartbeat run after import.`);
+    if (!wakeTriggeredHeartbeatRun?.id) {
+      throw new Error(
+        `Expected imported agent ${importedAgent.id} to receive a non-timer heartbeat run for imported issue ${assignedImportIssue.id} after import.`
+      );
     }
 
     const openDashboardLink = page.locator('[data-testid="import-success-dashboard-link"]');
