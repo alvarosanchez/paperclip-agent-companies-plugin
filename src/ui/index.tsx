@@ -69,6 +69,8 @@ import {
   type CatalogImportedCompanySummary,
   type CatalogRepositorySummary,
   type CatalogSnapshot,
+  DEFAULT_AUTO_SYNC_CADENCE_HOURS,
+  MIN_AUTO_SYNC_CADENCE_HOURS,
   type PaperclipCompanyImportResult,
   buildStagedPaperclipImportSource,
   createDefaultCompanyImportSelection,
@@ -92,6 +94,7 @@ import {
 import { getImportedCompanyVersionInfo } from "./version-status.js";
 
 const EMPTY_CATALOG: CatalogSnapshot = {
+  autoSyncCadenceHours: DEFAULT_AUTO_SYNC_CADENCE_HOURS,
   repositories: [],
   companies: [],
   importedCompanies: [],
@@ -1374,7 +1377,13 @@ interface NoticeState {
 }
 
 interface PendingActionState {
-  kind: "adding" | "scanning-all" | "scanning-repository" | "removing" | "toggling-auto-sync";
+  kind:
+    | "adding"
+    | "scanning-all"
+    | "scanning-repository"
+    | "removing"
+    | "toggling-auto-sync"
+    | "updating-cadence";
   repositoryId?: string;
   sourceCompanyId?: string;
   importedCompanyId?: string;
@@ -2715,9 +2724,17 @@ function formatTimestamp(timestamp: string | null, emptyLabel = "Not scanned yet
   }
 }
 
-function getCompanySyncSummary(company: CatalogImportedCompanySummary): string | null {
+function formatAutoSyncCadenceLabel(hours: number): string {
+  return hours === 1 ? "every hour" : `every ${hours} hours`;
+}
+
+function getCompanySyncSummary(
+  company: CatalogImportedCompanySummary,
+  autoSyncCadenceHours: number
+): string | null {
   const { importedCompany } = company;
   const parts: string[] = [];
+  const cadenceLabel = formatAutoSyncCadenceLabel(autoSyncCadenceHours);
   const versionInfo = getImportedCompanyVersionInfo(
     importedCompany.importedSourceVersion,
     importedCompany.latestSourceVersion
@@ -2744,13 +2761,13 @@ function getCompanySyncSummary(company: CatalogImportedCompanySummary): string |
   if (importedCompany.autoSyncEnabled) {
     parts.push(
       importedCompany.isUpToDate
-        ? "Daily auto-sync watching for new versions"
+        ? `Auto-sync ${cadenceLabel} watching for new versions`
         : importedCompany.isAutoSyncDue
-          ? "Daily auto-sync due now"
-          : `Next auto-sync ${formatTimestamp(importedCompany.nextAutoSyncAt, "pending")}`
+          ? `Auto-sync due now (${cadenceLabel})`
+          : `Next auto-sync ${formatTimestamp(importedCompany.nextAutoSyncAt, "pending")} (${cadenceLabel})`
     );
   } else {
-    parts.push("Daily auto-sync paused");
+    parts.push("Auto-sync paused");
   }
 
   parts.push(
@@ -3178,14 +3195,15 @@ function RepositoryCard(props: {
 }
 
 function ImportedCompanySyncControls(props: {
+  autoSyncCadenceHours: number;
   company: CatalogImportedCompanySummary;
   isBusy: boolean;
   syncState: SyncState | null;
   onSync(sourceCompanyId: string, importedCompanyId: string): void;
   onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
 }): React.JSX.Element {
-  const { company, isBusy, syncState, onSync, onToggleAutoSync } = props;
-  const syncSummary = getCompanySyncSummary(company);
+  const { autoSyncCadenceHours, company, isBusy, syncState, onSync, onToggleAutoSync } = props;
+  const syncSummary = getCompanySyncSummary(company, autoSyncCadenceHours);
   const syncError = getCompanySyncError(company);
   const isSyncAvailable = company.importedCompany.isSyncAvailable;
   const isSyncButtonDisabled = isBusy || !isSyncAvailable;
@@ -3203,7 +3221,7 @@ function ImportedCompanySyncControls(props: {
           {getSyncButtonLabel(syncState, company)}
         </button>
         <label className="agent-companies-settings__switch-field">
-          <span>Daily auto-sync</span>
+          <span>Auto-sync</span>
           <ToggleSwitch
             checked={company.importedCompany.autoSyncEnabled}
             disabled={isBusy}
@@ -3314,6 +3332,7 @@ function DiscoveredCompanyCard(props: {
 }
 
 function ImportedCompanyCard(props: {
+  autoSyncCadenceHours: number;
   company: CatalogImportedCompanySummary;
   importState: ImportState | null;
   isSyncDisabled: boolean;
@@ -3324,6 +3343,7 @@ function ImportedCompanyCard(props: {
   onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
 }): React.JSX.Element {
   const {
+    autoSyncCadenceHours,
     company,
     importState,
     isSyncDisabled,
@@ -3396,6 +3416,7 @@ function ImportedCompanyCard(props: {
         Sync contract: {buildCompanyImportSelectionSummary(company.importedCompany.selection, company.contents)}
       </p>
       <ImportedCompanySyncControls
+        autoSyncCadenceHours={autoSyncCadenceHours}
         company={company}
         isBusy={isSyncDisabled}
         onSync={onSync}
@@ -4126,6 +4147,7 @@ export function AgentCompaniesSettingsPage({
   const recordCompanyImport = usePluginAction("catalog.record-company-import");
   const syncCompany = usePluginAction("catalog.sync-company");
   const setCompanyAutoSync = usePluginAction("catalog.set-company-auto-sync");
+  const setAutoSyncCadence = usePluginAction("catalog.set-auto-sync-cadence");
   const addRepository = usePluginAction("catalog.add-repository");
   const removeRepository = usePluginAction("catalog.remove-repository");
   const scanRepository = usePluginAction("catalog.scan-repository");
@@ -4135,6 +4157,9 @@ export function AgentCompaniesSettingsPage({
   const catalog = data ?? EMPTY_CATALOG;
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const [repositoryInput, setRepositoryInput] = useState("");
+  const [autoSyncCadenceInput, setAutoSyncCadenceInput] = useState(
+    String(DEFAULT_AUTO_SYNC_CADENCE_HOURS)
+  );
   const [companyQuery, setCompanyQuery] = useState("");
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingActionState | null>(null);
@@ -4200,6 +4225,15 @@ export function AgentCompaniesSettingsPage({
     ? catalog.companies.find((company) => company.id === selectedCompanyId) ?? null
     : null;
   const registeredApiBaseRef = useRef<string | null>(null);
+  const autoSyncCadenceValue = Number(autoSyncCadenceInput);
+  const isAutoSyncCadenceValid =
+    Number.isInteger(autoSyncCadenceValue) && autoSyncCadenceValue >= MIN_AUTO_SYNC_CADENCE_HOURS;
+  const isAutoSyncCadenceDirty =
+    autoSyncCadenceInput.trim() !== String(catalog.autoSyncCadenceHours);
+
+  useEffect(() => {
+    setAutoSyncCadenceInput(String(catalog.autoSyncCadenceHours));
+  }, [catalog.autoSyncCadenceHours]);
 
   async function ensurePaperclipApiBaseRegistered(): Promise<void> {
     const apiBase = resolveBrowserOrigin();
@@ -4686,7 +4720,7 @@ export function AgentCompaniesSettingsPage({
         const importDetails = [
           `Selected contents: ${buildCompanyImportSelectionSummary(preparedImport.selection, importCompany.contents)}`,
           getRecurringTaskImportHint(importCompany.contents),
-          "Auto-sync: enabled daily by default after import.",
+          `Auto-sync: enabled ${formatAutoSyncCadenceLabel(catalog.autoSyncCadenceHours)} by default after import.`,
           importDialog.collisionStrategy === "replace"
             ? "Sync mode: overwrite existing content."
             : `Sync mode: ${importDialog.collisionStrategy}.`,
@@ -4861,8 +4895,42 @@ export function AgentCompaniesSettingsPage({
       await refreshCatalog({
         tone: "info",
         text: enabled
-          ? `Daily auto-sync enabled for "${company.importedCompany.name}".`
-          : `Daily auto-sync paused for "${company.importedCompany.name}".`
+          ? `Auto-sync enabled for "${company.importedCompany.name}".`
+          : `Auto-sync paused for "${company.importedCompany.name}".`
+      });
+    } catch (actionError) {
+      setNotice({
+        tone: "error",
+        text: getErrorMessage(actionError)
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function handleSetAutoSyncCadence(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (!isAutoSyncCadenceValid) {
+      setNotice({
+        tone: "error",
+        text: `Enter an auto-sync cadence of at least ${MIN_AUTO_SYNC_CADENCE_HOURS} hour${MIN_AUTO_SYNC_CADENCE_HOURS === 1 ? "" : "s"}.`
+      });
+      return;
+    }
+
+    setPendingAction({
+      kind: "updating-cadence"
+    });
+    setNotice(null);
+
+    try {
+      await setAutoSyncCadence({
+        autoSyncCadenceHours: autoSyncCadenceValue
+      });
+      await refreshCatalog({
+        tone: "info",
+        text: `Auto-sync cadence updated to ${formatAutoSyncCadenceLabel(autoSyncCadenceValue)}.`
       });
     } catch (actionError) {
       setNotice({
@@ -5461,7 +5529,7 @@ export function AgentCompaniesSettingsPage({
             <div>
               <h2 className="agent-companies-settings__panel-title">Imported Companies</h2>
               <p className="agent-companies-settings__panel-copy">
-                These are the tracked Paperclip companies created from discovered sources. Sync and daily auto-sync controls live here.
+                These are the tracked Paperclip companies created from discovered sources. Sync controls, per-company auto-sync toggles, and the shared cadence live here.
               </p>
             </div>
             <div className="agent-companies-settings__badge-row">
@@ -5470,11 +5538,41 @@ export function AgentCompaniesSettingsPage({
               </span>
             </div>
           </div>
+          <form
+            className="agent-companies-settings__form"
+            onSubmit={(event) => void handleSetAutoSyncCadence(event)}
+          >
+            <label htmlFor="agent-companies-auto-sync-cadence-input">
+              Auto-sync cadence (hours)
+            </label>
+            <input
+              className="agent-companies-settings__input"
+              data-testid="auto-sync-cadence-input"
+              id="agent-companies-auto-sync-cadence-input"
+              inputMode="numeric"
+              min={MIN_AUTO_SYNC_CADENCE_HOURS}
+              onChange={(event) => setAutoSyncCadenceInput(event.target.value)}
+              step={1}
+              type="number"
+              value={autoSyncCadenceInput}
+            />
+            <button
+              className="agent-companies-settings__button"
+              data-testid="auto-sync-cadence-submit"
+              disabled={
+                pendingAction !== null || !isAutoSyncCadenceValid || !isAutoSyncCadenceDirty
+              }
+              type="submit"
+            >
+              {pendingAction?.kind === "updating-cadence" ? "Saving..." : "Save cadence"}
+            </button>
+          </form>
 
           {importedCompanies.length > 0 ? (
             <div className="agent-companies-settings__company-list">
               {importedCompanies.map((company) => (
                 <ImportedCompanyCard
+                  autoSyncCadenceHours={catalog.autoSyncCadenceHours}
                   company={company}
                   importState={importState}
                   isSyncDisabled={isSyncDisabled}

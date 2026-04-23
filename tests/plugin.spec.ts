@@ -9,6 +9,7 @@ import { parse as parseYaml } from "yaml";
 import manifest from "../src/manifest.js";
 import {
   AGENT_COMPANIES_SCHEMA,
+  DEFAULT_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_SYNC_COLLISION_STRATEGY,
   CATALOG_STATE_KEY,
   DEFAULT_REPOSITORY_URL,
@@ -378,9 +379,10 @@ describe("agent companies plugin", () => {
     expect(manifest.jobs).toEqual([
       {
         jobKey: "catalog-auto-sync",
-        displayName: "Daily Agent Company Auto-Sync",
-        description: "Checks imported agent companies and syncs any source that is due for its daily update.",
-        schedule: "0 3 * * *"
+        displayName: "Agent Company Auto-Sync",
+        description:
+          `Checks tracked agent companies every hour and syncs any source due for its configured auto-sync cadence (${DEFAULT_AUTO_SYNC_CADENCE_HOURS} hours by default).`,
+        schedule: "0 * * * *"
       }
     ]);
     expect(manifest.entrypoints.ui).toBe("./dist/ui");
@@ -469,6 +471,7 @@ describe("agent companies plugin", () => {
     expect(data.companies).toHaveLength(1);
     expect(data.companies[0]?.name).toBe("Agency Agents");
     expect(data.companies[0]?.contents.skills).toEqual([]);
+    expect(data.autoSyncCadenceHours).toBe(DEFAULT_AUTO_SYNC_CADENCE_HOURS);
     expect(data.summary.companyCount).toBe(1);
   });
 
@@ -2055,7 +2058,7 @@ routines:
     });
   });
 
-  it("lets operators disable daily auto-sync for an imported company", async () => {
+  it("lets operators disable auto-sync for an imported company", async () => {
     const repositoryPath = await createRepositoryFixture();
     let currentTime = "2026-04-14T09:23:00.000Z";
     const plugin = createAgentCompaniesPlugin({
@@ -2109,6 +2112,69 @@ routines:
     expect(disabledImport?.importedCompany.isAutoSyncDue).toBe(false);
     expect(disabledImport?.importedCompany.nextAutoSyncAt).toBeNull();
     expect(untouchedImport?.importedCompany.autoSyncEnabled).toBe(true);
+  });
+
+  it("lets operators configure the auto-sync cadence in hours", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+
+    await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+    await harness.performAction("catalog.scan-repository", {
+      repositoryId: catalog.repositories[0]?.id
+    });
+
+    currentTime = "2026-04-14T15:24:00.000Z";
+
+    const beforeUpdate = await harness.getData<CatalogSnapshot>("catalog.read");
+    const beforeUpdateImport = beforeUpdate.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+    );
+
+    expect(beforeUpdate.autoSyncCadenceHours).toBe(DEFAULT_AUTO_SYNC_CADENCE_HOURS);
+    expect(beforeUpdateImport?.importedCompany.isAutoSyncDue).toBe(false);
+    expect(beforeUpdateImport?.importedCompany.nextAutoSyncAt).toBe("2026-04-15T09:23:00.000Z");
+
+    const afterUpdate = await harness.performAction<CatalogSnapshot>(
+      "catalog.set-auto-sync-cadence",
+      {
+        autoSyncCadenceHours: 6
+      }
+    );
+    const afterUpdateImport = afterUpdate.importedCompanies.find(
+      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
+    );
+
+    expect(afterUpdate.autoSyncCadenceHours).toBe(6);
+    expect(afterUpdateImport?.importedCompany.isAutoSyncDue).toBe(true);
+    expect(afterUpdateImport?.importedCompany.nextAutoSyncAt).toBe("2026-04-14T15:23:00.000Z");
   });
 
   it("syncs imported companies with overwrite collisions", async () => {
@@ -3501,7 +3567,7 @@ routines:
     }
   });
 
-  it("runs the daily auto-sync job for due imported companies", async () => {
+  it("runs the auto-sync job for due imported companies after rescanning the source repository", async () => {
     const repositoryPath = await createRepositoryFixture();
     let currentTime = "2026-04-14T09:23:00.000Z";
     let syncCount = 0;
@@ -3559,13 +3625,14 @@ routines:
       (candidate) => candidate.importedCompany.id === "paperclip-company-123"
     );
 
+    expect(afterJob.repositories[0]?.lastScannedAt).toBe("2026-04-15T09:24:00.000Z");
     expect(importedCompany?.importedCompany.lastSyncedAt).toBe("2026-04-15T09:24:00.000Z");
     expect(importedCompany?.importedCompany.syncStatus).toBe("succeeded");
     expect(importedCompany?.importedCompany.importedSourceVersion).toBe("1.1.0");
     expect(importedCompany?.importedCompany.isSyncAvailable).toBe(false);
   });
 
-  it("runs overdue auto-sync shortly after startup so restarts do not miss the daily cadence", async () => {
+  it("runs overdue auto-sync shortly after startup so restarts do not miss the configured cadence", async () => {
     const repositoryPath = await createRepositoryFixture();
     const repository = createRepositorySource(repositoryPath);
     const discoveredCompanies = await scanRepositoryForAgentCompanies(repositoryPath, repository.id);
@@ -3645,6 +3712,72 @@ routines:
     expect(importedCompany?.importedCompany.syncStatus).toBe("succeeded");
     expect(importedCompany?.importedCompany.importedSourceVersion).toBe("1.0.0");
     expect(importedCompany?.importedCompany.isSyncAvailable).toBe(false);
+  });
+
+  it("rescans each due repository once before attempting syncs from it", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    let currentTime = "2026-04-14T09:23:00.000Z";
+    let scanCount = 0;
+    const plugin = createAgentCompaniesPlugin({
+      now: () => currentTime,
+      startupAutoSyncDelayMs: null,
+      scanRepository: async (repository) => {
+        scanCount += 1;
+        return scanRepositoryForAgentCompanies(repository.url, repository.id);
+      },
+      syncImport: async (_ctx, input) => {
+        return {
+          company: {
+            id: input.importedCompanyId,
+            name: input.importedCompanyId,
+            action: "updated"
+          },
+          agents: [],
+          projects: [],
+          warnings: []
+        };
+      }
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP"
+    });
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: company?.id,
+      importedCompanyId: "paperclip-company-456",
+      importedCompanyName: "Alpha Labs Sandbox",
+      importedCompanyIssuePrefix: "ALPS"
+    });
+
+    await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+    currentTime = "2026-04-15T09:24:00.000Z";
+    await harness.runJob("catalog-auto-sync");
+
+    expect(scanCount).toBe(2);
+
+    const afterJob = await harness.getData<CatalogSnapshot>("catalog.read");
+    expect(afterJob.repositories[0]?.lastScannedAt).toBe("2026-04-15T09:24:00.000Z");
   });
 
   it("returns null when tampered company content paths resolve outside the repository root", async () => {

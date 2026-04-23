@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
-import { PLUGIN_DISPLAY_NAME, PLUGIN_ID } from "./catalog.js";
+import { DEFAULT_AUTO_SYNC_CADENCE_HOURS, PLUGIN_DISPLAY_NAME, PLUGIN_ID } from "./catalog.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: unknown };
@@ -37,9 +37,9 @@ const manifest: PaperclipPluginManifestV1 = {
   jobs: [
     {
       jobKey: "catalog-auto-sync",
-      displayName: "Daily Agent Company Auto-Sync",
-      description: "Checks imported agent companies and syncs any source that is due for its daily update.",
-      schedule: "0 3 * * *"
+      displayName: "Agent Company Auto-Sync",
+      description: `Checks tracked agent companies every hour and syncs any source due for its configured auto-sync cadence (${DEFAULT_AUTO_SYNC_CADENCE_HOURS} hours by default).`,
+      schedule: "0 * * * *"
     }
   ],
   ui: {
