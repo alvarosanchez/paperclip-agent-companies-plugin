@@ -623,6 +623,15 @@ async function main() {
     await page.getByText(settingsPageHeading, { exact: true }).first().waitFor({ timeout: 120000 });
     await page.locator('[data-testid="catalog-page"]').waitFor({ timeout: 120000 });
 
+    const autoSyncCadenceInput = page.locator('[data-testid="auto-sync-cadence-input"]');
+    await autoSyncCadenceInput.waitFor({ timeout: 120000 });
+    const autoSyncCadenceValue = await autoSyncCadenceInput.inputValue();
+    if (autoSyncCadenceValue !== '24') {
+      throw new Error(
+        `Expected auto-sync cadence input to default to 24 hours, received "${autoSyncCadenceValue}".`
+      );
+    }
+
     const repositoryInput = page.locator('#agent-companies-repository-input');
     const addRepositoryButton = page.getByRole('button', { name: 'Add repository' });
     await repositoryInput.waitFor({ timeout: 120000 });
