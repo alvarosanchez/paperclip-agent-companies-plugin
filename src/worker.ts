@@ -3779,6 +3779,15 @@ async function runCatalogCompanySync(
         );
       }
 
+      if (nextImportedCompanyId !== importedCompany.importedCompanyId) {
+        await carryForwardBoardAccessRegistration(
+          ctx,
+          importedCompany.importedCompanyId,
+          nextImportedCompanyId,
+          syncedAt
+        );
+      }
+
       await persistCatalogState(
         ctx,
         updateImportedCatalogCompany(latestState, sourceCompanyId, importedCompanyId, (company) => ({
@@ -3793,15 +3802,6 @@ async function runCatalogCompanySync(
         })),
         syncedAt
       );
-
-      if (nextImportedCompanyId !== importedCompany.importedCompanyId) {
-        await carryForwardBoardAccessRegistration(
-          ctx,
-          importedCompany.importedCompanyId,
-          nextImportedCompanyId,
-          syncedAt
-        );
-      }
 
       ctx.logger.info("Synced imported agent company", {
         sourceCompanyId,
