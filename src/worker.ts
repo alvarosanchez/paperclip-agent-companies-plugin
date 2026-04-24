@@ -1832,6 +1832,35 @@ async function persistBoardAccessState(
   return nextState;
 }
 
+async function carryForwardBoardAccessRegistration(
+  ctx: PluginContext,
+  previousCompanyId: string,
+  nextCompanyId: string,
+  now: string
+): Promise<void> {
+  if (previousCompanyId === nextCompanyId) {
+    return;
+  }
+
+  const currentState = await loadBoardAccessState(ctx);
+  const previousRecord = currentState.companies[previousCompanyId];
+  if (!previousRecord || currentState.companies[nextCompanyId]) {
+    return;
+  }
+
+  await persistBoardAccessState(
+    ctx,
+    {
+      ...currentState,
+      companies: {
+        ...currentState.companies,
+        [nextCompanyId]: previousRecord
+      }
+    },
+    now
+  );
+}
+
 async function persistPaperclipRuntimeState(
   ctx: PluginContext,
   state: PaperclipRuntimeState,
@@ -3764,6 +3793,15 @@ async function runCatalogCompanySync(
         })),
         syncedAt
       );
+
+      if (nextImportedCompanyId !== importedCompany.importedCompanyId) {
+        await carryForwardBoardAccessRegistration(
+          ctx,
+          importedCompany.importedCompanyId,
+          nextImportedCompanyId,
+          syncedAt
+        );
+      }
 
       ctx.logger.info("Synced imported agent company", {
         sourceCompanyId,

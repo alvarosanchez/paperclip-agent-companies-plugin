@@ -3501,6 +3501,110 @@ routines:
     }
   });
 
+  it("carries saved board access forward when sync returns a different imported company id", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-15T10:00:00.000Z",
+        startupAutoSyncDelayMs: null,
+        syncImport: async () => ({
+          company: {
+            id: "paperclip-company-456",
+            name: "Alpha Labs Imported",
+            action: "updated"
+          }
+        })
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      });
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-123",
+        paperclipBoardApiTokenRef: "secret-board-token-ref",
+        identity: "Agent Operator"
+      });
+
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      const migrated = await harness.getData<{
+        companyId: string | null;
+        configured: boolean;
+        identity: string | null;
+        updatedAt: string | null;
+      }>("board-access.read", {
+        companyId: "paperclip-company-456"
+      });
+
+      expect(migrated).toMatchObject({
+        companyId: "paperclip-company-456",
+        configured: true,
+        identity: "Agent Operator"
+      });
+      expect(migrated.updatedAt).toBeTruthy();
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
   it("runs the daily auto-sync job for due imported companies", async () => {
     const repositoryPath = await createRepositoryFixture();
     let currentTime = "2026-04-14T09:23:00.000Z";
