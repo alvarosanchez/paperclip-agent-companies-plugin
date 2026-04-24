@@ -16,6 +16,7 @@ import {
   type CompanyImportPartSelection,
   type CompanyImportSelection,
   DEFAULT_AUTO_SYNC_ENABLED,
+  MIN_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_SYNC_COLLISION_STRATEGY,
   type ImportedCatalogCompanyRecord,
   COMPANY_CONTENT_KEYS,
@@ -27,6 +28,7 @@ import {
   isCatalogCompanySyncAvailable,
   isCatalogCompanyAutoSyncDue,
   normalizeCompanyContentPath,
+  normalizeCatalogAutoSyncCadenceHours,
   normalizeCatalogState,
   normalizeRepositoryCloneRef,
   resolveCompanyImportSelection,
@@ -190,6 +192,11 @@ const DEFAULT_SUPPORTED_PAPERCLIP_AGENT_ICONS = new Set([
 
 function getImportedCatalogCompanyOperationKey(sourceCompanyId: string, importedCompanyId: string): string {
   return `${sourceCompanyId}::${importedCompanyId}`;
+}
+
+function getSourceCompanyRepositoryId(sourceCompanyId: string): string | null {
+  const separatorIndex = sourceCompanyId.indexOf(":");
+  return separatorIndex > 0 ? sourceCompanyId.slice(0, separatorIndex) : null;
 }
 
 type RepositoryScanner = (repository: RepositorySource) => Promise<DiscoveredAgentCompany[]>;
@@ -889,6 +896,26 @@ function getRequiredString(params: Record<string, unknown>, key: string): string
   const value = asNonEmptyString(params[key]);
   if (!value) {
     throw new Error(`${key} is required.`);
+  }
+
+  return value;
+}
+
+function getRequiredInteger(
+  params: Record<string, unknown>,
+  key: string,
+  minimum = MIN_AUTO_SYNC_CADENCE_HOURS
+): number {
+  const rawValue = params[key];
+  const value =
+    typeof rawValue === "string" && rawValue.trim()
+      ? Number(rawValue)
+      : typeof rawValue === "number"
+        ? rawValue
+        : NaN;
+
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${key} must be an integer greater than or equal to ${minimum}.`);
   }
 
   return value;
@@ -1811,6 +1838,7 @@ async function persistCatalogState(
   const nextState = normalizeCatalogState({
     repositories: state.repositories,
     importedCompanies: state.importedCompanies,
+    autoSyncCadenceHours: state.autoSyncCadenceHours,
     updatedAt: now
   });
 
@@ -3629,6 +3657,7 @@ async function runCatalogCompanySync(
     scanRepository: RepositoryScanner;
     syncImport: SyncImportExecutor;
     trigger: "manual" | "schedule" | "startup";
+    skipInitialRepositoryScan?: boolean;
   }
 ): Promise<CatalogCompanySyncResult> {
   const syncKey = getImportedCatalogCompanyOperationKey(sourceCompanyId, importedCompanyId);
@@ -3667,23 +3696,37 @@ async function runCatalogCompanySync(
     );
 
     try {
-      const scannedRepository = await scanRepositoryEntry(
-        initialMatch.repository,
-        options.scanRepository,
-        startedAt,
-        ctx.logger
-      );
-      currentState = await persistCatalogState(
-        ctx,
-        updateRepository(currentState, initialMatch.repository.id, () => scannedRepository),
-        options.now()
-      );
+      let refreshedMatch: { repository: RepositorySource; company: DiscoveredAgentCompany } | null = initialMatch;
 
-      if (scannedRepository.lastScanError) {
-        throw new Error(`Source repository scan failed: ${scannedRepository.lastScanError}`);
+      if (options.skipInitialRepositoryScan) {
+        if (initialMatch.repository.lastScanError) {
+          throw new Error(`Source repository scan failed: ${initialMatch.repository.lastScanError}`);
+        }
+      } else {
+        const scannedRepository = await scanRepositoryEntry(
+          initialMatch.repository,
+          options.scanRepository,
+          startedAt,
+          ctx.logger
+        );
+        currentState = await persistCatalogState(
+          ctx,
+          updateRepository(currentState, initialMatch.repository.id, () => scannedRepository),
+          options.now()
+        );
+
+        if (scannedRepository.lastScanError) {
+          throw new Error(`Source repository scan failed: ${scannedRepository.lastScanError}`);
+        }
+
+        refreshedMatch = findRepositoryCompany(currentState, sourceCompanyId);
+        if (!refreshedMatch) {
+          throw new Error(
+            `"${initialMatch.company.name}" no longer exists in the source repository after the latest scan.`
+          );
+        }
       }
 
-      const refreshedMatch = findRepositoryCompany(currentState, sourceCompanyId);
       if (!refreshedMatch) {
         throw new Error(
           `"${initialMatch.company.name}" no longer exists in the source repository after the latest scan.`
@@ -3859,6 +3902,32 @@ async function runCatalogCompanySync(
   return syncPromise;
 }
 
+async function rescanRepositoriesForAutoSync(
+  ctx: PluginContext,
+  state: CatalogState,
+  repositoryIds: string[],
+  timestamp: string,
+  scanRepository: RepositoryScanner
+): Promise<CatalogState> {
+  if (repositoryIds.length === 0) {
+    return state;
+  }
+
+  let nextState = state;
+
+  for (const repositoryId of repositoryIds) {
+    const repository = nextState.repositories.find((candidate) => candidate.id === repositoryId);
+    if (!repository) {
+      continue;
+    }
+
+    const scannedRepository = await scanRepositoryEntry(repository, scanRepository, timestamp, ctx.logger);
+    nextState = updateRepository(nextState, repositoryId, () => scannedRepository);
+  }
+
+  return persistCatalogState(ctx, nextState, timestamp);
+}
+
 async function runDueAutoSyncs(
   ctx: PluginContext,
   options: {
@@ -3874,12 +3943,37 @@ async function runDueAutoSyncs(
 
   autoSyncSweepPromise = (async () => {
     const timestamp = options.now();
-    const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+    let currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+    const autoSyncCadenceHours = normalizeCatalogAutoSyncCadenceHours(
+      currentState.autoSyncCadenceHours
+    );
     const dueImports = currentState.importedCompanies.filter((company) =>
-      isCatalogCompanyAutoSyncDue(company, timestamp)
+      isCatalogCompanyAutoSyncDue(company, timestamp, autoSyncCadenceHours)
+    );
+    const dueImportKeys = new Set(
+      dueImports.map((company) =>
+        getImportedCatalogCompanyOperationKey(company.sourceCompanyId, company.importedCompanyId)
+      )
+    );
+    const dueRepositoryIds = [...new Set(
+      dueImports
+        .map((company) => getSourceCompanyRepositoryId(company.sourceCompanyId))
+        .filter((repositoryId): repositoryId is string => Boolean(repositoryId))
+    )];
+
+    currentState = await rescanRepositoriesForAutoSync(
+      ctx,
+      currentState,
+      dueRepositoryIds,
+      timestamp,
+      options.scanRepository
     );
 
-    for (const importedCompany of dueImports) {
+    for (const importedCompany of currentState.importedCompanies.filter((company) =>
+      dueImportKeys.has(
+        getImportedCatalogCompanyOperationKey(company.sourceCompanyId, company.importedCompanyId)
+      )
+    )) {
       try {
         await runCatalogCompanySync(
           ctx,
@@ -3887,7 +3981,8 @@ async function runDueAutoSyncs(
           importedCompany.importedCompanyId,
           {
             ...options,
-            trigger: options.trigger
+            trigger: options.trigger,
+            skipInitialRepositoryScan: true
           }
         );
       } catch (error) {
@@ -4112,6 +4207,23 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
             ...company,
             autoSyncEnabled: enabled
           })),
+          timestamp
+        );
+
+        return buildCatalogResponse(nextState, timestamp);
+      });
+
+      ctx.actions.register("catalog.set-auto-sync-cadence", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const autoSyncCadenceHours = getRequiredInteger(params, "autoSyncCadenceHours");
+        const timestamp = now();
+        const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+        const nextState = await persistCatalogState(
+          ctx,
+          {
+            ...currentState,
+            autoSyncCadenceHours
+          },
           timestamp
         );
 

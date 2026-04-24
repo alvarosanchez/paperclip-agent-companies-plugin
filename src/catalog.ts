@@ -7,8 +7,9 @@ export const CATALOG_STATE_KEY = "agent-companies.catalog.v1";
 export const AGENT_COMPANIES_SCHEMA = "agentcompanies/v1";
 export const COMPANY_CONTENT_KEYS = ["agents", "projects", "tasks", "issues", "skills"] as const;
 export const DEFAULT_AUTO_SYNC_ENABLED = true;
+export const DEFAULT_AUTO_SYNC_CADENCE_HOURS = 24;
+export const MIN_AUTO_SYNC_CADENCE_HOURS = 1;
 export const DEFAULT_SYNC_COLLISION_STRATEGY = "replace" as const;
-export const AUTO_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export type CompanyContentKey = (typeof COMPANY_CONTENT_KEYS)[number];
 export type CompanyImportSelectionMode = "all" | "selected" | "none";
@@ -208,6 +209,7 @@ export interface RepositorySource {
 export interface CatalogState {
   repositories: RepositorySource[];
   importedCompanies: ImportedCatalogCompanyRecord[];
+  autoSyncCadenceHours: number;
   updatedAt: string | null;
 }
 
@@ -233,6 +235,7 @@ export type CatalogImportedCompanySummary = Omit<
 };
 
 export interface CatalogSnapshot {
+  autoSyncCadenceHours: number;
   repositories: CatalogRepositorySummary[];
   companies: CatalogCompanySummary[];
   importedCompanies: CatalogImportedCompanySummary[];
@@ -339,6 +342,19 @@ function asIsoTimestamp(value: unknown): string | null {
 
 function asNonNegativeInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+export function normalizeCatalogAutoSyncCadenceHours(value: unknown): number {
+  const candidate =
+    typeof value === "string" && value.trim()
+      ? Number(value)
+      : typeof value === "number"
+        ? value
+        : NaN;
+
+  return Number.isInteger(candidate) && candidate >= MIN_AUTO_SYNC_CADENCE_HOURS
+    ? candidate
+    : DEFAULT_AUTO_SYNC_CADENCE_HOURS;
 }
 
 function normalizeCatalogSyncCollisionStrategy(value: unknown): CatalogSyncCollisionStrategy {
@@ -841,7 +857,8 @@ export function getCatalogCompanyNextAutoSyncAt(
   record: Pick<
     ImportedCatalogCompanyRecord,
     "autoSyncEnabled" | "lastSyncAttemptAt" | "lastSyncedAt" | "importedAt"
-  >
+  >,
+  cadenceHours = DEFAULT_AUTO_SYNC_CADENCE_HOURS
 ): string | null {
   if (!record.autoSyncEnabled) {
     return null;
@@ -852,7 +869,10 @@ export function getCatalogCompanyNextAutoSyncAt(
     return null;
   }
 
-  return addMillisecondsToIso(referenceTimestamp, AUTO_SYNC_INTERVAL_MS);
+  return addMillisecondsToIso(
+    referenceTimestamp,
+    normalizeCatalogAutoSyncCadenceHours(cadenceHours) * 60 * 60 * 1000
+  );
 }
 
 export function isCatalogCompanyAutoSyncDue(
@@ -860,13 +880,14 @@ export function isCatalogCompanyAutoSyncDue(
     ImportedCatalogCompanyRecord,
     "autoSyncEnabled" | "lastSyncAttemptAt" | "lastSyncedAt" | "importedAt" | "lastSyncStatus"
   >,
-  now: string
+  now: string,
+  cadenceHours = DEFAULT_AUTO_SYNC_CADENCE_HOURS
 ): boolean {
   if (!record.autoSyncEnabled || record.lastSyncStatus === "running") {
     return false;
   }
 
-  const nextAutoSyncAt = getCatalogCompanyNextAutoSyncAt(record);
+  const nextAutoSyncAt = getCatalogCompanyNextAutoSyncAt(record, cadenceHours);
   if (!nextAutoSyncAt) {
     return true;
   }
@@ -1316,6 +1337,7 @@ export function createDefaultCatalogState(): CatalogState {
   return {
     repositories: [createRepositorySource(DEFAULT_REPOSITORY_URL)],
     importedCompanies: [],
+    autoSyncCadenceHours: DEFAULT_AUTO_SYNC_CADENCE_HOURS,
     updatedAt: null
   };
 }
@@ -1374,11 +1396,15 @@ export function normalizeCatalogState(value: unknown): CatalogState {
   return {
     repositories: repositories.length > 0 || hadExplicitRepositories ? repositories : createDefaultCatalogState().repositories,
     importedCompanies: [...importedCompanies.values()],
+    autoSyncCadenceHours: normalizeCatalogAutoSyncCadenceHours(
+      value.autoSyncCadenceHours ?? value.syncCadenceHours ?? value.autoSyncIntervalHours
+    ),
     updatedAt: asIsoTimestamp(value.updatedAt)
   };
 }
 
 export function buildCatalogSnapshot(state: CatalogState, now: string | null = null): CatalogSnapshot {
+  const autoSyncCadenceHours = normalizeCatalogAutoSyncCadenceHours(state.autoSyncCadenceHours);
   const importedCompaniesBySourceId = new Map<string, ImportedCatalogCompanyRecord[]>();
 
   for (const importedCompany of state.importedCompanies) {
@@ -1424,8 +1450,13 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
               isSyncAvailable,
               isUpToDate: !isSyncAvailable,
               isAutoSyncDue:
-                now && isSyncAvailable ? isCatalogCompanyAutoSyncDue(importedCompany, now) : false,
-              nextAutoSyncAt: importedCompany.autoSyncEnabled ? getCatalogCompanyNextAutoSyncAt(importedCompany) : null
+                now && isSyncAvailable
+                  ? isCatalogCompanyAutoSyncDue(importedCompany, now, autoSyncCadenceHours)
+                  : false,
+              nextAutoSyncAt:
+                importedCompany.autoSyncEnabled
+                  ? getCatalogCompanyNextAutoSyncAt(importedCompany, autoSyncCadenceHours)
+                  : null
             };
           })
           .sort((left, right) =>
@@ -1469,6 +1500,7 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
     );
 
   return {
+    autoSyncCadenceHours,
     repositories,
     companies,
     importedCompanies,

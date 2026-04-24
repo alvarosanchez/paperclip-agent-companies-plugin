@@ -17,7 +17,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 - Agent-company `TASK.md` files and Paperclip `ISSUE.md` manifests are grouped together under **Tasks** in the hosted UI
 - Required project and agent dependencies are auto-included whenever selected tasks depend on them
 - Saved sync contracts per tracked imported company, plus a re-import flow for updating the selection later
-- Manual sync plus daily background auto-sync for tracked imported companies
+- Manual sync plus background auto-sync for tracked imported companies
 - Recurring `TASK.md` support: `recurring: true` tasks import as Paperclip routines, with `.paperclip.yaml` routine metadata preserved
 - Company-scoped Board access connection for authenticated Paperclip deployments
 - Optional `metadata.paperclip.agentIcon` support for agent icon hints
@@ -61,7 +61,7 @@ paperclipai plugin install --local .
 7. Importing into an existing non-synced company adopts that company for future syncs, including the company whose settings page you are currently viewing.
 8. Use **Re-import / Edit selection** from the tracked company card whenever you want to deliberately change the saved sync contract.
 9. If your Paperclip deployment requires authentication, open this plugin inside the imported company once and complete **Board access connection** in settings.
-10. Use the separate **Imported Companies** section for **Sync now** and **Daily auto-sync** controls.
+10. Use the separate **Imported Companies** section for **Sync now**, per-company **Auto-sync** toggles, and the shared cadence control.
 
 ## Package Expectations
 
@@ -94,7 +94,8 @@ During import, the plugin packages the selected company contents as an inline Pa
 
 - The plugin records the imported source version from `COMPANY.md` per tracked imported company.
 - Tracked imported company cards show the version each company was imported from, and surface a newer source version when one is available.
-- Imported companies default to daily auto-sync.
+- Imported companies default to auto-sync every 24 hours, and that cadence is configurable in hours from the hosted settings page.
+- The background auto-sync check runs hourly, rescans tracked source repositories before syncing, and then syncs any tracked import whose cadence is due.
 - Manual sync is available whenever the source version changes or cannot be compared safely.
 - Each tracked import saves the selected subset of the source package as its long-term sync contract.
 - When selected tasks depend on specific projects or assignees, the saved sync contract automatically includes those required projects and agents.
@@ -143,6 +144,11 @@ Additional verification commands:
 
 - `pnpm test:e2e` for the hosted Paperclip smoke flow, including the case where imported assigned tasks still wake imported agents even though imported agents keep timer heartbeats disabled
 - `pnpm verify:manual` for an interactive local verification run
+
+Manual verification highlights:
+
+- In **Imported Companies**, confirm the auto-sync cadence input defaults to `24` hours and updates the next-run messaging when you save a different value.
+- Toggle **Auto-sync** off and back on for a tracked import to verify the per-company setting still applies immediately.
 
 ## Release Versioning
 
