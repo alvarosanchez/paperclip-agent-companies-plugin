@@ -11,10 +11,12 @@ import {
   buildCatalogSnapshot,
   buildStagedPaperclipImportSource,
   CATALOG_STATE_KEY,
+  type AdapterPreset,
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
   type CompanyImportPartSelection,
   type CompanyImportSelection,
+  type ImportAdapterPresetSelection,
   DEFAULT_AUTO_SYNC_ENABLED,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_SYNC_COLLISION_STRATEGY,
@@ -29,6 +31,8 @@ import {
   isCatalogCompanyAutoSyncDue,
   normalizeCompanyContentPath,
   normalizeCatalogAutoSyncCadenceHours,
+  normalizeAdapterPresets,
+  normalizeImportAdapterPresetSelection,
   normalizeCatalogState,
   normalizeRepositoryCloneRef,
   resolveCompanyImportSelection,
@@ -269,7 +273,13 @@ interface SyncImportRequest {
   collisionStrategy: CatalogSyncCollisionStrategy;
   preparedImport: CatalogPreparedCompanyImport;
   existingIssues?: PaperclipIssueRecord[] | null;
+  adapterPresetSelection: ImportAdapterPresetSelection;
 }
+
+type PaperclipAdapterOverrides = Record<string, {
+  adapterType: string;
+  adapterConfig?: Record<string, unknown>;
+}>;
 
 interface PaperclipApiConnection {
   apiBase: string;
@@ -1744,6 +1754,12 @@ function normalizeRequestedCompanyImportSelection(
   return resolveCompanyImportSelection(company.contents, selection);
 }
 
+function normalizeRequestedImportAdapterPresetSelection(
+  selection: unknown
+): ImportAdapterPresetSelection {
+  return normalizeImportAdapterPresetSelection(selection);
+}
+
 function isFullCompanyImportSelection(
   company: DiscoveredAgentCompany,
   selection: CompanyImportSelection
@@ -1769,6 +1785,63 @@ function isSelectedCompanyImportItem(
   }
 
   return partSelection.itemPaths?.includes(itemPath) ?? false;
+}
+
+function getSelectedImportedAgentSlugs(
+  company: DiscoveredAgentCompany,
+  selection: CompanyImportSelection
+): Set<string> {
+  const selectedSlugs = new Set<string>();
+
+  for (const agent of company.contents.agents) {
+    if (!isSelectedCompanyImportItem(selection, "agents", agent.path)) {
+      continue;
+    }
+
+    const slug = getCompanyContentItemPaperclipSlug(agent);
+    if (slug) {
+      selectedSlugs.add(slug);
+    }
+  }
+
+  return selectedSlugs;
+}
+
+function buildAdapterOverridesFromPresetSelection(
+  presets: AdapterPreset[],
+  selectedAgentSlugs: Set<string>,
+  selection: ImportAdapterPresetSelection
+): PaperclipAdapterOverrides | undefined {
+  const presetsById = new Map(presets.map((preset) => [preset.id, preset]));
+  const overrides: PaperclipAdapterOverrides = {};
+
+  for (const agentSlug of selectedAgentSlugs) {
+    const presetId = Object.prototype.hasOwnProperty.call(selection.agentPresetIds, agentSlug)
+      ? selection.agentPresetIds[agentSlug]
+      : selection.defaultPresetId;
+    if (!presetId) {
+      continue;
+    }
+
+    const preset = presetsById.get(presetId);
+    if (!preset) {
+      continue;
+    }
+
+    overrides[agentSlug] = {
+      adapterType: preset.adapterType,
+      ...(Object.keys(preset.adapterConfig).length > 0
+        ? { adapterConfig: preset.adapterConfig }
+        : {})
+    };
+  }
+
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
+}
+
+function getCompanyContentItemPaperclipSlug(item: CompanyContentItem): string | null {
+  return normalizePaperclipSlug(item.slug)
+    ?? normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2));
 }
 
 function getCompanyContentItemRootPath(itemPath: string): string {
@@ -1854,7 +1927,7 @@ function getSelectedCompanyContentSlugs(
       continue;
     }
 
-    const slug = normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2));
+    const slug = getCompanyContentItemPaperclipSlug(item);
     if (slug) {
       selectedSlugs.add(slug);
     }
@@ -2003,6 +2076,7 @@ async function persistCatalogState(
   const nextState = normalizeCatalogState({
     repositories: state.repositories,
     importedCompanies: state.importedCompanies,
+    adapterPresets: state.adapterPresets,
     autoSyncCadenceHours: state.autoSyncCadenceHours,
     updatedAt: now
   });
@@ -2534,6 +2608,9 @@ async function parseCompanyContentItem(
     item: {
       name,
       path: relativePath,
+      ...(slug && slug !== normalizePaperclipSlug(relativePath.split("/").filter(Boolean).at(-2))
+        ? { slug }
+        : {}),
       ...(paperclipAgentIcon ? { paperclipAgentIcon } : {}),
       ...(recurring ? { recurring: true } : {}),
       ...(routineMetadata?.status ? { paperclipRoutineStatus: routineMetadata.status } : {}),
@@ -3103,6 +3180,12 @@ async function executeDefaultSyncImport(
     input.existingIssues
   );
   const selectedAgentSlugs = getPortableImportedAgentSlugs(input.preparedImport.source.files);
+  const catalogState = await loadCatalogState(ctx);
+  const adapterOverrides = buildAdapterOverridesFromPresetSelection(
+    catalogState.adapterPresets,
+    selectedAgentSlugs,
+    input.adapterPresetSelection
+  );
   let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
   if (hasEnabledPaperclipImportStage(preIssueImportInclude)) {
     importedPhaseOneResult = await postPaperclipCompanyImport(connection, {
@@ -3112,7 +3195,8 @@ async function executeDefaultSyncImport(
         mode: "existing_company",
         companyId: input.importedCompanyId
       },
-      collisionStrategy: input.collisionStrategy
+      collisionStrategy: input.collisionStrategy,
+      ...(adapterOverrides ? { adapterOverrides } : {})
     });
   }
   const additionalWarnings: string[] = [];
@@ -3817,13 +3901,20 @@ function getPortableImportedAgentSlugs(
 ): Set<string> {
   const slugs = new Set<string>();
 
-  for (const filePath of Object.keys(files)) {
+  for (const [filePath, entry] of Object.entries(files)) {
     const segments = normalizeCompanyContentPath(filePath)?.split("/").filter(Boolean) ?? [];
-    if (segments[0] !== "agents" || segments.length < 2) {
+    if (segments[0] !== "agents" || segments.length < 2 || segments.at(-1) !== "AGENTS.md") {
       continue;
     }
 
-    const slug = normalizePaperclipSlug(segments[1]);
+    const frontmatter = typeof entry === "string"
+      ? entry.match(FRONTMATTER_PATTERN)?.[1] ?? null
+      : null;
+    const parsedFrontmatter = frontmatter ? parseYamlObject(frontmatter) : null;
+    const slug =
+      normalizePaperclipSlug(parsedFrontmatter?.slug)
+      ?? (frontmatter ? normalizePaperclipSlug(getTopLevelScalar(frontmatter, "slug")) : null)
+      ?? normalizePaperclipSlug(segments[1]);
     if (slug) {
       slugs.add(slug);
     }
@@ -4677,7 +4768,8 @@ async function runCatalogCompanySync(
         importedCompanyId: importedCompany.importedCompanyId,
         collisionStrategy: importedCompany.syncCollisionStrategy,
         preparedImport,
-        existingIssues: issuesBeforeSync
+        existingIssues: issuesBeforeSync,
+        adapterPresetSelection: importedCompany.adapterPresetSelection
       });
       const syncedAt = options.now();
       const latestState = await loadCatalogState(ctx);
@@ -4978,6 +5070,23 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         );
       });
 
+      ctx.actions.register("catalog.set-adapter-presets", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const adapterPresets = normalizeAdapterPresets(params.adapterPresets);
+        const timestamp = now();
+        const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+        const nextState = await persistCatalogState(
+          ctx,
+          {
+            ...currentState,
+            adapterPresets
+          },
+          timestamp
+        );
+
+        return buildCatalogResponse(nextState, timestamp);
+      });
+
       ctx.actions.register("catalog.record-company-import", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const sourceCompanyId = getRequiredString(params, "sourceCompanyId");
@@ -5012,6 +5121,9 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         if (isCompanyImportSelectionEmpty(selection)) {
           throw new Error("Select at least one catalog part or item to import.");
         }
+        const adapterPresetSelection = normalizeRequestedImportAdapterPresetSelection(
+          params.adapterPresetSelection ?? existingImport?.adapterPresetSelection
+        );
         const syncCollisionStrategy = normalizeSyncCollisionStrategyInput(
           params.syncCollisionStrategy,
           existingImport?.syncCollisionStrategy ?? DEFAULT_SYNC_COLLISION_STRATEGY
@@ -5040,6 +5152,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
                 importedSourceVersion: match.company.version,
                 importedAt: timestamp,
                 selection,
+                adapterPresetSelection,
                 autoSyncEnabled: existingImport?.autoSyncEnabled ?? DEFAULT_AUTO_SYNC_ENABLED,
                 syncCollisionStrategy,
                 lastSyncStatus: "succeeded",

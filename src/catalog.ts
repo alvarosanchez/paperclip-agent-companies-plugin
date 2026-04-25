@@ -28,6 +28,7 @@ export type RepositoryScanStatus = "idle" | "ready" | "error";
 export interface CompanyContentItem {
   name: string;
   path: string;
+  slug?: string;
   dependencyPaths?: string[];
   paperclipAgentIcon?: string | null;
   recurring?: boolean;
@@ -71,6 +72,19 @@ export interface CompanyImportSelection {
   tasks: CompanyImportPartSelection;
   issues: CompanyImportPartSelection;
   skills: CompanyImportPartSelection;
+}
+
+export interface AdapterPreset {
+  id: string;
+  name: string;
+  adapterType: string;
+  adapterConfig: Record<string, unknown>;
+  updatedAt: string | null;
+}
+
+export interface ImportAdapterPresetSelection {
+  defaultPresetId: string | null;
+  agentPresetIds: Record<string, string | null>;
 }
 
 export interface CatalogCompanyContentDetail {
@@ -139,6 +153,7 @@ export interface ImportedCatalogCompanyRecord {
   importedSourceVersion: string | null;
   importedAt: string | null;
   selection: CompanyImportSelection;
+  adapterPresetSelection: ImportAdapterPresetSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
   lastSyncStatus: CatalogCompanySyncStatus;
@@ -156,6 +171,7 @@ export interface CatalogCompanyImportStatus {
   latestSourceVersion: string | null;
   importedAt: string | null;
   selection: CompanyImportSelection;
+  adapterPresetSelection: ImportAdapterPresetSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
   syncStatus: CatalogCompanySyncStatus;
@@ -209,6 +225,7 @@ export interface RepositorySource {
 export interface CatalogState {
   repositories: RepositorySource[];
   importedCompanies: ImportedCatalogCompanyRecord[];
+  adapterPresets: AdapterPreset[];
   autoSyncCadenceHours: number;
   updatedAt: string | null;
 }
@@ -236,6 +253,7 @@ export type CatalogImportedCompanySummary = Omit<
 
 export interface CatalogSnapshot {
   autoSyncCadenceHours: number;
+  adapterPresets: AdapterPreset[];
   repositories: CatalogRepositorySummary[];
   companies: CatalogCompanySummary[];
   importedCompanies: CatalogImportedCompanySummary[];
@@ -426,6 +444,97 @@ export function normalizeCompanyImportSelection(value: unknown): CompanyImportSe
   }
 
   return selection;
+}
+
+function normalizeAdapterPresetId(value: unknown): string | null {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/iu.test(value.trim())
+    ? value.trim()
+    : null;
+}
+
+function normalizeAdapterConfig(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function normalizePaperclipSlug(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+
+  return normalized || null;
+}
+
+function normalizeAdapterPreset(value: unknown): AdapterPreset | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeAdapterPresetId(value.id);
+  const name = asNonEmptyString(value.name);
+  const adapterType = asNonEmptyString(value.adapterType);
+
+  if (!id || !name || !adapterType) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    adapterType,
+    adapterConfig: normalizeAdapterConfig(value.adapterConfig),
+    updatedAt: asIsoTimestamp(value.updatedAt)
+  };
+}
+
+export function normalizeAdapterPresets(value: unknown): AdapterPreset[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const presets = new Map<string, AdapterPreset>();
+  for (const rawPreset of value) {
+    const preset = normalizeAdapterPreset(rawPreset);
+    if (preset) {
+      presets.set(preset.id, preset);
+    }
+  }
+
+  return [...presets.values()].sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
+    left.id.localeCompare(right.id, undefined, { sensitivity: "base" })
+  );
+}
+
+export function normalizeImportAdapterPresetSelection(value: unknown): ImportAdapterPresetSelection {
+  if (!isRecord(value)) {
+    return {
+      defaultPresetId: null,
+      agentPresetIds: {}
+    };
+  }
+
+  const agentPresetIds: Record<string, string | null> = {};
+  const rawAgentPresetIds = isRecord(value.agentPresetIds) ? value.agentPresetIds : {};
+
+  for (const [rawSlug, rawPresetId] of Object.entries(rawAgentPresetIds)) {
+    const slug = normalizeAdapterPresetId(rawSlug);
+    if (!slug) {
+      continue;
+    }
+
+    agentPresetIds[slug] = rawPresetId === null ? null : normalizeAdapterPresetId(rawPresetId);
+  }
+
+  return {
+    defaultPresetId: value.defaultPresetId === null ? null : normalizeAdapterPresetId(value.defaultPresetId),
+    agentPresetIds
+  };
 }
 
 export function isCompanyImportSelectionEmpty(selection: CompanyImportSelection): boolean {
@@ -959,6 +1068,7 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
   const paperclipAgentIcon = asNonEmptyString(value.paperclipAgentIcon);
   const paperclipRoutineStatus = asNonEmptyString(value.paperclipRoutineStatus);
   const paperclipRoutineTriggerCount = asNonNegativeInteger(value.paperclipRoutineTriggerCount);
+  const slug = normalizePaperclipSlug(value.slug);
   const dependencyPaths = [...new Set(
     (Array.isArray(value.dependencyPaths) ? value.dependencyPaths : [])
       .map((dependencyPath) =>
@@ -971,6 +1081,7 @@ function normalizeCompanyContentItem(value: unknown): CompanyContentItem | null 
   return {
     name: asNonEmptyString(value.name) ?? deriveCompanyContentName(path),
     path,
+    ...(slug ? { slug } : {}),
     ...(dependencyPaths.length > 0 ? { dependencyPaths } : {}),
     ...(paperclipAgentIcon ? { paperclipAgentIcon } : {}),
     ...(value.recurring === true ? { recurring: true } : {}),
@@ -1250,6 +1361,7 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
       asNonEmptyString(value.version),
     importedAt,
     selection: normalizeCompanyImportSelection(value.selection),
+    adapterPresetSelection: normalizeImportAdapterPresetSelection(value.adapterPresetSelection),
     autoSyncEnabled:
       typeof value.autoSyncEnabled === "boolean"
         ? value.autoSyncEnabled
@@ -1343,6 +1455,7 @@ export function createDefaultCatalogState(): CatalogState {
   return {
     repositories: [createRepositorySource(DEFAULT_REPOSITORY_URL)],
     importedCompanies: [],
+    adapterPresets: [],
     autoSyncCadenceHours: DEFAULT_AUTO_SYNC_CADENCE_HOURS,
     updatedAt: null
   };
@@ -1400,8 +1513,12 @@ export function normalizeCatalogState(value: unknown): CatalogState {
   }
 
   return {
-    repositories: repositories.length > 0 || hadExplicitRepositories ? repositories : createDefaultCatalogState().repositories,
+    repositories:
+      repositories.length > 0 || hadExplicitRepositories
+        ? repositories
+        : createDefaultCatalogState().repositories,
     importedCompanies: [...importedCompanies.values()],
+    adapterPresets: normalizeAdapterPresets(value.adapterPresets),
     autoSyncCadenceHours: normalizeCatalogAutoSyncCadenceHours(
       value.autoSyncCadenceHours ?? value.syncCadenceHours ?? value.autoSyncIntervalHours
     ),
@@ -1446,6 +1563,7 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
               latestSourceVersion,
               importedAt: importedCompany.importedAt,
               selection: importedCompany.selection,
+              adapterPresetSelection: importedCompany.adapterPresetSelection,
               autoSyncEnabled: importedCompany.autoSyncEnabled,
               syncCollisionStrategy: importedCompany.syncCollisionStrategy,
               syncStatus: importedCompany.lastSyncStatus,
@@ -1507,6 +1625,7 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
 
   return {
     autoSyncCadenceHours,
+    adapterPresets: state.adapterPresets,
     repositories,
     companies,
     importedCompanies,
