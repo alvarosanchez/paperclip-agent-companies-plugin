@@ -1436,7 +1436,7 @@ routines:
     });
   });
 
-  it("uses saved company board access secrets for authenticated sync imports", async () => {
+  it("prefers active duplicate hire approvals during authenticated sync imports", async () => {
     const repositoryPath = await createRepositoryFixture();
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
@@ -1487,6 +1487,35 @@ routines:
       }
 
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals") {
+        if (!bodyText) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: "approval-approved",
+                type: "hire_agent",
+                status: "approved",
+                payload: {
+                  agentId: "agent-123"
+                }
+              },
+              {
+                id: "approval-pending",
+                type: "hire_agent",
+                status: "pending",
+                payload: {
+                  agentId: "agent-123"
+                }
+              }
+            ]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          );
+        }
+
         return new Response(JSON.stringify({ id: "approval-123" }), {
           status: 201,
           headers: {
@@ -1495,8 +1524,8 @@ routines:
         });
       }
 
-      if (url === "http://127.0.0.1:3210/api/approvals/approval-123/approve") {
-        return new Response(JSON.stringify({ id: "approval-123", status: "approved" }), {
+      if (url === "http://127.0.0.1:3210/api/approvals/approval-pending/approve") {
+        return new Response(JSON.stringify({ id: "approval-pending", status: "approved" }), {
           status: 200,
           headers: {
             "content-type": "application/json"
@@ -1562,7 +1591,14 @@ routines:
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
-        importedCompanyIssuePrefix: "ALP"
+        importedCompanyIssuePrefix: "ALP",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        }
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       await harness.performAction("board-access.update", {
@@ -1594,9 +1630,9 @@ routines:
             include: {
               company: false,
               agents: true,
-              projects: true,
+              projects: false,
               issues: false,
-              skills: true
+              skills: false
             },
             target: {
               mode: "existing_company",
@@ -1613,41 +1649,15 @@ routines:
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
           authorization: "Bearer paperclip-board-token",
-          body: {
-            type: "hire_agent",
-            payload: {
-              agentId: "agent-123",
-              name: "Alpha CEO",
-              role: "ceo",
-              title: "Chief Executive Officer"
-            }
-          }
+          body: null
         },
         {
-          url: "http://127.0.0.1:3210/api/approvals/approval-123/approve",
+          url: "http://127.0.0.1:3210/api/approvals/approval-pending/approve",
           authorization: "Bearer paperclip-board-token",
           body: {
             decisionNote: "Approved automatically during Agent Company sync so imported tasks can wake Alpha CEO immediately."
           }
-        },
-        expect.objectContaining({
-          url: "http://127.0.0.1:3210/api/companies/import",
-          authorization: "Bearer paperclip-board-token",
-          body: expect.objectContaining({
-            include: {
-              company: false,
-              agents: false,
-              projects: false,
-              issues: true,
-              skills: false
-            },
-            target: {
-              mode: "existing_company",
-              companyId: "paperclip-company-123"
-            },
-            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
-          })
-        })
+        }
       ]);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1719,6 +1729,15 @@ routines:
       }
 
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals") {
+        if (!bodyText) {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          });
+        }
+
         return new Response(JSON.stringify({ id: "approval-123" }), {
           status: 201,
           headers: {
@@ -1849,6 +1868,11 @@ routines:
         }),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
           authorization: "Bearer paperclip-board-token",
           body: null
         },
@@ -3177,6 +3201,12 @@ routines:
         manifest,
         capabilities: [...manifest.capabilities]
       });
+      (harness.ctx.issues as unknown as {
+        requestWakeup(issueId: string): Promise<{ queued: boolean; runId: string }>;
+      }).requestWakeup = async (issueId: string) => ({
+        queued: true,
+        runId: `run-${issueId}`
+      });
 
       await harness.ctx.state.set(CATALOG_SCOPE, {
         repositories: [],
@@ -3265,6 +3295,14 @@ routines:
       manifest,
       capabilities: [...manifest.capabilities]
     });
+    (harness.ctx.issues as unknown as {
+      requestWakeups(issueIds: string[]): Promise<Array<{ issueId: string; queued: boolean; runId: string }>>;
+    }).requestWakeups = async (issueIds: string[]) =>
+      issueIds.map((issueId) => ({
+        issueId,
+        queued: true,
+        runId: `run-${issueId}`
+      }));
 
     await harness.ctx.state.set(CATALOG_SCOPE, {
       repositories: [],
@@ -3556,6 +3594,15 @@ routines:
       }
 
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals") {
+        if (!bodyText) {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          });
+        }
+
         return new Response(JSON.stringify({ id: "approval-123" }), {
           status: 201,
           headers: {
@@ -3719,6 +3766,11 @@ routines:
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
           authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
+          authorization: "Bearer paperclip-board-token",
           body: {
             type: "hire_agent",
             payload: {
@@ -3848,6 +3900,15 @@ routines:
       }
 
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals") {
+        if (!bodyText) {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          });
+        }
+
         return new Response(JSON.stringify({ id: "approval-123" }), {
           status: 201,
           headers: {
@@ -4044,6 +4105,11 @@ routines:
         }),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
           authorization: "Bearer paperclip-board-token",
           body: null
         },

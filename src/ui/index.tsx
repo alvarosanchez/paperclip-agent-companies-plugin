@@ -1906,6 +1906,29 @@ function normalizePaperclipApprovalSnapshots(value: unknown): PaperclipApprovalR
   return normalizedApprovals;
 }
 
+function findMatchingPaperclipHireApproval(
+  approvals: PaperclipApprovalRecord[],
+  agentId: string
+): PaperclipApprovalRecord | null {
+  let approvedApproval: PaperclipApprovalRecord | null = null;
+
+  for (const approval of approvals) {
+    if (approval.type !== "hire_agent" || approval.payload?.agentId !== agentId) {
+      continue;
+    }
+
+    if (approval.status === "pending" || approval.status === "revision_requested") {
+      return approval;
+    }
+
+    if (approval.status === "approved" && !approvedApproval) {
+      approvedApproval = approval;
+    }
+  }
+
+  return approvedApproval;
+}
+
 function normalizePaperclipRoutineSnapshots(value: unknown): PaperclipRoutineSnapshot[] {
   if (!Array.isArray(value)) {
     return [];
@@ -4627,7 +4650,7 @@ export function AgentCompaniesSettingsPage({
         importTargetCompany?.importedCompany.issuePrefix ?? null;
 
       if (importedCompanyId) {
-        if (issueOnlyImportInclude.issues && preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
+        if (preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
           try {
             const importedAgents = normalizePaperclipAgentSnapshots(
               await fetchHostJson<PaperclipAgentSnapshot[]>(
@@ -4648,10 +4671,7 @@ export function AgentCompaniesSettingsPage({
                     `/api/companies/${encodeURIComponent(importedCompanyId)}/approvals`
                   )
                 );
-                const existingApproval =
-                  existingApprovals.find((approval) => {
-                    return approval.type === "hire_agent" && approval.payload?.agentId === agent.id;
-                  }) ?? null;
+                const existingApproval = findMatchingPaperclipHireApproval(existingApprovals, agent.id);
 
                 if (existingApproval?.status === "approved") {
                   continue;
