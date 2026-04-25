@@ -1493,11 +1493,38 @@ routines:
 
       expect(company?.id).toBeTruthy();
 
+      await harness.performAction("catalog.set-adapter-presets", {
+        adapterPresets: [
+          {
+            id: "hermes-paco-studio",
+            name: "Hermes / paco-studio",
+            adapterType: "hermes_local",
+            adapterConfig: {
+              hermesCommand: "/home/workspace/Hermes-install/venv/bin/hermes",
+              extraArgs: ["--profile", "paco-studio"],
+              env: {
+                HERMES_HOME: "/home/workspace/Hermes"
+              }
+            }
+          }
+        ]
+      });
       await harness.performAction("catalog.record-company-import", {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
-        importedCompanyIssuePrefix: "ALP"
+        importedCompanyIssuePrefix: "ALP",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        },
+        adapterPresetSelection: {
+          defaultPresetId: "hermes-paco-studio",
+          agentPresetIds: {}
+        }
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       await harness.performAction("board-access.update", {
@@ -1529,58 +1556,27 @@ routines:
             include: {
               company: false,
               agents: true,
-              projects: true,
-              issues: false,
-              skills: true
-            },
-            target: {
-              mode: "existing_company",
-              companyId: "paperclip-company-123"
-            },
-            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
-          })
-        }),
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents",
-          authorization: "Bearer paperclip-board-token",
-          body: null
-        },
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
-          authorization: "Bearer paperclip-board-token",
-          body: {
-            type: "hire_agent",
-            payload: {
-              agentId: "agent-123",
-              name: "Alpha CEO",
-              role: "ceo",
-              title: "Chief Executive Officer"
-            }
-          }
-        },
-        {
-          url: "http://127.0.0.1:3210/api/approvals/approval-123/approve",
-          authorization: "Bearer paperclip-board-token",
-          body: {
-            decisionNote: "Approved automatically during Agent Company sync so imported tasks can wake Alpha CEO immediately."
-          }
-        },
-        expect.objectContaining({
-          url: "http://127.0.0.1:3210/api/companies/import",
-          authorization: "Bearer paperclip-board-token",
-          body: expect.objectContaining({
-            include: {
-              company: false,
-              agents: false,
               projects: false,
-              issues: true,
+              issues: false,
               skills: false
             },
             target: {
               mode: "existing_company",
               companyId: "paperclip-company-123"
             },
-            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
+            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
+            adapterOverrides: {
+              ceo: {
+                adapterType: "hermes_local",
+                adapterConfig: {
+                  hermesCommand: "/home/workspace/Hermes-install/venv/bin/hermes",
+                  extraArgs: ["--profile", "paco-studio"],
+                  env: {
+                    HERMES_HOME: "/home/workspace/Hermes"
+                  }
+                }
+              }
+            }
           })
         }),
         {
@@ -1902,6 +1898,18 @@ routines:
 
     expect(company?.importedCompanies).toEqual([]);
 
+    await harness.performAction("catalog.set-adapter-presets", {
+      adapterPresets: [
+        {
+          id: "codex-ceo",
+          name: "Codex / CEO",
+          adapterType: "codex_local",
+          adapterConfig: {
+            model: "gpt-5.4"
+          }
+        }
+      ]
+    });
     await harness.performAction("catalog.record-company-import", {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
@@ -1913,6 +1921,12 @@ routines:
         tasks: { mode: "none" },
         issues: { mode: "none" },
         skills: { mode: "none" }
+      },
+      adapterPresetSelection: {
+        defaultPresetId: null,
+        agentPresetIds: {
+          ceo: "codex-ceo"
+        }
       },
       syncCollisionStrategy: "skip"
     });
@@ -1950,6 +1964,7 @@ routines:
         issuePrefix: candidate.importedCompany.issuePrefix,
         importedSourceVersion: candidate.importedCompany.importedSourceVersion,
         selection: candidate.importedCompany.selection,
+        adapterPresetSelection: candidate.importedCompany.adapterPresetSelection,
         syncCollisionStrategy: candidate.importedCompany.syncCollisionStrategy
       }))
     ).toEqual([
@@ -1965,6 +1980,12 @@ routines:
           issues: { mode: "none" },
           skills: { mode: "none" }
         },
+        adapterPresetSelection: {
+          defaultPresetId: null,
+          agentPresetIds: {
+            ceo: "codex-ceo"
+          }
+        },
         syncCollisionStrategy: "skip"
       },
       {
@@ -1979,7 +2000,22 @@ routines:
           issues: { mode: "all" },
           skills: { mode: "all" }
         },
+        adapterPresetSelection: {
+          defaultPresetId: null,
+          agentPresetIds: {}
+        },
         syncCollisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
+      }
+    ]);
+    expect(afterImportRecord.adapterPresets).toEqual([
+      {
+        id: "codex-ceo",
+        name: "Codex / CEO",
+        adapterType: "codex_local",
+        adapterConfig: {
+          model: "gpt-5.4"
+        },
+        updatedAt: null
       }
     ]);
 
