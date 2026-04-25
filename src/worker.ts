@@ -286,6 +286,13 @@ interface PaperclipAgentRecord {
   title: string | null;
 }
 
+interface PaperclipApprovalRecord {
+  id: string;
+  type: string | null;
+  status: string | null;
+  payload: Record<string, unknown> | null;
+}
+
 interface PaperclipRoutineRecord extends ImportedRoutineSnapshot {}
 
 interface PaperclipIssueWakeTarget {
@@ -2947,7 +2954,7 @@ async function executeDefaultSyncImport(
   }
   const additionalWarnings: string[] = [];
 
-  if (issueOnlyImportInclude.issues && preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
+  if (preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
     try {
       const importedAgents = await fetchPaperclipCompanyAgents(connection, input.importedCompanyId);
       const pendingImportedAgents = importedAgents.filter((agent) => {
@@ -3152,6 +3159,34 @@ function normalizePaperclipAgentList(value: unknown): PaperclipAgentRecord[] | n
   return value
     .map((agent) => normalizePaperclipAgent(agent))
     .filter((agent): agent is PaperclipAgentRecord => agent !== null);
+}
+
+function normalizePaperclipApproval(value: unknown): PaperclipApprovalRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asNonEmptyString(value.id);
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    type: asNonEmptyString(value.type),
+    status: asNonEmptyString(value.status),
+    payload: isRecord(value.payload) ? value.payload : null
+  };
+}
+
+function normalizePaperclipApprovalList(value: unknown): PaperclipApprovalRecord[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value
+    .map((approval) => normalizePaperclipApproval(approval))
+    .filter((approval): approval is PaperclipApprovalRecord => approval !== null);
 }
 
 function normalizePaperclipRoutine(value: unknown): PaperclipRoutineRecord | null {
@@ -3410,11 +3445,75 @@ async function fetchPaperclipCompanyAgents(
   return agents;
 }
 
+async function fetchPaperclipCompanyApprovals(
+  connection: PaperclipApiConnection,
+  companyId: string
+): Promise<PaperclipApprovalRecord[]> {
+  const payload = await fetchPaperclipApiJson(
+    connection,
+    `/api/companies/${encodeURIComponent(companyId)}/approvals`
+  );
+
+  const approvals = normalizePaperclipApprovalList(payload);
+  if (!approvals) {
+    throw new Error("Paperclip returned an unexpected approvals response.");
+  }
+
+  return approvals;
+}
+
+function findMatchingHireApproval(
+  approvals: PaperclipApprovalRecord[],
+  agentId: string
+): PaperclipApprovalRecord | null {
+  for (const approval of approvals) {
+    const approvalAgentId =
+      approval.payload && typeof approval.payload.agentId === "string" && approval.payload.agentId.trim()
+        ? approval.payload.agentId.trim()
+        : null;
+    if (approval.type === "hire_agent" && approvalAgentId === agentId) {
+      return approval;
+    }
+  }
+
+  return null;
+}
+
+async function approvePaperclipApproval(
+  connection: PaperclipApiConnection,
+  approvalId: string,
+  decisionNote: string
+): Promise<void> {
+  await fetchPaperclipApiJson(
+    connection,
+    `/api/approvals/${encodeURIComponent(approvalId)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decisionNote
+      })
+    }
+  );
+}
+
 async function createAndApprovePaperclipHireApproval(
   connection: PaperclipApiConnection,
   companyId: string,
   agent: PaperclipAgentRecord
 ): Promise<void> {
+  const decisionNote = `Approved automatically during Agent Company sync so imported tasks can wake ${agent.name} immediately.`;
+  const existingApprovals = await fetchPaperclipCompanyApprovals(connection, companyId);
+  const existingApproval = findMatchingHireApproval(existingApprovals, agent.id);
+
+  if (existingApproval?.status === "approved") {
+    return;
+  }
+
+  if (existingApproval?.id) {
+    await approvePaperclipApproval(connection, existingApproval.id, decisionNote);
+    return;
+  }
+
   const approvalPayload = await fetchPaperclipApiJson(
     connection,
     `/api/companies/${encodeURIComponent(companyId)}/approvals`,
@@ -3437,16 +3536,7 @@ async function createAndApprovePaperclipHireApproval(
     throw new Error("Paperclip did not return an approval id.");
   }
 
-  await fetchPaperclipApiJson(
-    connection,
-    `/api/approvals/${encodeURIComponent(approvalId)}/approve`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        decisionNote: `Approved automatically during Agent Company sync so imported tasks can wake ${agent.name} immediately.`
-      })
-    }
-  );
+  await approvePaperclipApproval(connection, approvalId, decisionNote);
 }
 
 function selectPaperclipIssueWakeTargets(

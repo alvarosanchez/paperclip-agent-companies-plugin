@@ -1421,6 +1421,15 @@ routines:
         );
       }
 
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals" && !bodyText) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals") {
         return new Response(JSON.stringify({ id: "approval-123" }), {
           status: 201,
@@ -1497,7 +1506,14 @@ routines:
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
-        importedCompanyIssuePrefix: "ALP"
+        importedCompanyIssuePrefix: "ALP",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        }
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       await harness.performAction("board-access.update", {
@@ -1529,9 +1545,9 @@ routines:
             include: {
               company: false,
               agents: true,
-              projects: true,
+              projects: false,
               issues: false,
-              skills: true
+              skills: false
             },
             target: {
               mode: "existing_company",
@@ -1542,6 +1558,11 @@ routines:
         }),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
           authorization: "Bearer paperclip-board-token",
           body: null
         },
@@ -1565,30 +1586,353 @@ routines:
             decisionNote: "Approved automatically during Agent Company sync so imported tasks can wake Alpha CEO immediately."
           }
         },
-        expect.objectContaining({
-          url: "http://127.0.0.1:3210/api/companies/import",
-          authorization: "Bearer paperclip-board-token",
-          body: expect.objectContaining({
-            include: {
-              company: false,
-              agents: false,
-              projects: false,
-              issues: true,
-              skills: false
-            },
-            target: {
-              mode: "existing_company",
-              companyId: "paperclip-company-123"
-            },
-            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
-          })
-        }),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           authorization: "Bearer paperclip-board-token",
           body: null
         }
       ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("reuses existing pending hire approvals during authenticated sync imports", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "agent-123",
+              name: "Alpha CEO",
+              urlKey: "ceo",
+              status: "pending_approval",
+              role: "ceo",
+              title: "Chief Executive Officer"
+            }
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals" && !bodyText) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "approval-existing",
+              type: "hire_agent",
+              status: "pending",
+              payload: {
+                agentId: "agent-123"
+              }
+            }
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/approvals/approval-existing/approve") {
+        return new Response(JSON.stringify({ id: "approval-existing", status: "approved" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        const parsedBody = bodyText ? JSON.parse(bodyText) : null;
+        const issuesIncluded = parsedBody?.include?.issues === true;
+
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            agents: issuesIncluded ? [] : [{ action: "updated" }],
+            projects: issuesIncluded ? [] : [{ action: "updated" }],
+            issues: issuesIncluded ? [{ action: "updated" }] : [],
+            skills: issuesIncluded ? [] : [{ action: "updated" }],
+            warnings: []
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      });
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-123",
+        paperclipBoardApiTokenRef: "secret-board-token-ref",
+        identity: "Agent Operator"
+      });
+
+      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async () => {
+        return "paperclip-board-token";
+      };
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      expect(
+        fetchRequests.filter((request) => request.url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals")
+      ).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        }
+      ]);
+      expect(fetchRequests).toContainEqual({
+        url: "http://127.0.0.1:3210/api/approvals/approval-existing/approve",
+        authorization: "Bearer paperclip-board-token",
+        body: {
+          decisionNote: "Approved automatically during Agent Company sync so imported tasks can wake Alpha CEO immediately."
+        }
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("skips creating or approving already-approved hire approvals during authenticated sync imports", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "agent-123",
+              name: "Alpha CEO",
+              urlKey: "ceo",
+              status: "pending_approval",
+              role: "ceo",
+              title: "Chief Executive Officer"
+            }
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals" && !bodyText) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "approval-existing",
+              type: "hire_agent",
+              status: "approved",
+              payload: {
+                agentId: "agent-123"
+              }
+            }
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        const parsedBody = bodyText ? JSON.parse(bodyText) : null;
+        const issuesIncluded = parsedBody?.include?.issues === true;
+
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            agents: issuesIncluded ? [] : [{ action: "updated" }],
+            projects: issuesIncluded ? [] : [{ action: "updated" }],
+            issues: issuesIncluded ? [{ action: "updated" }] : [],
+            skills: issuesIncluded ? [] : [{ action: "updated" }],
+            warnings: []
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      });
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-123",
+        paperclipBoardApiTokenRef: "secret-board-token-ref",
+        identity: "Agent Operator"
+      });
+
+      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async () => {
+        return "paperclip-board-token";
+      };
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      expect(
+        fetchRequests.filter((request) => request.url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals")
+      ).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        }
+      ]);
+      expect(
+        fetchRequests.some((request) => request.url === "http://127.0.0.1:3210/api/approvals/approval-existing/approve")
+      ).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {
@@ -3051,6 +3395,15 @@ routines:
         );
       }
 
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals" && !bodyText) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals") {
         return new Response(JSON.stringify({ id: "approval-123" }), {
           status: 201,
@@ -3209,6 +3562,11 @@ routines:
         }),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/approvals",
           authorization: "Bearer paperclip-board-token",
           body: null
         },

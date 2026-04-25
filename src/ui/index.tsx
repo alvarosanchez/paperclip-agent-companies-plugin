@@ -1560,6 +1560,11 @@ interface PaperclipAgentSnapshot {
 
 interface PaperclipApprovalRecord {
   id?: string;
+  type?: string | null;
+  status?: string | null;
+  payload?: {
+    agentId?: string | null;
+  } | null;
 }
 
 interface PaperclipRoutineSnapshot extends ImportedRoutineSnapshot {}
@@ -1853,6 +1858,52 @@ function normalizePaperclipAgentSnapshots(value: unknown): Array<{
   }
 
   return normalizedAgents;
+}
+
+function normalizePaperclipApprovalSnapshots(value: unknown): PaperclipApprovalRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalizedApprovals: PaperclipApprovalRecord[] = [];
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const id =
+      typeof candidate.id === "string" && candidate.id.trim()
+        ? candidate.id.trim()
+        : null;
+    if (!id) {
+      continue;
+    }
+
+    const payload = isRecord(candidate.payload)
+      ? {
+          agentId:
+            typeof candidate.payload.agentId === "string" && candidate.payload.agentId.trim()
+              ? candidate.payload.agentId.trim()
+              : null
+        }
+      : null;
+
+    normalizedApprovals.push({
+      id,
+      type:
+        typeof candidate.type === "string" && candidate.type.trim()
+          ? candidate.type.trim()
+          : null,
+      status:
+        typeof candidate.status === "string" && candidate.status.trim()
+          ? candidate.status.trim()
+          : null,
+      payload
+    });
+  }
+
+  return normalizedApprovals;
 }
 
 function normalizePaperclipRoutineSnapshots(value: unknown): PaperclipRoutineSnapshot[] {
@@ -4576,7 +4627,7 @@ export function AgentCompaniesSettingsPage({
         importTargetCompany?.importedCompany.issuePrefix ?? null;
 
       if (importedCompanyId) {
-        if (issueOnlyImportInclude.issues && preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
+        if (preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
           try {
             const importedAgents = normalizePaperclipAgentSnapshots(
               await fetchHostJson<PaperclipAgentSnapshot[]>(
@@ -4592,28 +4643,47 @@ export function AgentCompaniesSettingsPage({
 
             for (const agent of pendingImportedAgents) {
               try {
-                const approval = await fetchHostJson<PaperclipApprovalRecord>(
-                  `/api/companies/${encodeURIComponent(importedCompanyId)}/approvals`,
-                  {
-                    method: "POST",
-                    body: JSON.stringify({
-                      type: "hire_agent",
-                      payload: {
-                        agentId: agent.id,
-                        name: agent.name,
-                        role: agent.role,
-                        title: agent.title
-                      }
-                    })
-                  }
+                const existingApprovals = normalizePaperclipApprovalSnapshots(
+                  await fetchHostJson<PaperclipApprovalRecord[]>(
+                    `/api/companies/${encodeURIComponent(importedCompanyId)}/approvals`
+                  )
                 );
+                const existingApproval =
+                  existingApprovals.find((approval) => {
+                    return approval.type === "hire_agent" && approval.payload?.agentId === agent.id;
+                  }) ?? null;
 
-                if (!approval.id) {
+                if (existingApproval?.status === "approved") {
+                  continue;
+                }
+
+                let approvalId = existingApproval?.id ?? null;
+                if (!approvalId) {
+                  const approval = await fetchHostJson<PaperclipApprovalRecord>(
+                    `/api/companies/${encodeURIComponent(importedCompanyId)}/approvals`,
+                    {
+                      method: "POST",
+                      body: JSON.stringify({
+                        type: "hire_agent",
+                        payload: {
+                          agentId: agent.id,
+                          name: agent.name,
+                          role: agent.role,
+                          title: agent.title
+                        }
+                      })
+                    }
+                  );
+
+                  approvalId = approval.id ?? null;
+                }
+
+                if (!approvalId) {
                   throw new Error("Paperclip did not return an approval id.");
                 }
 
                 await fetchHostJson(
-                  `/api/approvals/${encodeURIComponent(approval.id)}/approve`,
+                  `/api/approvals/${encodeURIComponent(approvalId)}/approve`,
                   {
                     method: "POST",
                     body: JSON.stringify({
