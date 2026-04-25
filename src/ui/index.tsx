@@ -4627,7 +4627,7 @@ export function AgentCompaniesSettingsPage({
         importTargetCompany?.importedCompany.issuePrefix ?? null;
 
       if (importedCompanyId) {
-        if (issueOnlyImportInclude.issues && preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
+        if (preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
           try {
             const importedAgents = normalizePaperclipAgentSnapshots(
               await fetchHostJson<PaperclipAgentSnapshot[]>(

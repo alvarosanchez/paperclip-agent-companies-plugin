@@ -2954,7 +2954,7 @@ async function executeDefaultSyncImport(
   }
   const additionalWarnings: string[] = [];
 
-  if (issueOnlyImportInclude.issues && preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
+  if (preIssueImportInclude.agents && selectedAgentSlugs.size > 0) {
     try {
       const importedAgents = await fetchPaperclipCompanyAgents(connection, input.importedCompanyId);
       const pendingImportedAgents = importedAgents.filter((agent) => {

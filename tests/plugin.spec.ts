@@ -1506,7 +1506,14 @@ routines:
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
-        importedCompanyIssuePrefix: "ALP"
+        importedCompanyIssuePrefix: "ALP",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        }
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       await harness.performAction("board-access.update", {
@@ -1538,9 +1545,9 @@ routines:
             include: {
               company: false,
               agents: true,
-              projects: true,
+              projects: false,
               issues: false,
-              skills: true
+              skills: false
             },
             target: {
               mode: "existing_company",
@@ -1579,24 +1586,6 @@ routines:
             decisionNote: "Approved automatically during Agent Company sync so imported tasks can wake Alpha CEO immediately."
           }
         },
-        expect.objectContaining({
-          url: "http://127.0.0.1:3210/api/companies/import",
-          authorization: "Bearer paperclip-board-token",
-          body: expect.objectContaining({
-            include: {
-              company: false,
-              agents: false,
-              projects: false,
-              issues: true,
-              skills: false
-            },
-            target: {
-              mode: "existing_company",
-              companyId: "paperclip-company-123"
-            },
-            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
-          })
-        }),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           authorization: "Bearer paperclip-board-token",
