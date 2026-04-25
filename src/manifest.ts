@@ -22,13 +22,22 @@ const manifest: PaperclipPluginManifestV1 = {
     "instance.settings.register",
     "plugin.state.read",
     "plugin.state.write",
+    "secrets.read-ref",
     "jobs.schedule",
     "http.outbound",
     "ui.page.register"
   ],
   instanceConfigSchema: {
     type: "object",
-    properties: {}
+    properties: {
+      boardAccessSecretRefs: {
+        type: "object",
+        description: "Internal allowlist of Paperclip board access secret references by company ID.",
+        additionalProperties: {
+          type: "string"
+        }
+      }
+    }
   },
   entrypoints: {
     worker: "./dist/worker.js",

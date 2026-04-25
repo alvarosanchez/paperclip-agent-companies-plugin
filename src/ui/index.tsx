@@ -71,6 +71,7 @@ import {
   type CatalogSnapshot,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
+  PLUGIN_ID,
   type PaperclipCompanyImportResult,
   buildStagedPaperclipImportSource,
   createDefaultCompanyImportSelection,
@@ -1593,6 +1594,10 @@ interface CliAuthChallengePollResponse {
   boardApiToken?: string;
 }
 
+interface PluginConfigRecord {
+  configJson?: Record<string, unknown> | null;
+}
+
 interface CliAuthIdentityResponse {
   login?: string | null;
   email?: string | null;
@@ -2128,6 +2133,32 @@ async function resolveOrCreateCompanySecret(
       body: JSON.stringify({ name, value })
     }
   );
+}
+
+async function mirrorBoardAccessSecretRefToPluginConfig(
+  companyId: string,
+  secretRef: string
+): Promise<void> {
+  const currentConfig = await fetchHostJson<PluginConfigRecord | null>(
+    `/api/plugins/${encodeURIComponent(PLUGIN_ID)}/config`
+  );
+  const configJson = isRecord(currentConfig?.configJson) ? currentConfig.configJson : {};
+  const currentRefs = isRecord(configJson.boardAccessSecretRefs)
+    ? configJson.boardAccessSecretRefs
+    : {};
+
+  await fetchHostJson(`/api/plugins/${encodeURIComponent(PLUGIN_ID)}/config`, {
+    method: "POST",
+    body: JSON.stringify({
+      configJson: {
+        ...configJson,
+        boardAccessSecretRefs: {
+          ...currentRefs,
+          [companyId]: secretRef
+        }
+      }
+    })
+  });
 }
 
 function resolveBrowserOrigin(): string | null {
@@ -5095,6 +5126,7 @@ export function AgentCompaniesSettingsPage({
       const identity = await fetchBoardAccessIdentity(boardApiToken);
       const secretName = `agent_companies_board_api_${context.companyId.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(context.companyId, secretName, boardApiToken);
+      await mirrorBoardAccessSecretRefToPluginConfig(context.companyId, secret.id);
 
       await updateBoardAccess({
         companyId: context.companyId,

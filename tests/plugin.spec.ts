@@ -372,10 +372,23 @@ describe("agent companies plugin", () => {
       "instance.settings.register",
       "plugin.state.read",
       "plugin.state.write",
+      "secrets.read-ref",
       "jobs.schedule",
       "http.outbound",
       "ui.page.register"
     ]);
+    expect(manifest.instanceConfigSchema).toEqual({
+      type: "object",
+      properties: {
+        boardAccessSecretRefs: {
+          type: "object",
+          description: "Internal allowlist of Paperclip board access secret references by company ID.",
+          additionalProperties: {
+            type: "string"
+          }
+        }
+      }
+    });
     expect(manifest.jobs).toEqual([
       {
         jobKey: "catalog-auto-sync",
