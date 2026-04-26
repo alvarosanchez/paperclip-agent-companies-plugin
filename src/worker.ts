@@ -1,5 +1,5 @@
 import { constants, realpathSync } from "node:fs";
-import { access, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -592,6 +592,58 @@ async function readStoredBoardCredential(apiBase: string): Promise<StoredBoardCr
   };
 }
 
+async function persistStoredBoardCredential(
+  apiBase: string,
+  token: string,
+  timestamp: string,
+  userId: string | null = null
+): Promise<void> {
+  const authStorePath = resolvePaperclipAuthStorePath();
+  const normalizedApiBase = normalizeApiBase(apiBase);
+  const authStore = (await readJsonObjectFile(authStorePath)) ?? {};
+  const existingCredentials = isRecord(authStore.credentials) ? authStore.credentials : {};
+  const existingCredential = isRecord(existingCredentials[normalizedApiBase])
+    ? existingCredentials[normalizedApiBase]
+    : null;
+  const createdAt = asIsoTimestamp(existingCredential?.createdAt) ?? timestamp;
+
+  await mkdir(dirname(authStorePath), { recursive: true });
+  await writeFile(
+    authStorePath,
+    JSON.stringify(
+      {
+        ...authStore,
+        credentials: {
+          ...existingCredentials,
+          [normalizedApiBase]: {
+            apiBase: normalizedApiBase,
+            token,
+            createdAt,
+            updatedAt: timestamp,
+            ...(userId ? { userId } : {})
+          }
+        }
+      },
+      null,
+      2
+    )
+  );
+}
+
+async function resolveStoredBoardCredentialApiBase(ctx: PluginContext): Promise<string> {
+  const savedApiBase = await resolveSavedPaperclipApiBase(ctx);
+  if (savedApiBase) {
+    return savedApiBase;
+  }
+
+  const explicitApiBase = process.env.PAPERCLIP_API_URL?.trim();
+  if (explicitApiBase) {
+    return normalizeApiBase(explicitApiBase);
+  }
+
+  return normalizeApiBase(await inferPaperclipApiBaseFromConfig(resolvePaperclipConfigPath()));
+}
+
 async function resolveSavedBoardAccessToken(
   ctx: PluginContext,
   companyId: string | null
@@ -633,8 +685,8 @@ export async function resolvePaperclipApiConnection(
   );
   const apiKey =
     process.env.PAPERCLIP_API_KEY?.trim()
-    || (ctx ? await resolveSavedBoardAccessToken(ctx, companyId) : null)
     || (await readStoredBoardCredential(apiBase))?.token
+    || (ctx ? await resolveSavedBoardAccessToken(ctx, companyId) : null)
     || null;
 
   return {
@@ -4248,10 +4300,19 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = getRequiredString(params, "companyId");
         const paperclipBoardApiTokenRef = asNonEmptyString(params.paperclipBoardApiTokenRef);
+        const paperclipBoardApiToken = asNonEmptyString(params.paperclipBoardApiToken);
         const identity = asNonEmptyString(params.identity);
         const timestamp = now();
         const currentState = await loadBoardAccessState(ctx);
         const nextCompanies = { ...currentState.companies };
+
+        if (paperclipBoardApiToken) {
+          await persistStoredBoardCredential(
+            await resolveStoredBoardCredentialApiBase(ctx),
+            paperclipBoardApiToken,
+            timestamp
+          );
+        }
 
         if (paperclipBoardApiTokenRef) {
           nextCompanies[companyId] = {

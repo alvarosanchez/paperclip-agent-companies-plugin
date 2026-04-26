@@ -5071,6 +5071,8 @@ export function AgentCompaniesSettingsPage({
     let approvalWindow: Window | null = null;
 
     try {
+      await ensurePaperclipApiBaseRegistered();
+
       if (typeof window !== "undefined") {
         approvalWindow = window.open("about:blank", "_blank");
       }
@@ -5099,6 +5101,7 @@ export function AgentCompaniesSettingsPage({
       await updateBoardAccess({
         companyId: context.companyId,
         paperclipBoardApiTokenRef: secret.id,
+        paperclipBoardApiToken: boardApiToken,
         identity
       });
       await boardAccess.refresh();

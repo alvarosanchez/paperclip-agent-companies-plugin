@@ -117,6 +117,7 @@ During import, the plugin packages the selected company contents as an inline Pa
 - For private repositories, the worker reuses your existing local git credential helpers when available.
 - Local checkout paths are read from the Paperclip host machine, so only trusted operators should add local paths.
 - Board access connections are stored as company secrets and the plugin keeps only the secret reference plus display metadata in plugin state.
+- After board access is approved, the plugin also seeds the worker's local Paperclip auth store so current authenticated hosts can reuse that token during worker-side syncs.
 - Inline imports intentionally skip common secret-bearing files such as `.env*`, `.npmrc`, `.git-credentials`, `.netrc`, and files inside `.ssh/`, `.aws/`, or `.gnupg/`.
 - The plugin stores catalog and sync metadata in Paperclip plugin state.
 
@@ -127,6 +128,7 @@ The manifest currently requests these Paperclip capabilities:
 - `plugin.state.write`
 - `jobs.schedule`
 - `http.outbound`
+- `secrets.read-ref`
 - `ui.page.register`
 
 ## Development
