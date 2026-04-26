@@ -24,6 +24,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "plugin.state.write",
     "jobs.schedule",
     "http.outbound",
+    "secrets.read-ref",
     "ui.page.register"
   ],
   instanceConfigSchema: {

@@ -1,5 +1,5 @@
 import { constants, realpathSync } from "node:fs";
-import { access, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -341,6 +341,7 @@ interface CompanyBoardAccessRecord {
   paperclipBoardApiTokenRef: string;
   identity: string | null;
   updatedAt: string | null;
+  workerAuthSeededAt: string | null;
 }
 
 interface BoardAccessState {
@@ -385,7 +386,8 @@ function normalizeCompanyBoardAccessRecord(value: unknown): CompanyBoardAccessRe
   return {
     paperclipBoardApiTokenRef,
     identity: asNonEmptyString(value.identity),
-    updatedAt: asIsoTimestamp(value.updatedAt)
+    updatedAt: asIsoTimestamp(value.updatedAt),
+    workerAuthSeededAt: asIsoTimestamp(value.workerAuthSeededAt)
   };
 }
 
@@ -592,6 +594,141 @@ async function readStoredBoardCredential(apiBase: string): Promise<StoredBoardCr
   };
 }
 
+async function writePaperclipAuthStoreFile(
+  authStorePath: string,
+  authStore: Record<string, unknown>
+): Promise<void> {
+  const tempPath = `${authStorePath}.${Date.now().toString(36)}.${Math.random().toString(16).slice(2)}.tmp`;
+
+  await mkdir(dirname(authStorePath), { recursive: true });
+
+  try {
+    await writeFile(tempPath, JSON.stringify(authStore, null, 2), {
+      mode: 0o600
+    });
+    await rename(tempPath, authStorePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function resolveBoardAccessRecordStoredCredentialSeedTimestamp(
+  record: CompanyBoardAccessRecord | null | undefined,
+  storedCredentialUpdatedAt: string
+): string | null {
+  if (!record?.paperclipBoardApiTokenRef) {
+    return null;
+  }
+
+  if (record.workerAuthSeededAt) {
+    return record.workerAuthSeededAt === storedCredentialUpdatedAt ? record.workerAuthSeededAt : null;
+  }
+
+  return record.updatedAt === storedCredentialUpdatedAt ? record.updatedAt : null;
+}
+
+function doesBoardAccessRecordUseStoredCredential(
+  record: CompanyBoardAccessRecord | null | undefined,
+  storedCredentialUpdatedAt: string
+): boolean {
+  return Boolean(resolveBoardAccessRecordStoredCredentialSeedTimestamp(record, storedCredentialUpdatedAt));
+}
+
+function hasBoardAccessCompanyUsingStoredCredential(
+  companies: Record<string, CompanyBoardAccessRecord>,
+  updatedAt: string
+): boolean {
+  return Object.values(companies).some((record) => doesBoardAccessRecordUseStoredCredential(record, updatedAt));
+}
+
+async function persistStoredBoardCredential(
+  apiBase: string,
+  token: string,
+  timestamp: string,
+  userId: string | null = null
+): Promise<void> {
+  const authStorePath = resolvePaperclipAuthStorePath();
+  const normalizedApiBase = normalizeApiBase(apiBase);
+  const authStore = (await readJsonObjectFile(authStorePath)) ?? {};
+  const existingCredentials = isRecord(authStore.credentials) ? authStore.credentials : {};
+  const existingCredential = isRecord(existingCredentials[normalizedApiBase])
+    ? existingCredentials[normalizedApiBase]
+    : null;
+  const createdAt = asIsoTimestamp(existingCredential?.createdAt) ?? timestamp;
+
+  await writePaperclipAuthStoreFile(authStorePath, {
+    ...authStore,
+    credentials: {
+      ...existingCredentials,
+      [normalizedApiBase]: {
+        apiBase: normalizedApiBase,
+        token,
+        createdAt,
+        updatedAt: timestamp,
+        ...(userId ? { userId } : {})
+      }
+    }
+  });
+}
+
+async function removeStoredBoardCredential(apiBase: string): Promise<void> {
+  const authStorePath = resolvePaperclipAuthStorePath();
+  const normalizedApiBase = normalizeApiBase(apiBase);
+  const authStore = await readJsonObjectFile(authStorePath);
+  if (!authStore) {
+    return;
+  }
+
+  const existingCredentials = isRecord(authStore.credentials) ? authStore.credentials : null;
+  if (!existingCredentials || !isRecord(existingCredentials[normalizedApiBase])) {
+    return;
+  }
+
+  const remainingCredentials = { ...existingCredentials };
+  delete remainingCredentials[normalizedApiBase];
+
+  await writePaperclipAuthStoreFile(authStorePath, {
+    ...authStore,
+    credentials: remainingCredentials
+  });
+}
+
+async function resolveStoredBoardCredentialForCompany(
+  ctx: PluginContext,
+  companyId: string,
+  apiBase: string
+): Promise<StoredBoardCredential | null> {
+  const state = await loadBoardAccessState(ctx);
+  const record = state.companies[companyId];
+  if (!record?.paperclipBoardApiTokenRef) {
+    return null;
+  }
+
+  const storedCredential = await readStoredBoardCredential(apiBase);
+  if (!storedCredential) {
+    return null;
+  }
+
+  return resolveBoardAccessRecordStoredCredentialSeedTimestamp(record, storedCredential.updatedAt)
+    ? storedCredential
+    : null;
+}
+
+async function resolveStoredBoardCredentialApiBase(ctx: PluginContext): Promise<string> {
+  const savedApiBase = await resolveSavedPaperclipApiBase(ctx);
+  if (savedApiBase) {
+    return savedApiBase;
+  }
+
+  const explicitApiBase = process.env.PAPERCLIP_API_URL?.trim();
+  if (explicitApiBase) {
+    return normalizeApiBase(explicitApiBase);
+  }
+
+  return normalizeApiBase(await inferPaperclipApiBaseFromConfig(resolvePaperclipConfigPath()));
+}
+
 async function resolveSavedBoardAccessToken(
   ctx: PluginContext,
   companyId: string | null
@@ -631,10 +768,14 @@ export async function resolvePaperclipApiConnection(
     || savedApiBase
     || (await inferPaperclipApiBaseFromConfig(configPath))
   );
+  const storedCredential =
+    ctx && companyId
+      ? await resolveStoredBoardCredentialForCompany(ctx, companyId, apiBase)
+      : await readStoredBoardCredential(apiBase);
   const apiKey =
     process.env.PAPERCLIP_API_KEY?.trim()
-    || (ctx ? await resolveSavedBoardAccessToken(ctx, companyId) : null)
-    || (await readStoredBoardCredential(apiBase))?.token
+    || storedCredential?.token
+    || (ctx && companyId ? await resolveSavedBoardAccessToken(ctx, companyId) : null)
     || null;
 
   return {
@@ -4248,19 +4389,47 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const params = isRecord(rawParams) ? rawParams : {};
         const companyId = getRequiredString(params, "companyId");
         const paperclipBoardApiTokenRef = asNonEmptyString(params.paperclipBoardApiTokenRef);
+        const paperclipBoardApiToken = asNonEmptyString(params.paperclipBoardApiToken);
         const identity = asNonEmptyString(params.identity);
         const timestamp = now();
         const currentState = await loadBoardAccessState(ctx);
         const nextCompanies = { ...currentState.companies };
+        const shouldSeedStoredCredential = Boolean(paperclipBoardApiTokenRef && paperclipBoardApiToken);
+        const shouldClearStoredCredential = !paperclipBoardApiTokenRef;
+        const storedCredentialApiBase =
+          shouldSeedStoredCredential || shouldClearStoredCredential
+            ? await resolveStoredBoardCredentialApiBase(ctx)
+            : null;
+
+        if (shouldSeedStoredCredential && storedCredentialApiBase) {
+          await persistStoredBoardCredential(
+            storedCredentialApiBase,
+            paperclipBoardApiToken!,
+            timestamp
+          );
+        }
 
         if (paperclipBoardApiTokenRef) {
           nextCompanies[companyId] = {
             paperclipBoardApiTokenRef,
             identity,
-            updatedAt: timestamp
+            updatedAt: timestamp,
+            workerAuthSeededAt: shouldSeedStoredCredential
+              ? timestamp
+              : currentState.companies[companyId]?.workerAuthSeededAt ?? null
           };
         } else {
           delete nextCompanies[companyId];
+
+          if (shouldClearStoredCredential && storedCredentialApiBase) {
+            const storedCredential = await readStoredBoardCredential(storedCredentialApiBase);
+            if (
+              storedCredential
+              && !hasBoardAccessCompanyUsingStoredCredential(nextCompanies, storedCredential.updatedAt)
+            ) {
+              await removeStoredBoardCredential(storedCredentialApiBase);
+            }
+          }
         }
 
         const nextState = await persistBoardAccessState(
