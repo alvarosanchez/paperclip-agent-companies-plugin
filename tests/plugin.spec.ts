@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -51,6 +51,10 @@ const tempDirectories: string[] = [];
 const CATALOG_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: CATALOG_STATE_KEY
+};
+const BOARD_ACCESS_SCOPE = {
+  scopeKind: "instance" as const,
+  stateKey: "agent-companies.board-access.v1"
 };
 
 afterEach(async () => {
@@ -1606,13 +1610,14 @@ routines:
     }
   });
 
-  it("falls back to the worker auth store when saved board access secrets cannot be resolved", async () => {
+  it("prefers the company-seeded worker auth store when saved board access secret refs are not host-resolvable", async () => {
     const repositoryPath = await createRepositoryFixture();
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const previousPaperclipAuthStore = process.env.PAPERCLIP_AUTH_STORE;
     const originalFetch = globalThis.fetch;
     const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    let secretResolveCallCount = 0;
 
     process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
     delete process.env.PAPERCLIP_API_KEY;
@@ -1745,6 +1750,7 @@ routines:
       });
 
       (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
+        secretResolveCallCount += 1;
         expect(secretRef).toBe("secret-board-token-ref");
         throw new Error(`Secret not found: ${secretRef}`);
       };
@@ -1761,6 +1767,7 @@ routines:
       };
 
       expect(authStore.credentials?.["http://127.0.0.1:3210"]?.token).toBe("paperclip-board-token");
+      expect(secretResolveCallCount).toBe(0);
       expect(fetchRequests).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
@@ -1836,6 +1843,230 @@ routines:
       ]);
     } finally {
       globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+
+      if (previousPaperclipAuthStore === undefined) {
+        delete process.env.PAPERCLIP_AUTH_STORE;
+      } else {
+        process.env.PAPERCLIP_AUTH_STORE = previousPaperclipAuthStore;
+      }
+    }
+  });
+
+  it("uses the saved company board access secret when the worker auth store was seeded by another company", async () => {
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const previousPaperclipAuthStore = process.env.PAPERCLIP_AUTH_STORE;
+    const timestamps = ["2026-04-14T09:23:00.000Z", "2026-04-14T09:24:00.000Z"];
+    let timestampIndex = 0;
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    process.env.PAPERCLIP_AUTH_STORE = await createIsolatedPaperclipAuthStore();
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => timestamps[Math.min(timestampIndex++, timestamps.length - 1)],
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+      const resolvedSecretRefs: string[] = [];
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-a",
+        paperclipBoardApiTokenRef: "secret-ref-a",
+        paperclipBoardApiToken: "seeded-token-a",
+        identity: "Agent Operator A"
+      });
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-b",
+        paperclipBoardApiTokenRef: "secret-ref-b",
+        paperclipBoardApiToken: "seeded-token-b",
+        identity: "Agent Operator B"
+      });
+
+      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
+        resolvedSecretRefs.push(secretRef);
+        return `resolved-${secretRef}`;
+      };
+
+      const companyAConnection = await resolvePaperclipApiConnection(harness.ctx, "paperclip-company-a");
+      const companyBConnection = await resolvePaperclipApiConnection(harness.ctx, "paperclip-company-b");
+      const authStore = JSON.parse(
+        await readFile(process.env.PAPERCLIP_AUTH_STORE ?? "", "utf8")
+      ) as {
+        credentials?: Record<string, { token?: string }>;
+      };
+
+      expect(companyAConnection.apiBase).toBe("http://127.0.0.1:3210");
+      expect(companyAConnection.apiKey).toBe("resolved-secret-ref-a");
+      expect(companyBConnection.apiKey).toBe("seeded-token-b");
+      expect(resolvedSecretRefs).toEqual(["secret-ref-a"]);
+      expect(authStore.credentials?.["http://127.0.0.1:3210"]?.token).toBe("seeded-token-b");
+    } finally {
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+
+      if (previousPaperclipAuthStore === undefined) {
+        delete process.env.PAPERCLIP_AUTH_STORE;
+      } else {
+        process.env.PAPERCLIP_AUTH_STORE = previousPaperclipAuthStore;
+      }
+    }
+  });
+
+  it("writes the worker auth-store credential with restrictive permissions and clears it when board access is removed", async () => {
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const previousPaperclipAuthStore = process.env.PAPERCLIP_AUTH_STORE;
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    process.env.PAPERCLIP_AUTH_STORE = await createIsolatedPaperclipAuthStore();
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+      const authStorePath = process.env.PAPERCLIP_AUTH_STORE ?? "";
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-123",
+        paperclipBoardApiTokenRef: "secret-board-token-ref",
+        paperclipBoardApiToken: "paperclip-board-token",
+        identity: "Agent Operator"
+      });
+
+      const storedAuthStore = JSON.parse(await readFile(authStorePath, "utf8")) as {
+        credentials?: Record<string, { token?: string }>;
+      };
+
+      expect(storedAuthStore.credentials?.["http://127.0.0.1:3210"]?.token).toBe("paperclip-board-token");
+      expect((await stat(authStorePath)).mode & 0o777).toBe(0o600);
+
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-123"
+      });
+
+      const clearedAuthStore = JSON.parse(await readFile(authStorePath, "utf8")) as {
+        credentials?: Record<string, { token?: string }>;
+      };
+      const boardAccess = await harness.getData<{
+        companyId: string | null;
+        configured: boolean;
+        identity: string | null;
+        updatedAt: string | null;
+      }>("board-access.read", {
+        companyId: "paperclip-company-123"
+      });
+      const clearedConnection = await resolvePaperclipApiConnection(harness.ctx, "paperclip-company-123");
+
+      expect(clearedAuthStore.credentials?.["http://127.0.0.1:3210"]).toBeUndefined();
+      expect(boardAccess).toEqual({
+        companyId: "paperclip-company-123",
+        configured: false,
+        identity: null,
+        updatedAt: null
+      });
+      expect(clearedConnection.apiKey).toBeNull();
+    } finally {
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+
+      if (previousPaperclipAuthStore === undefined) {
+        delete process.env.PAPERCLIP_AUTH_STORE;
+      } else {
+        process.env.PAPERCLIP_AUTH_STORE = previousPaperclipAuthStore;
+      }
+    }
+  });
+
+  it("keeps using legacy seeded auth-store credentials when older board access records only have updatedAt", async () => {
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const previousPaperclipAuthStore = process.env.PAPERCLIP_AUTH_STORE;
+    let secretResolveCallCount = 0;
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    process.env.PAPERCLIP_AUTH_STORE = await createIsolatedPaperclipAuthStore();
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("board-access.update", {
+        companyId: "paperclip-company-123",
+        paperclipBoardApiTokenRef: "secret-board-token-ref",
+        paperclipBoardApiToken: "paperclip-board-token",
+        identity: "Agent Operator"
+      });
+      await harness.ctx.state.set(BOARD_ACCESS_SCOPE, {
+        companies: {
+          "paperclip-company-123": {
+            paperclipBoardApiTokenRef: "secret-board-token-ref",
+            identity: "Agent Operator",
+            updatedAt: "2026-04-14T09:23:00.000Z"
+          }
+        },
+        updatedAt: "2026-04-14T09:23:00.000Z"
+      });
+      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
+        secretResolveCallCount += 1;
+        throw new Error(`Unexpected secret resolve for ${secretRef}`);
+      };
+
+      const connection = await resolvePaperclipApiConnection(harness.ctx, "paperclip-company-123");
+
+      expect(connection.apiBase).toBe("http://127.0.0.1:3210");
+      expect(connection.apiKey).toBe("paperclip-board-token");
+      expect(secretResolveCallCount).toBe(0);
+    } finally {
       if (previousApiUrl === undefined) {
         delete process.env.PAPERCLIP_API_URL;
       } else {
