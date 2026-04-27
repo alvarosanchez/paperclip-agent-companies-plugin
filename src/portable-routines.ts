@@ -191,7 +191,9 @@ export function extractPortableRecurringTaskDefinitions(
 
     const title =
       asNonEmptyString(parsedFrontmatter?.name)
+      ?? asNonEmptyString(parsedFrontmatter?.title)
       ?? (rawFrontmatter ? asNonEmptyString(getTopLevelScalar(rawFrontmatter, "name")) : null)
+      ?? (rawFrontmatter ? asNonEmptyString(getTopLevelScalar(rawFrontmatter, "title")) : null)
       ?? getPortableTaskFallbackName(filePath);
     const description = getPortableTaskDescription(entry);
     const key = `${normalizeComparisonText(title)}\u0000${description ?? ""}`;

@@ -822,6 +822,13 @@ recurring: true
 
 Check the queue.
 `,
+        "tasks/weekly-review/TASK.md": `---
+title: Weekly Review
+recurring: true
+---
+
+Check the weekly queue.
+`,
         "tasks/one-off/TASK.md": `---
 name: One Off
 ---
@@ -839,6 +846,11 @@ routines:
         slug: "daily-review",
         title: "Daily Review",
         description: "Check the queue."
+      },
+      {
+        slug: "weekly-review",
+        title: "Weekly Review",
+        description: "Check the weekly queue."
       }
     ]);
   });
