@@ -822,6 +822,13 @@ recurring: true
 
 Check the queue.
 `,
+        "tasks/weekly-review/TASK.md": `---
+title: Weekly Review
+recurring: true
+---
+
+Check the weekly queue.
+`,
         "tasks/one-off/TASK.md": `---
 name: One Off
 ---
@@ -839,6 +846,11 @@ routines:
         slug: "daily-review",
         title: "Daily Review",
         description: "Check the queue."
+      },
+      {
+        slug: "weekly-review",
+        title: "Weekly Review",
+        description: "Check the weekly queue."
       }
     ]);
   });
@@ -3919,6 +3931,161 @@ routines:
           body: null
         }
       ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("skips one-time task files whose Paperclip issue already exists during sync", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-board-token";
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "issue-existing-task",
+              identifier: "ALP-1",
+              title: "Seed Default Company",
+              status: "backlog",
+              assigneeAgentId: null
+            }
+          ]),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "agent-123",
+              name: "Alpha CEO",
+              urlKey: "ceo",
+              status: "active",
+              role: "ceo",
+              title: "Chief Executive Officer"
+            }
+          ]),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        const parsedBody = bodyText ? JSON.parse(bodyText) : null;
+        const issuesIncluded = parsedBody?.include?.issues === true;
+
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            agents: issuesIncluded ? [] : [{ action: "updated" }],
+            projects: issuesIncluded ? [] : [{ action: "updated" }],
+            issues: issuesIncluded ? [{ action: "updated" }] : [],
+            skills: issuesIncluded ? [] : [{ action: "updated" }],
+            warnings: []
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-15T10:00:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      });
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      const issueImportRequests = fetchRequests.filter(
+        (request) =>
+          request.url === "http://127.0.0.1:3210/api/companies/import"
+          && (request.body as { include?: { issues?: boolean } } | null)?.include?.issues === true
+      );
+      expect(issueImportRequests).toHaveLength(1);
+      const issueImportFilePaths = Object.keys(
+        (issueImportRequests[0]?.body as { source?: { files?: Record<string, unknown> } } | null)
+          ?.source?.files ?? {}
+      ).sort();
+
+      expect(issueImportFilePaths).toContain("issues/follow-up/ISSUE.md");
+      expect(issueImportFilePaths).not.toContain("projects/import-pipeline/tasks/seed-default/TASK.md");
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {

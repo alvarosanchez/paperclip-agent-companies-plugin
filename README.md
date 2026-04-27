@@ -100,6 +100,7 @@ During import, the plugin packages the selected company contents as an inline Pa
 - Each tracked import saves the selected subset of the source package as its long-term sync contract.
 - When selected tasks depend on specific projects or assignees, the saved sync contract automatically includes those required projects and agents.
 - Sync uses the saved selection contract plus the current collision strategy, with overwrite mode selected by default so the imported Paperclip company stays aligned with the source package.
+- During sync, one-time `TASK.md` and `ISSUE.md` entries whose Paperclip issue title already exists in the imported company are omitted from the issue import pass so repeated syncs do not create duplicate issues.
 - For recurring-task imports, overwrite-mode re-imports and syncs reconcile duplicate active routines by archiving older matching copies after a successful import.
 - Discovered source packages expose separate **Import as new company** and **Import into...** actions.
 - **Import into...** lists only existing Paperclip companies that are not already tracked synced imports.
