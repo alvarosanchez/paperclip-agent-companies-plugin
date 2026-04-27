@@ -26,7 +26,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 ## Requirements
 
 - Node.js 20 or newer
-- A Paperclip instance with plugin support
+- A Paperclip instance with plugin support, version `2026.427.0` or newer
 - `git` available in the plugin worker environment for remote repositories
 - Access to any private repositories you want to scan
 
@@ -107,6 +107,7 @@ During import, the plugin packages the selected company contents as an inline Pa
 - Already tracked imported companies must use **Re-import / Edit selection** to change that contract; the tracked company card itself does not expose inline selection toggles.
 - Importing into an existing non-synced company, including the current company when applicable, adopts that company as a tracked synced import after the import completes.
 - Initial imports and later syncs queue explicit Paperclip wake requests for newly assigned imported issues so those agents can pick up the work even if scheduled heartbeats are disabled. The plugin tries an explicit on-demand wake first and falls back to an assignment-style wake when Paperclip skips the first request.
+- On Paperclip `2026.427.0` and newer, post-import wake detection reads the imported company's current issues through Paperclip's plugin issue API and requests actionable assignment wakeups through `ctx.issues.requestWakeup` / `ctx.issues.requestWakeups`; backlog imports keep the legacy agent-wake fallback for compatibility.
 - Hosted imports that include assigned tasks stage agent creation before task import so newly imported assignees can be approved in time for Paperclip to preserve the task assignment and wake the agent.
 - Recurring tasks are imported through Paperclip's company portability flow as routines rather than one-time starter issues, while keeping any `.paperclip.yaml` routine sidecar metadata in the portable package.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
@@ -129,6 +130,8 @@ The manifest currently requests these Paperclip capabilities:
 - `plugin.state.read`
 - `plugin.state.write`
 - `jobs.schedule`
+- `issues.read`
+- `issues.wakeup`
 - `http.outbound`
 - `secrets.read-ref`
 - `ui.page.register`

@@ -23,6 +23,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "plugin.state.read",
     "plugin.state.write",
     "jobs.schedule",
+    "issues.read",
+    "issues.wakeup",
     "http.outbound",
     "secrets.read-ref",
     "ui.page.register"

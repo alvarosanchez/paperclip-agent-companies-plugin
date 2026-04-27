@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Issue } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { parse as parseYaml } from "yaml";
 import manifest from "../src/manifest.js";
@@ -56,6 +57,51 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
+
+function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
+  const timestamp = new Date("2026-04-14T09:23:00.000Z");
+
+  return {
+    id: overrides.id,
+    companyId: overrides.companyId,
+    projectId: overrides.projectId ?? null,
+    projectWorkspaceId: overrides.projectWorkspaceId ?? null,
+    goalId: overrides.goalId ?? null,
+    parentId: overrides.parentId ?? null,
+    title: overrides.title,
+    description: overrides.description ?? null,
+    status: overrides.status ?? "todo",
+    priority: overrides.priority ?? "medium",
+    assigneeAgentId: overrides.assigneeAgentId ?? null,
+    assigneeUserId: overrides.assigneeUserId ?? null,
+    checkoutRunId: overrides.checkoutRunId ?? null,
+    executionRunId: overrides.executionRunId ?? null,
+    executionAgentNameKey: overrides.executionAgentNameKey ?? null,
+    executionLockedAt: overrides.executionLockedAt ?? null,
+    createdByAgentId: overrides.createdByAgentId ?? null,
+    createdByUserId: overrides.createdByUserId ?? null,
+    issueNumber: overrides.issueNumber ?? null,
+    identifier: overrides.identifier ?? null,
+    originKind: overrides.originKind,
+    originId: overrides.originId ?? null,
+    originRunId: overrides.originRunId ?? null,
+    requestDepth: overrides.requestDepth ?? 0,
+    billingCode: overrides.billingCode ?? null,
+    assigneeAdapterOverrides: overrides.assigneeAdapterOverrides ?? null,
+    executionWorkspaceId: overrides.executionWorkspaceId ?? null,
+    executionWorkspacePreference: overrides.executionWorkspacePreference ?? null,
+    executionWorkspaceSettings: overrides.executionWorkspaceSettings ?? null,
+    startedAt: overrides.startedAt ?? null,
+    completedAt: overrides.completedAt ?? null,
+    cancelledAt: overrides.cancelledAt ?? null,
+    hiddenAt: overrides.hiddenAt ?? null,
+    createdAt: overrides.createdAt ?? timestamp,
+    updatedAt: overrides.updatedAt ?? timestamp,
+    ...(overrides.blockedBy ? { blockedBy: overrides.blockedBy } : {}),
+    ...(overrides.blocks ? { blocks: overrides.blocks } : {}),
+    ...(overrides.labelIds ? { labelIds: overrides.labelIds } : {})
+  };
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -377,6 +423,8 @@ describe("agent companies plugin", () => {
       "plugin.state.read",
       "plugin.state.write",
       "jobs.schedule",
+      "issues.read",
+      "issues.wakeup",
       "http.outbound",
       "secrets.read-ref",
       "ui.page.register"
@@ -1599,12 +1647,7 @@ routines:
             },
             collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
           })
-        }),
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          authorization: "Bearer paperclip-board-token",
-          body: null
-        }
+        })
       ]);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1846,12 +1889,7 @@ routines:
             },
             collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
           })
-        }),
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          authorization: "Bearer paperclip-board-token",
-          body: null
-        }
+        })
       ]);
     } finally {
       globalThis.fetch = originalFetch;
@@ -3162,6 +3200,18 @@ routines:
 
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       currentTime = "2026-04-15T10:00:00.000Z";
+      harness.seed({
+        issues: [
+          createIssueRecord({
+            id: "issue-1",
+            companyId: "paperclip-company-123",
+            identifier: "ALP-1",
+            title: "Seed Default Company",
+            status: "todo",
+            assigneeAgentId: "agent-123"
+          })
+        ]
+      });
 
       await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
         sourceCompanyId: company?.id,
@@ -3173,27 +3223,22 @@ routines:
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           method: "GET",
           body: null
-        },
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          method: "GET",
-          body: null
-        },
-        {
-          url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
-          method: "POST",
-          body: {
-            source: "on_demand",
-            triggerDetail: "manual",
-            reason: "issue_assigned",
-            payload: {
-              issueId: "issue-1",
-              taskId: "issue-1",
-              mutation: "import"
-            }
-          }
         }
       ]);
+      expect(harness.logs).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          message: "Queued Paperclip wake request for a newly assigned imported issue",
+          meta: expect.objectContaining({
+            companyId: "paperclip-company-123",
+            agentId: "agent-123",
+            issueId: "issue-1",
+            issueIdentifier: "ALP-1",
+            wakeSource: "plugin.issue.requestWakeup",
+            reusedExistingExecution: false
+          })
+        })
+      );
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {
@@ -3212,131 +3257,88 @@ routines:
 
   it("queues wake requests for newly assigned issues when recording an import", async () => {
     const repositoryPath = await createRepositoryFixture();
-    const previousApiUrl = process.env.PAPERCLIP_API_URL;
-    const previousApiKey = process.env.PAPERCLIP_API_KEY;
-    const originalFetch = globalThis.fetch;
-    const fetchRequests: Array<{ url: string; method: string; body: unknown }> = [];
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:23:00.000Z",
+      startupAutoSyncDelayMs: null
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
 
-    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
-    delete process.env.PAPERCLIP_API_KEY;
-    globalThis.fetch = async (input, init) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      const method = init?.method ?? "GET";
-      const bodyText = typeof init?.body === "string" ? init.body : null;
-      fetchRequests.push({
-        url,
-        method,
-        body: bodyText ? JSON.parse(bodyText) : null
-      });
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
 
-      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
-        return new Response(
-          JSON.stringify([
-            {
-              id: "issue-1",
-              identifier: "ALP-1",
-              title: "Seed Default Company",
-              status: "backlog",
-              assigneeAgentId: "agent-123"
-            }
-          ]),
-          {
-            status: 200,
-            headers: {
-              "content-type": "application/json"
-            }
-          }
-        );
-      }
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
 
-      if (url === "http://127.0.0.1:3210/api/agents/agent-123/wakeup") {
-        return new Response(
-          JSON.stringify({
-            id: "run-123",
-            status: "queued"
-          }),
-          {
-            status: 202,
-            headers: {
-              "content-type": "application/json"
-            }
-          }
-        );
-      }
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+    const sourceCompanyId = company?.id;
 
-      throw new Error(`Unexpected fetch to ${url}`);
-    };
+    expect(sourceCompanyId).toBeTruthy();
 
-    try {
-      const plugin = createAgentCompaniesPlugin({
-        now: () => "2026-04-14T09:23:00.000Z",
-        startupAutoSyncDelayMs: null
-      });
-      const harness = createTestHarness({
-        manifest,
-        capabilities: [...manifest.capabilities]
-      });
+    harness.seed({
+      issues: [
+        createIssueRecord({
+          id: "issue-1",
+          companyId: "paperclip-company-123",
+          identifier: "ALP-1",
+          title: "Seed Default Company",
+          status: "todo",
+          assigneeAgentId: "agent-123"
+        }),
+        createIssueRecord({
+          id: "issue-2",
+          companyId: "paperclip-company-123",
+          identifier: "ALP-2",
+          title: "Wire Default Project",
+          status: "todo",
+          assigneeAgentId: "agent-456"
+        })
+      ]
+    });
 
-      await harness.ctx.state.set(CATALOG_SCOPE, {
-        repositories: [],
-        updatedAt: "2026-04-14T09:00:00.000Z"
-      });
+    await harness.performAction("catalog.record-company-import", {
+      sourceCompanyId: sourceCompanyId!,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP",
+      issuesBeforeImport: []
+    });
 
-      await plugin.definition.setup(harness.ctx);
-      await harness.performAction("catalog.add-repository", {
-        url: repositoryPath
-      });
-
-      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
-      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
-      const sourceCompanyId = company?.id;
-
-      expect(sourceCompanyId).toBeTruthy();
-
-      await harness.performAction("catalog.record-company-import", {
-        sourceCompanyId: sourceCompanyId!,
-        importedCompanyId: "paperclip-company-123",
-        importedCompanyName: "Alpha Labs Imported",
-        importedCompanyIssuePrefix: "ALP",
-        issuesBeforeImport: []
-      });
-
-      expect(fetchRequests).toEqual([
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          method: "GET",
-          body: null
-        },
-        {
-          url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
-          method: "POST",
-          body: {
-            source: "on_demand",
-            triggerDetail: "manual",
-            reason: "issue_assigned",
-            payload: {
-              issueId: "issue-1",
-              taskId: "issue-1",
-              mutation: "import"
-            }
-          }
-        }
-      ]);
-    } finally {
-      globalThis.fetch = originalFetch;
-      if (previousApiUrl === undefined) {
-        delete process.env.PAPERCLIP_API_URL;
-      } else {
-        process.env.PAPERCLIP_API_URL = previousApiUrl;
-      }
-
-      if (previousApiKey === undefined) {
-        delete process.env.PAPERCLIP_API_KEY;
-      } else {
-        process.env.PAPERCLIP_API_KEY = previousApiKey;
-      }
-    }
+    expect(harness.logs).toContainEqual(
+      expect.objectContaining({
+        level: "info",
+        message: "Queued Paperclip wake request for a newly assigned imported issue",
+        meta: expect.objectContaining({
+          companyId: "paperclip-company-123",
+          agentId: "agent-123",
+          issueId: "issue-1",
+          issueIdentifier: "ALP-1",
+          wakeSource: "plugin.issue.requestWakeups",
+          reusedExistingExecution: false
+        })
+      })
+    );
+    expect(harness.logs).toContainEqual(
+      expect.objectContaining({
+        level: "info",
+        message: "Queued Paperclip wake request for a newly assigned imported issue",
+        meta: expect.objectContaining({
+          companyId: "paperclip-company-123",
+          agentId: "agent-456",
+          issueId: "issue-2",
+          issueIdentifier: "ALP-2",
+          wakeSource: "plugin.issue.requestWakeups",
+          reusedExistingExecution: false
+        })
+      })
+    );
   });
 
   it("falls back to an assignment-style wake when the explicit import wake is skipped", async () => {
@@ -3435,6 +3437,19 @@ routines:
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
+      harness.seed({
+        issues: [
+          createIssueRecord({
+            id: "issue-1",
+            companyId: "paperclip-company-123",
+            identifier: "ALP-1",
+            title: "Seed Default Company",
+            status: "backlog",
+            assigneeAgentId: "agent-123"
+          })
+        ]
+      });
+
       await harness.performAction("catalog.record-company-import", {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
@@ -3444,11 +3459,6 @@ routines:
       });
 
       expect(fetchRequests).toEqual([
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          method: "GET",
-          body: null
-        },
         {
           url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
           method: "POST",
@@ -3763,11 +3773,6 @@ routines:
           body: {
             status: "archived"
           }
-        },
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          authorization: "Bearer paperclip-board-token",
-          body: null
         }
       ]);
     } finally {
@@ -3924,11 +3929,6 @@ routines:
             },
             collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
           }
-        },
-        {
-          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
-          authorization: "Bearer paperclip-board-token",
-          body: null
         }
       ]);
     } finally {

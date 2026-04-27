@@ -294,9 +294,11 @@ interface PaperclipIssueWakeTarget {
   issueId: string;
   issueIdentifier: string | null;
   issueTitle: string | null;
+  issueStatus: string | null;
 }
 
 type PaperclipWakeRequestSource = "on_demand" | "assignment";
+type PaperclipIssueWakeSource = "plugin.issue.requestWakeup" | "plugin.issue.requestWakeups" | PaperclipWakeRequestSource;
 
 interface PaperclipQueuedWakeResponse {
   kind: "queued";
@@ -315,7 +317,7 @@ interface PaperclipSkippedWakeResponse {
 type PaperclipIssueWakeResponse = PaperclipQueuedWakeResponse | PaperclipSkippedWakeResponse;
 
 interface PaperclipIssueWakeRequestResult {
-  source: PaperclipWakeRequestSource;
+  source: PaperclipIssueWakeSource;
   runId: string | null;
   reusedExistingExecution: boolean;
 }
@@ -3679,6 +3681,16 @@ async function fetchPaperclipCompanyIssues(
   return normalizePaperclipIssueList(payload) ?? [];
 }
 
+async function listPaperclipCompanyIssuesFromHost(
+  ctx: PluginContext,
+  companyId: string
+): Promise<PaperclipIssueRecord[]> {
+  const issues = await ctx.issues.list({ companyId });
+  return issues
+    .map((issue) => normalizePaperclipIssue(issue))
+    .filter((issue): issue is PaperclipIssueRecord => issue !== null);
+}
+
 async function fetchPaperclipCompanyAgents(
   connection: PaperclipApiConnection,
   companyId: string
@@ -3760,7 +3772,8 @@ function selectPaperclipIssueWakeTargets(
         agentId: assigneeAgentId,
         issueId: issue.id,
         issueIdentifier: issue.identifier,
-        issueTitle: issue.title
+        issueTitle: issue.title,
+        issueStatus: issue.status
       });
     }
   }
@@ -3825,7 +3838,7 @@ function summarizeSkippedPaperclipIssueWakeResponse(
   return response.message ?? response.reason ?? "Wakeup was skipped.";
 }
 
-async function requestPaperclipIssueWake(
+async function requestLegacyPaperclipIssueWake(
   connection: PaperclipApiConnection,
   target: PaperclipIssueWakeTarget
 ): Promise<PaperclipIssueWakeRequestResult> {
@@ -3867,6 +3880,148 @@ async function requestPaperclipIssueWake(
   );
 }
 
+function isBacklogPluginWakeCompatibilityError(
+  error: unknown,
+  target: PaperclipIssueWakeTarget
+): boolean {
+  return target.issueStatus === "backlog"
+    && summarizeErrorMessage(error).toLowerCase().includes("not wakeable in status: backlog");
+}
+
+async function requestLegacyBacklogPaperclipIssueWake(
+  ctx: PluginContext,
+  companyId: string,
+  target: PaperclipIssueWakeTarget
+): Promise<PaperclipIssueWakeRequestResult> {
+  ctx.logger.info("Falling back to legacy Paperclip agent wake route for imported backlog issue", {
+    companyId,
+    agentId: target.agentId,
+    issueId: target.issueId,
+    issueIdentifier: target.issueIdentifier
+  });
+
+  const connection = await resolvePaperclipApiConnection(ctx, companyId);
+  return requestLegacyPaperclipIssueWake(connection, target);
+}
+
+async function requestPaperclipIssueWake(
+  ctx: PluginContext,
+  companyId: string,
+  target: PaperclipIssueWakeTarget
+): Promise<PaperclipIssueWakeRequestResult> {
+  if (target.issueStatus === "backlog") {
+    return requestLegacyBacklogPaperclipIssueWake(ctx, companyId, target);
+  }
+
+  try {
+    const result = await ctx.issues.requestWakeup(target.issueId, companyId, {
+      reason: "issue_assigned",
+      contextSource: "plugin.agent-companies.import",
+      idempotencyKey: `agent-companies.import:${companyId}:${target.issueId}`
+    });
+
+    if (!result.queued && !result.runId) {
+      throw new Error(`Paperclip did not queue a wakeup for ${describePaperclipIssueWakeTarget(target)}.`);
+    }
+
+    return {
+      source: "plugin.issue.requestWakeup",
+      runId: result.runId,
+      reusedExistingExecution: false
+    };
+  } catch (error) {
+    if (!isBacklogPluginWakeCompatibilityError(error, target)) {
+      throw error;
+    }
+
+    return requestLegacyBacklogPaperclipIssueWake(ctx, companyId, target);
+  }
+}
+
+async function requestPaperclipIssueWakeBatch(
+  ctx: PluginContext,
+  companyId: string,
+  targets: PaperclipIssueWakeTarget[]
+): Promise<Map<string, PaperclipIssueWakeRequestResult>> {
+  const targetIds = targets.map((target) => target.issueId);
+  const results = await ctx.issues.requestWakeups(targetIds, companyId, {
+    reason: "issue_assigned",
+    contextSource: "plugin.agent-companies.import",
+    idempotencyKeyPrefix: `agent-companies.import:${companyId}`
+  });
+  const resultsByIssueId = new Map<string, PaperclipIssueWakeRequestResult>();
+
+  for (const result of results) {
+    const target = targets.find((candidate) => candidate.issueId === result.issueId);
+    if (!target) {
+      continue;
+    }
+
+    if (!result.queued && !result.runId) {
+      throw new Error(`Paperclip did not queue a wakeup for ${describePaperclipIssueWakeTarget(target)}.`);
+    }
+
+    resultsByIssueId.set(result.issueId, {
+      source: "plugin.issue.requestWakeups",
+      runId: result.runId,
+      reusedExistingExecution: false
+    });
+  }
+
+  for (const target of targets) {
+    if (!resultsByIssueId.has(target.issueId)) {
+      throw new Error(`Paperclip did not return a wakeup result for ${describePaperclipIssueWakeTarget(target)}.`);
+    }
+  }
+
+  return resultsByIssueId;
+}
+
+function logQueuedPaperclipIssueWake(
+  ctx: PluginContext,
+  companyId: string,
+  target: PaperclipIssueWakeTarget,
+  wakeResult: PaperclipIssueWakeRequestResult
+): void {
+  ctx.logger.info("Queued Paperclip wake request for a newly assigned imported issue", {
+    companyId,
+    agentId: target.agentId,
+    issueId: target.issueId,
+    issueIdentifier: target.issueIdentifier,
+    wakeSource: wakeResult.source,
+    wakeRunId: wakeResult.runId,
+    reusedExistingExecution: wakeResult.reusedExistingExecution
+  });
+}
+
+function logFailedPaperclipIssueWake(
+  ctx: PluginContext,
+  companyId: string,
+  target: PaperclipIssueWakeTarget,
+  error: unknown
+): void {
+  ctx.logger.warn("Failed to queue a Paperclip wake request for a newly assigned imported issue", {
+    companyId,
+    agentId: target.agentId,
+    issueId: target.issueId,
+    issueIdentifier: target.issueIdentifier,
+    error: summarizeErrorMessage(error)
+  });
+}
+
+async function requestAndLogPaperclipIssueWake(
+  ctx: PluginContext,
+  companyId: string,
+  target: PaperclipIssueWakeTarget
+): Promise<void> {
+  try {
+    const wakeResult = await requestPaperclipIssueWake(ctx, companyId, target);
+    logQueuedPaperclipIssueWake(ctx, companyId, target, wakeResult);
+  } catch (error) {
+    logFailedPaperclipIssueWake(ctx, companyId, target, error);
+  }
+}
+
 async function tryFetchPaperclipCompanyIssues(
   ctx: PluginContext,
   companyId: string
@@ -3892,11 +4047,9 @@ async function requestWakeForNewlyAssignedPaperclipIssues(
     return;
   }
 
-  let connection: PaperclipApiConnection;
   let afterIssues: PaperclipIssueRecord[];
   try {
-    connection = await resolvePaperclipApiConnection(ctx, companyId);
-    afterIssues = await fetchPaperclipCompanyIssues(connection, companyId);
+    afterIssues = await listPaperclipCompanyIssuesFromHost(ctx, companyId);
   } catch (error) {
     ctx.logger.warn("Skipped Paperclip issue wake requests because the latest issue list could not be read", {
       companyId,
@@ -3910,27 +4063,33 @@ async function requestWakeForNewlyAssignedPaperclipIssues(
     return;
   }
 
-  for (const target of wakeTargets) {
+  const backlogTargets = wakeTargets.filter((target) => target.issueStatus === "backlog");
+  for (const target of backlogTargets) {
+    await requestAndLogPaperclipIssueWake(ctx, companyId, target);
+  }
+
+  const pluginWakeTargets = wakeTargets.filter((target) => target.issueStatus !== "backlog");
+  if (pluginWakeTargets.length > 1) {
     try {
-      const wakeResult = await requestPaperclipIssueWake(connection, target);
-      ctx.logger.info("Queued Paperclip wake request for a newly assigned imported issue", {
-        companyId,
-        agentId: target.agentId,
-        issueId: target.issueId,
-        issueIdentifier: target.issueIdentifier,
-        wakeSource: wakeResult.source,
-        wakeRunId: wakeResult.runId,
-        reusedExistingExecution: wakeResult.reusedExistingExecution
-      });
+      const wakeResults = await requestPaperclipIssueWakeBatch(ctx, companyId, pluginWakeTargets);
+      for (const target of pluginWakeTargets) {
+        const wakeResult = wakeResults.get(target.issueId);
+        if (wakeResult) {
+          logQueuedPaperclipIssueWake(ctx, companyId, target, wakeResult);
+        }
+      }
+      return;
     } catch (error) {
-      ctx.logger.warn("Failed to queue a Paperclip wake request for a newly assigned imported issue", {
+      ctx.logger.warn("Failed to queue Paperclip issue wake requests as a batch; retrying individually", {
         companyId,
-        agentId: target.agentId,
-        issueId: target.issueId,
-        issueIdentifier: target.issueIdentifier,
+        issueCount: pluginWakeTargets.length,
         error: summarizeErrorMessage(error)
       });
     }
+  }
+
+  for (const target of pluginWakeTargets) {
+    await requestAndLogPaperclipIssueWake(ctx, companyId, target);
   }
 }
 
