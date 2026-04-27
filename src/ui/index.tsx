@@ -55,6 +55,7 @@ import {
   type PluginSettingsPageProps
 } from "@paperclipai/plugin-sdk/ui";
 import {
+  type AdapterPreset,
   type CatalogCompanyContentDetail,
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
@@ -63,6 +64,7 @@ import {
   type CompanyContentSectionDefinition,
   type CompanyImportPartSelection,
   type CompanyImportSelection,
+  type ImportAdapterPresetSelection,
   type CompanyContentItem,
   type CompanyContents,
   type CatalogCompanySummary,
@@ -95,6 +97,7 @@ import { getImportedCompanyVersionInfo } from "./version-status.js";
 
 const EMPTY_CATALOG: CatalogSnapshot = {
   autoSyncCadenceHours: DEFAULT_AUTO_SYNC_CADENCE_HOURS,
+  adapterPresets: [],
   repositories: [],
   companies: [],
   importedCompanies: [],
@@ -389,7 +392,8 @@ const PAGE_STYLES = `
 }
 
 .agent-companies-settings__button:focus-visible,
-.agent-companies-settings__input:focus-visible {
+.agent-companies-settings__input:focus-visible,
+.agent-companies-settings__textarea:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ring, var(--ac-primary)) 72%, transparent);
   outline-offset: 2px;
 }
@@ -510,6 +514,34 @@ const PAGE_STYLES = `
 
 .agent-companies-settings__input::placeholder {
   color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__textarea {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--ac-bg);
+  color: var(--ac-text);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, SF Mono, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.agent-companies-settings__adapter-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-companies-settings__adapter-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  background: var(--ac-surface-soft);
 }
 
 .agent-companies-settings__repo-list,
@@ -1383,6 +1415,7 @@ interface PendingActionState {
     | "scanning-repository"
     | "removing"
     | "toggling-auto-sync"
+    | "updating-adapter-presets"
     | "updating-cadence";
   repositoryId?: string;
   sourceCompanyId?: string;
@@ -1409,6 +1442,7 @@ interface ImportDialogState {
   targetCompanyName: string;
   companyName: string;
   selection: CompanyImportSelection;
+  adapterPresetSelection: ImportAdapterPresetSelection;
   collisionStrategy: CatalogSyncCollisionStrategy;
 }
 
@@ -1789,6 +1823,38 @@ function getSelectedCompanyContentSlugs(
   }
 
   return selectedSlugs;
+}
+
+function buildAdapterOverridesFromPresets(
+  adapterPresets: AdapterPreset[],
+  selectedAgentSlugs: Set<string>,
+  selection: ImportAdapterPresetSelection
+): Record<string, { adapterType: string; adapterConfig?: Record<string, unknown> }> | undefined {
+  const presetsById = new Map(adapterPresets.map((preset) => [preset.id, preset]));
+  const overrides: Record<string, { adapterType: string; adapterConfig?: Record<string, unknown> }> = {};
+
+  for (const agentSlug of selectedAgentSlugs) {
+    const presetId = Object.prototype.hasOwnProperty.call(selection.agentPresetIds, agentSlug)
+      ? selection.agentPresetIds[agentSlug]
+      : selection.defaultPresetId;
+    if (!presetId) {
+      continue;
+    }
+
+    const preset = presetsById.get(presetId);
+    if (!preset) {
+      continue;
+    }
+
+    overrides[agentSlug] = {
+      adapterType: preset.adapterType,
+      ...(Object.keys(preset.adapterConfig).length > 0
+        ? { adapterConfig: preset.adapterConfig }
+        : {})
+    };
+  }
+
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
 function normalizePaperclipAgentSnapshots(value: unknown): Array<{
@@ -2389,6 +2455,26 @@ function cloneCompanyImportSelection(selection: CompanyImportSelection): Company
       mode: selection.skills.mode,
       ...(selection.skills.itemPaths ? { itemPaths: [...selection.skills.itemPaths] } : {})
     }
+  };
+}
+
+function createDefaultImportAdapterPresetSelection(): ImportAdapterPresetSelection {
+  return {
+    defaultPresetId: null,
+    agentPresetIds: {}
+  };
+}
+
+function cloneImportAdapterPresetSelection(
+  selection: ImportAdapterPresetSelection | null | undefined
+): ImportAdapterPresetSelection {
+  if (!selection) {
+    return createDefaultImportAdapterPresetSelection();
+  }
+
+  return {
+    defaultPresetId: selection.defaultPresetId ?? null,
+    agentPresetIds: { ...selection.agentPresetIds }
   };
 }
 
@@ -3741,10 +3827,13 @@ function CompanyDetailsDialog(props: {
 }
 
 function ImportCompanyDialog(props: {
+  adapterPresets: AdapterPreset[];
   company: CatalogCompanySummary;
   dialogState: ImportDialogState;
   errorText: string | null;
   importState: ImportState | null;
+  onChangeAgentAdapterPreset(agentSlug: string, value: string): void;
+  onChangeDefaultAdapterPreset(value: string): void;
   onChangeCollisionStrategy(value: CatalogSyncCollisionStrategy): void;
   onChangeCompanyName(value: string): void;
   onClose(): void;
@@ -3753,10 +3842,13 @@ function ImportCompanyDialog(props: {
   onSubmit(event: FormEvent<HTMLFormElement>): Promise<void>;
 }): React.JSX.Element {
   const {
+    adapterPresets,
     company,
     dialogState,
     errorText,
     importState,
+    onChangeAgentAdapterPreset,
+    onChangeDefaultAdapterPreset,
     onChangeCollisionStrategy,
     onChangeCompanyName,
     onClose,
@@ -3773,6 +3865,14 @@ function ImportCompanyDialog(props: {
     company.contents,
     dialogState.selection
   );
+  const selectedAgents = company.contents.agents
+    .map((item) => ({
+      item,
+      slug: normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2))
+    }))
+    .filter((entry): entry is { item: CompanyContentItem; slug: string } =>
+      Boolean(entry.slug) && isSelectionItemChecked(dialogState.selection.agents, entry.item.path)
+    );
 
   return (
     <div
@@ -3973,6 +4073,68 @@ function ImportCompanyDialog(props: {
             </fieldset>
 
             <fieldset>
+              <legend className="agent-companies-settings__metric-label">Adapter Presets</legend>
+              <p className="agent-companies-settings__metric-note">
+                Adapter choices are saved with this import so later re-imports and syncs keep the same runtime mapping.
+              </p>
+              {adapterPresets.length === 0 ? (
+                <div className="agent-companies-settings__notice">
+                  Add adapter presets in settings before import if you want to override package defaults.
+                </div>
+              ) : (
+                <div className="agent-companies-settings__adapter-grid">
+                  <label className="agent-companies-settings__adapter-row">
+                    <span className="agent-companies-settings__status-copy">
+                      <span className="agent-companies-settings__status-title">Default adapter preset</span>
+                      <span className="agent-companies-settings__status-body">Applied to selected agents without a per-agent override.</span>
+                    </span>
+                    <select
+                      className="agent-companies-settings__input"
+                      disabled={isBusy}
+                      onChange={(event) => onChangeDefaultAdapterPreset(event.target.value)}
+                      value={dialogState.adapterPresetSelection.defaultPresetId ?? "__package__"}
+                    >
+                      <option value="__package__">Keep package adapter</option>
+                      {adapterPresets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedAgents.map(({ item, slug }) => {
+                    const hasOverride = Object.prototype.hasOwnProperty.call(
+                      dialogState.adapterPresetSelection.agentPresetIds,
+                      slug
+                    );
+                    const selectedValue = hasOverride
+                      ? dialogState.adapterPresetSelection.agentPresetIds[slug] ?? "__package__"
+                      : "__default__";
+
+                    return (
+                      <label className="agent-companies-settings__adapter-row" key={slug}>
+                        <span className="agent-companies-settings__status-copy">
+                          <span className="agent-companies-settings__status-title">{item.name}</span>
+                          <span className="agent-companies-settings__status-body">{slug}</span>
+                        </span>
+                        <select
+                          className="agent-companies-settings__input"
+                          disabled={isBusy}
+                          onChange={(event) => onChangeAgentAdapterPreset(slug, event.target.value)}
+                          value={selectedValue}
+                        >
+                          <option value="__default__">Use default preset</option>
+                          <option value="__package__">Keep package adapter</option>
+                          {adapterPresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>{preset.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </fieldset>
+
+            <fieldset>
               <legend className="agent-companies-settings__metric-label">Collision Handling</legend>
               <div className="agent-companies-settings__status-grid">
                 {[
@@ -4148,6 +4310,7 @@ export function AgentCompaniesSettingsPage({
   const syncCompany = usePluginAction("catalog.sync-company");
   const setCompanyAutoSync = usePluginAction("catalog.set-company-auto-sync");
   const setAutoSyncCadence = usePluginAction("catalog.set-auto-sync-cadence");
+  const setAdapterPresets = usePluginAction("catalog.set-adapter-presets");
   const addRepository = usePluginAction("catalog.add-repository");
   const removeRepository = usePluginAction("catalog.remove-repository");
   const scanRepository = usePluginAction("catalog.scan-repository");
@@ -4157,6 +4320,7 @@ export function AgentCompaniesSettingsPage({
   const catalog = data ?? EMPTY_CATALOG;
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const [repositoryInput, setRepositoryInput] = useState("");
+  const [adapterPresetsInput, setAdapterPresetsInput] = useState("[]");
   const [autoSyncCadenceInput, setAutoSyncCadenceInput] = useState(
     String(DEFAULT_AUTO_SYNC_CADENCE_HOURS)
   );
@@ -4234,6 +4398,19 @@ export function AgentCompaniesSettingsPage({
   useEffect(() => {
     setAutoSyncCadenceInput(String(catalog.autoSyncCadenceHours));
   }, [catalog.autoSyncCadenceHours]);
+
+  useEffect(() => {
+    setAdapterPresetsInput(JSON.stringify(
+      catalog.adapterPresets.map((preset) => ({
+        id: preset.id,
+        name: preset.name,
+        adapterType: preset.adapterType,
+        adapterConfig: preset.adapterConfig
+      })),
+      null,
+      2
+    ));
+  }, [catalog.adapterPresets]);
 
   async function ensurePaperclipApiBaseRegistered(): Promise<void> {
     const apiBase = resolveBrowserOrigin();
@@ -4393,6 +4570,7 @@ export function AgentCompaniesSettingsPage({
         company.contents,
         createDefaultCompanyImportSelection()
       ),
+      adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
       collisionStrategy: "replace"
     });
     setImportError(null);
@@ -4427,6 +4605,7 @@ export function AgentCompaniesSettingsPage({
         company.contents,
         createDefaultCompanyImportSelection()
       ),
+      adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
       collisionStrategy: "replace"
     });
     setImportError(null);
@@ -4456,6 +4635,9 @@ export function AgentCompaniesSettingsPage({
       selection: resolveCompanyImportSelection(
         company.contents,
         cloneCompanyImportSelection(company.importedCompany.selection)
+      ),
+      adapterPresetSelection: cloneImportAdapterPresetSelection(
+        company.importedCompany.adapterPresetSelection
       ),
       collisionStrategy: company.importedCompany.syncCollisionStrategy
     });
@@ -4498,6 +4680,11 @@ export function AgentCompaniesSettingsPage({
       const selectedAgentSlugs = getSelectedCompanyContentSlugs(
         importCompany.contents.agents,
         preparedImport.selection.agents
+      );
+      const adapterOverrides = buildAdapterOverridesFromPresets(
+        catalog.adapterPresets,
+        selectedAgentSlugs,
+        importDialog.adapterPresetSelection
       );
       const preIssueImportInclude = buildPaperclipImportInclude(
         preparedImport.selection,
@@ -4557,7 +4744,8 @@ export function AgentCompaniesSettingsPage({
             source: preIssueImportSource,
             include: preIssueImportInclude,
             target,
-            collisionStrategy: importDialog.collisionStrategy
+            collisionStrategy: importDialog.collisionStrategy,
+            ...(adapterOverrides ? { adapterOverrides } : {})
           })
         });
       }
@@ -4703,6 +4891,7 @@ export function AgentCompaniesSettingsPage({
             importedCompanyName,
             importedCompanyIssuePrefix,
             selection: preparedImport.selection,
+            adapterPresetSelection: importDialog.adapterPresetSelection,
             syncCollisionStrategy: importDialog.collisionStrategy,
             issuesBeforeImport
           });
@@ -4719,6 +4908,9 @@ export function AgentCompaniesSettingsPage({
           : warningDetails.length;
         const importDetails = [
           `Selected contents: ${buildCompanyImportSelectionSummary(preparedImport.selection, importCompany.contents)}`,
+          adapterOverrides
+            ? `Adapter overrides: ${Object.keys(adapterOverrides).length} selected agent${Object.keys(adapterOverrides).length === 1 ? "" : "s"}.`
+            : "Adapter overrides: package defaults.",
           getRecurringTaskImportHint(importCompany.contents),
           `Auto-sync: enabled ${formatAutoSyncCadenceLabel(catalog.autoSyncCadenceHours)} by default after import.`,
           importDialog.collisionStrategy === "replace"
@@ -4804,6 +4996,43 @@ export function AgentCompaniesSettingsPage({
           }
         : currentDialog
     );
+  }
+
+  function handleChangeDefaultAdapterPreset(value: string): void {
+    setImportDialog((currentDialog) =>
+      currentDialog
+        ? {
+            ...currentDialog,
+            adapterPresetSelection: {
+              ...currentDialog.adapterPresetSelection,
+              defaultPresetId: value === "__package__" ? null : value
+            }
+          }
+        : currentDialog
+    );
+  }
+
+  function handleChangeAgentAdapterPreset(agentSlug: string, value: string): void {
+    setImportDialog((currentDialog) => {
+      if (!currentDialog) {
+        return currentDialog;
+      }
+
+      const agentPresetIds = { ...currentDialog.adapterPresetSelection.agentPresetIds };
+      if (value === "__default__") {
+        delete agentPresetIds[agentSlug];
+      } else {
+        agentPresetIds[agentSlug] = value === "__package__" ? null : value;
+      }
+
+      return {
+        ...currentDialog,
+        adapterPresetSelection: {
+          ...currentDialog.adapterPresetSelection,
+          agentPresetIds
+        }
+      };
+    });
   }
 
   function handleToggleImportSelectionPart(
@@ -4935,6 +5164,52 @@ export function AgentCompaniesSettingsPage({
     } catch (actionError) {
       setNotice({
         tone: "error",
+        text: getErrorMessage(actionError)
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function handleSaveAdapterPresets(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    let adapterPresets: unknown;
+    try {
+      adapterPresets = JSON.parse(adapterPresetsInput);
+    } catch (parseError) {
+      setNotice({
+        tone: "error",
+        title: "Adapter presets not saved",
+        text: `Preset JSON is invalid: ${getErrorMessage(parseError)}`
+      });
+      return;
+    }
+
+    if (!Array.isArray(adapterPresets)) {
+      setNotice({
+        tone: "error",
+        title: "Adapter presets not saved",
+        text: "Preset JSON must be an array."
+      });
+      return;
+    }
+
+    setPendingAction({ kind: "updating-adapter-presets" });
+    setNotice(null);
+
+    try {
+      await setAdapterPresets({ adapterPresets });
+      refresh();
+      setNotice({
+        tone: "success",
+        title: "Adapter presets saved",
+        text: "Imports can now use these presets as defaults or per-agent overrides."
+      });
+    } catch (actionError) {
+      setNotice({
+        tone: "error",
+        title: "Adapter presets not saved",
         text: getErrorMessage(actionError)
       });
     } finally {
@@ -5379,6 +5654,44 @@ export function AgentCompaniesSettingsPage({
         </div>
       </section>
 
+      <section className="agent-companies-settings__panel">
+        <div className="agent-companies-settings__panel-head">
+          <div>
+            <h2 className="agent-companies-settings__panel-title">Adapter Presets</h2>
+            <p className="agent-companies-settings__panel-copy">
+              Named adapter configurations become import defaults and per-agent overrides. They are stored in plugin state and reused by sync.
+            </p>
+          </div>
+          <div className="agent-companies-settings__badge-row">
+            <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
+              {catalog.adapterPresets.length} preset{catalog.adapterPresets.length === 1 ? "" : "s"}
+            </span>
+          </div>
+        </div>
+        <form className="agent-companies-settings__status-grid" onSubmit={(event) => void handleSaveAdapterPresets(event)}>
+          <label htmlFor="agent-companies-adapter-presets">
+            <span className="agent-companies-settings__metric-label">Preset JSON</span>
+          </label>
+          <textarea
+            className="agent-companies-settings__textarea"
+            disabled={pendingAction !== null}
+            id="agent-companies-adapter-presets"
+            onChange={(event) => setAdapterPresetsInput(event.target.value)}
+            spellCheck={false}
+            value={adapterPresetsInput}
+          />
+          <div className="agent-companies-settings__dialog-form-actions">
+            <button
+              className="agent-companies-settings__button agent-companies-settings__button--primary"
+              disabled={pendingAction !== null}
+              type="submit"
+            >
+              {pendingAction?.kind === "updating-adapter-presets" ? "Saving..." : "Save presets"}
+            </button>
+          </div>
+        </form>
+      </section>
+
       <div className="agent-companies-settings__layout">
         <section className="agent-companies-settings__panel">
           <div className="agent-companies-settings__panel-head">
@@ -5615,12 +5928,15 @@ export function AgentCompaniesSettingsPage({
 
       {importCompany && importDialog ? (
         <ImportCompanyDialog
+          adapterPresets={catalog.adapterPresets}
           company={importCompany}
           dialogState={importDialog}
           errorText={importError}
           importState={importState}
+          onChangeAgentAdapterPreset={handleChangeAgentAdapterPreset}
           onChangeCollisionStrategy={handleChangeImportCollisionStrategy}
           onChangeCompanyName={handleChangeImportCompanyName}
+          onChangeDefaultAdapterPreset={handleChangeDefaultAdapterPreset}
           onClose={() => {
             if (importState) {
               return;
