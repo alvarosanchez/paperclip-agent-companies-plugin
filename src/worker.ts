@@ -262,6 +262,7 @@ interface SyncImportRequest {
   importedCompanyId: string;
   collisionStrategy: CatalogSyncCollisionStrategy;
   preparedImport: CatalogPreparedCompanyImport;
+  existingIssues?: PaperclipIssueRecord[] | null;
 }
 
 interface PaperclipApiConnection {
@@ -3069,9 +3070,12 @@ async function executeDefaultSyncImport(
     input.preparedImport.source,
     "pre_issues"
   );
-  const issueOnlyImportSource = buildStagedPaperclipImportSource(
-    input.preparedImport.source,
-    "issues"
+  const issueOnlyImportSource = filterPortableIssueFilesForExistingPaperclipIssues(
+    buildStagedPaperclipImportSource(
+      input.preparedImport.source,
+      "issues"
+    ),
+    input.existingIssues
   );
   const selectedAgentSlugs = getPortableImportedAgentSlugs(input.preparedImport.source.files);
   let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
@@ -3115,7 +3119,10 @@ async function executeDefaultSyncImport(
   }
 
   let importedPhaseTwoResult: PaperclipCompanyImportResult | null = null;
-  if (hasEnabledPaperclipImportStage(issueOnlyImportInclude)) {
+  if (
+    hasEnabledPaperclipImportStage(issueOnlyImportInclude)
+    && hasPortableIssueImportFiles(issueOnlyImportSource)
+  ) {
     importedPhaseTwoResult = await postPaperclipCompanyImport(connection, {
       source: issueOnlyImportSource,
       include: issueOnlyImportInclude,
@@ -3453,6 +3460,144 @@ function getPortableImportedAgentSlugs(
   }
 
   return slugs;
+}
+
+function normalizePaperclipIssueDedupeTitle(value: unknown): string | null {
+  return typeof value === "string" && value.trim()
+    ? value.replace(/\s+/gu, " ").trim().toLowerCase()
+    : null;
+}
+
+function normalizePortableIssueComparisonText(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.replace(/\r\n?/gu, "\n").trim();
+  return normalized || null;
+}
+
+function getPortableIssueFileKind(filePath: string): "task" | "issue" | null {
+  const segments = normalizeCompanyContentPath(filePath)?.split("/").filter(Boolean) ?? [];
+  const fileName = segments.at(-1);
+  const firstSegment = segments[0];
+
+  if (fileName === "TASK.md" && (firstSegment === "tasks" || firstSegment === "projects")) {
+    return "task";
+  }
+
+  if (fileName === "ISSUE.md" && (firstSegment === "issues" || firstSegment === "projects")) {
+    return "issue";
+  }
+
+  return null;
+}
+
+function getPortableIssueFallbackTitle(filePath: string): string {
+  const segments = filePath.split("/").filter(Boolean);
+  return segments.length >= 2 ? segments[segments.length - 2] ?? filePath : filePath;
+}
+
+function getPortableIssueDefinitionKey(title: string, description: string | null): string {
+  return `${normalizePortableIssueComparisonText(title)}\u0000${normalizePortableIssueComparisonText(description) ?? ""}`;
+}
+
+function getPortableIssueDefinition(
+  filePath: string,
+  entry: PortableCatalogFileEntry
+): { kind: "task" | "issue"; filePath: string; title: string; definitionKey: string } | null {
+  const kind = getPortableIssueFileKind(filePath);
+  if (!kind || typeof entry !== "string") {
+    return null;
+  }
+
+  const frontmatterMatch = entry.match(FRONTMATTER_PATTERN);
+  const frontmatter = frontmatterMatch?.[1] ?? null;
+  const parsedFrontmatter = frontmatter ? parseYamlObject(frontmatter) : null;
+  const title =
+    asNonEmptyString(parsedFrontmatter?.name)
+    ?? asNonEmptyString(parsedFrontmatter?.title)
+    ?? (frontmatter ? getTopLevelScalar(frontmatter, "name") : null)
+    ?? (frontmatter ? getTopLevelScalar(frontmatter, "title") : null)
+    ?? getPortableIssueFallbackTitle(filePath);
+  const description = normalizePortableIssueComparisonText(
+    entry.replace(FRONTMATTER_PATTERN, "")
+  );
+
+  return {
+    kind,
+    filePath,
+    title,
+    definitionKey: getPortableIssueDefinitionKey(title, description)
+  };
+}
+
+function hasPortableIssueImportFiles(source: CatalogPreparedCompanyImport["source"]): boolean {
+  return Object.keys(source.files).some((filePath) => getPortableIssueFileKind(filePath) !== null);
+}
+
+function filterPortableIssueFilesForExistingPaperclipIssues(
+  source: CatalogPreparedCompanyImport["source"],
+  existingIssues: PaperclipIssueRecord[] | null | undefined
+): CatalogPreparedCompanyImport["source"] {
+  if (!existingIssues || existingIssues.length === 0) {
+    return source;
+  }
+
+  const existingIssueTitles = new Set(
+    existingIssues
+      .map((issue) => normalizePaperclipIssueDedupeTitle(issue.title))
+      .filter((title): title is string => title !== null)
+  );
+  if (existingIssueTitles.size === 0) {
+    return source;
+  }
+
+  const recurringTaskDefinitionKeys = new Set(
+    extractPortableRecurringTaskDefinitions(source.files).map((definition) =>
+      getPortableIssueDefinitionKey(definition.title, definition.description)
+    )
+  );
+  const duplicateRoots: string[] = [];
+  let didChange = false;
+
+  for (const [filePath, entry] of Object.entries(source.files)) {
+    const definition = getPortableIssueDefinition(filePath, entry);
+    if (!definition) {
+      continue;
+    }
+
+    if (
+      definition.kind === "task"
+      && recurringTaskDefinitionKeys.has(definition.definitionKey)
+    ) {
+      continue;
+    }
+
+    const normalizedTitle = normalizePaperclipIssueDedupeTitle(definition.title);
+    if (!normalizedTitle || !existingIssueTitles.has(normalizedTitle)) {
+      continue;
+    }
+
+    didChange = true;
+    const root = toPosixPath(dirname(filePath));
+    duplicateRoots.push(root === "." ? filePath : root);
+  }
+
+  if (!didChange) {
+    return source;
+  }
+
+  const nextFiles = Object.fromEntries(
+    Object.entries(source.files).filter(([filePath]) =>
+      !duplicateRoots.some((root) => filePath === root || filePath.startsWith(`${root}/`))
+    )
+  );
+
+  return {
+    ...source,
+    files: nextFiles
+  };
 }
 
 function collectPaperclipMessageLines(
@@ -3938,7 +4083,8 @@ async function runCatalogCompanySync(
         sourceCompanyName: refreshedMatch.company.name,
         importedCompanyId: importedCompany.importedCompanyId,
         collisionStrategy: importedCompany.syncCollisionStrategy,
-        preparedImport
+        preparedImport,
+        existingIssues: issuesBeforeSync
       });
       const syncedAt = options.now();
       const latestState = await loadCatalogState(ctx);
