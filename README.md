@@ -149,7 +149,7 @@ pnpm build
 
 Additional verification commands:
 
-- `pnpm test:e2e` for the hosted Paperclip smoke flow, including the case where imported assigned tasks still wake imported agents even though imported agents keep timer heartbeats disabled
+- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups and recurring routine in-place sync against a disposable Paperclip instance
 - `pnpm verify:manual` for an interactive local verification run
 
 Manual verification highlights:
