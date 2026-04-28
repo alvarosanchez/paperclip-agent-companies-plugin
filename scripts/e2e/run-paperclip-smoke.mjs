@@ -238,6 +238,25 @@ async function fetchJson(url, init = {}) {
   return body;
 }
 
+async function fetchCompanyRoutines(companyId) {
+  const response = await fetchJson(
+    new URL(`/api/companies/${encodeURIComponent(companyId)}/routines`, baseUrl).toString()
+  );
+  if (!Array.isArray(response)) {
+    throw new Error(`Expected Paperclip to return a routine list, received ${JSON.stringify(response)}.`);
+  }
+
+  return response;
+}
+
+async function fetchRoutine(routineId) {
+  return fetchJson(new URL(`/api/routines/${encodeURIComponent(routineId)}`, baseUrl).toString());
+}
+
+function findRoutineByTitle(routines, title) {
+  return routines.find((routine) => routine?.title === title) ?? null;
+}
+
 async function waitForValue(label, load, timeoutMs = defaultTimeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -363,6 +382,9 @@ async function createFixtureRepository() {
   await mkdir(join(repositoryRoot, 'projects', 'first-import', 'tasks', 'scope-catalog'), {
     recursive: true
   });
+  await mkdir(join(repositoryRoot, 'projects', 'first-import', 'tasks', 'monday-review'), {
+    recursive: true
+  });
 
   await writeFile(
     join(repositoryRoot, 'COMPANY.md'),
@@ -386,6 +408,13 @@ agents:
       type: codex_local
       config:
         model: gpt-5.4
+routines:
+  monday-review:
+    status: active
+    triggers:
+      - kind: schedule
+        cronExpression: "0 8 * * 1"
+        timezone: America/Chicago
 `
   );
   await writeFile(
@@ -436,6 +465,18 @@ assignee: ceo
 Define the first catalog scope and its acceptance criteria.
 `
   );
+  await writeFile(
+    join(repositoryRoot, 'projects', 'first-import', 'tasks', 'monday-review', 'TASK.md'),
+    `---
+name: Monday Review
+assignee: ceo
+project: first-import
+recurring: true
+---
+
+Review the original pipeline health check.
+`
+  );
 
   await runCommand('git', ['init'], { cwd: repositoryRoot });
   await runCommand('git', ['config', 'user.name', 'Codex E2E'], { cwd: repositoryRoot });
@@ -458,6 +499,42 @@ version: ${version}
 ---
 
 Fixture company for Paperclip smoke verification.
+`
+  );
+}
+
+async function updateFixtureRecurringTaskForSync(repositoryRoot) {
+  await writeFile(
+    join(repositoryRoot, '.paperclip.yaml'),
+    `schema: paperclip/v1
+agents:
+  ceo:
+    adapter:
+      type: codex_local
+      config:
+        model: gpt-5.4
+routines:
+  monday-review:
+    status: paused
+    triggers:
+      - kind: schedule
+        cronExpression: "0 9 * * 1"
+        timezone: America/Chicago
+      - kind: webhook
+        enabled: false
+        signingMode: hmac_sha256
+`
+  );
+  await writeFile(
+    join(repositoryRoot, 'projects', 'first-import', 'tasks', 'monday-review', 'TASK.md'),
+    `---
+name: Monday Review
+assignee: ceo
+project: first-import
+recurring: true
+---
+
+Review the updated pipeline health check.
 `
   );
 }
@@ -676,9 +753,9 @@ async function main() {
       throw new Error('Expected a second seeded company to exist for the Import into... smoke flow.');
     }
     const selectedContentsSummary =
-      'Selected contents: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Skills: all 1 selected';
+      'Selected contents: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 2 selected • Skills: all 1 selected';
     const syncContractSummary =
-      'Sync contract: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 1 selected • Skills: all 1 selected';
+      'Sync contract: Agents: all 1 selected • Projects: all 1 selected • Tasks: all 2 selected • Skills: all 1 selected';
 
     const importAsNewButton = fixtureCompanyCard.locator('[data-testid="company-import-new-trigger"]');
     await importAsNewButton.waitFor({ timeout: 120000 });
@@ -822,6 +899,33 @@ async function main() {
         `Expected imported agent ${importedAgent.id} to receive a non-timer heartbeat run for imported issue ${assignedImportIssue.id} after import.`
       );
     }
+    const importedRoutines = await waitForValue(
+      `imported routines for ${importTargetCompany.name}`,
+      async () => {
+        const response = await fetchCompanyRoutines(importTargetCompany.id);
+        return findRoutineByTitle(response, 'Monday Review') ? response : null;
+      },
+      120000
+    );
+    const importedRoutine = findRoutineByTitle(importedRoutines, 'Monday Review');
+    if (!importedRoutine?.id) {
+      throw new Error(`Expected imported company "${importTargetCompany.name}" to include the Monday Review routine.`);
+    }
+    const importedRoutineDetail = await fetchRoutine(importedRoutine.id);
+    if (importedRoutineDetail?.description !== 'Review the original pipeline health check.') {
+      throw new Error(
+        `Expected Monday Review routine description from initial import, received ${JSON.stringify(importedRoutineDetail?.description)}.`
+      );
+    }
+    const importedRoutineTriggers = Array.isArray(importedRoutineDetail?.triggers)
+      ? importedRoutineDetail.triggers
+      : [];
+    const importedScheduleTrigger = importedRoutineTriggers.find((trigger) => trigger?.kind === 'schedule');
+    if (importedScheduleTrigger?.cronExpression !== '0 8 * * 1') {
+      throw new Error(
+        `Expected Monday Review initial schedule trigger at 0 8 * * 1, received ${JSON.stringify(importedScheduleTrigger)}.`
+      );
+    }
 
     const openDashboardLink = page.locator('[data-testid="import-success-dashboard-link"]');
     await openDashboardLink.waitFor({ timeout: 120000 });
@@ -865,6 +969,7 @@ async function main() {
     }
 
     await setFixtureRepositoryVersion(fixtureRepository, '1.1.0');
+    await updateFixtureRecurringTaskForSync(fixtureRepository);
     await page.locator('[data-testid="repo-card"]').filter({ hasText: fixtureRepository }).getByRole('button', {
       name: 'Rescan'
     }).click();
@@ -895,6 +1000,54 @@ async function main() {
     if (syncedCompany.name !== importTargetCompany.name) {
       throw new Error(
         `Expected synced existing company to keep the name "${importTargetCompany.name}", received "${syncedCompany.name ?? 'unknown'}".`
+      );
+    }
+    const syncedRoutines = await waitForValue(
+      `synced routines for ${importTargetCompany.name}`,
+      async () => {
+        const response = await fetchCompanyRoutines(importTargetCompany.id);
+        const mondayRoutines = response.filter((routine) => routine?.title === 'Monday Review');
+        return mondayRoutines.some((routine) => routine?.id === importedRoutine.id) ? response : null;
+      },
+      120000
+    );
+    const activeMondayRoutines = syncedRoutines.filter(
+      (routine) => routine?.title === 'Monday Review' && routine?.status !== 'archived'
+    );
+    if (activeMondayRoutines.length !== 1) {
+      throw new Error(
+        `Expected one non-archived Monday Review routine after sync, received ${activeMondayRoutines.length}.`
+      );
+    }
+    if (activeMondayRoutines[0]?.id !== importedRoutine.id) {
+      throw new Error(
+        `Expected sync to update routine ${importedRoutine.id} in place, received active routine ${activeMondayRoutines[0]?.id ?? 'null'}.`
+      );
+    }
+    const syncedRoutineDetail = await fetchRoutine(importedRoutine.id);
+    if (syncedRoutineDetail?.description !== 'Review the updated pipeline health check.') {
+      throw new Error(
+        `Expected Monday Review routine description to update in place, received ${JSON.stringify(syncedRoutineDetail?.description)}.`
+      );
+    }
+    if (syncedRoutineDetail?.status !== 'paused') {
+      throw new Error(
+        `Expected Monday Review routine status to update to paused, received ${JSON.stringify(syncedRoutineDetail?.status)}.`
+      );
+    }
+    const syncedRoutineTriggers = Array.isArray(syncedRoutineDetail?.triggers)
+      ? syncedRoutineDetail.triggers
+      : [];
+    const syncedScheduleTrigger = syncedRoutineTriggers.find((trigger) => trigger?.kind === 'schedule');
+    const syncedWebhookTrigger = syncedRoutineTriggers.find((trigger) => trigger?.kind === 'webhook');
+    if (syncedScheduleTrigger?.cronExpression !== '0 9 * * 1') {
+      throw new Error(
+        `Expected Monday Review schedule trigger to update to 0 9 * * 1, received ${JSON.stringify(syncedScheduleTrigger)}.`
+      );
+    }
+    if (syncedWebhookTrigger?.enabled !== false || syncedWebhookTrigger?.signingMode !== 'hmac_sha256') {
+      throw new Error(
+        `Expected Monday Review webhook trigger to be added, received ${JSON.stringify(syncedWebhookTrigger)}.`
       );
     }
 

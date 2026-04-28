@@ -48,7 +48,13 @@ import {
 import { requiresPaperclipBoardAccess } from "./paperclip-health.js";
 import {
   extractPortableRecurringTaskDefinitions,
+  extractPortableRecurringTaskFileDefinitions,
   findArchivableImportedRoutineIds,
+  findUpdatableImportedRoutinePlans,
+  removePortableRecurringTaskImports,
+  type ImportedRecurringTaskFileDefinition,
+  type ImportedRoutineTriggerDefinition,
+  type ImportedRoutineTriggerSnapshot,
   type ImportedRoutineSnapshot
 } from "./portable-routines.js";
 
@@ -370,6 +376,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function asInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
 function asIsoTimestamp(value: unknown): string | null {
@@ -3072,7 +3086,7 @@ async function executeDefaultSyncImport(
     input.preparedImport.source,
     "pre_issues"
   );
-  const issueOnlyImportSource = filterPortableIssueFilesForExistingPaperclipIssues(
+  let issueOnlyImportSource = filterPortableIssueFilesForExistingPaperclipIssues(
     buildStagedPaperclipImportSource(
       input.preparedImport.source,
       "issues"
@@ -3118,6 +3132,20 @@ async function executeDefaultSyncImport(
         `Imported agent approval check unavailable during sync: ${summarizeErrorMessage(error)}`
       );
     }
+  }
+
+  if (input.collisionStrategy === "replace") {
+    const routineUpdateResult = await updateExistingImportedRoutinesBeforeReplaceImport(
+      ctx,
+      connection,
+      input.importedCompanyId,
+      input.preparedImport.source.files
+    );
+    additionalWarnings.push(...routineUpdateResult.warnings);
+    issueOnlyImportSource = removePortableRecurringTaskImports(
+      issueOnlyImportSource,
+      routineUpdateResult.updatedTasks
+    );
   }
 
   let importedPhaseTwoResult: PaperclipCompanyImportResult | null = null;
@@ -3304,6 +3332,38 @@ function normalizePaperclipAgentList(value: unknown): PaperclipAgentRecord[] | n
     .filter((agent): agent is PaperclipAgentRecord => agent !== null);
 }
 
+function normalizePaperclipRoutineTrigger(value: unknown): ImportedRoutineTriggerSnapshot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asNonEmptyString(value.id);
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    kind: asNonEmptyString(value.kind),
+    label: asNonEmptyString(value.label),
+    enabled: asBoolean(value.enabled),
+    cronExpression: asNonEmptyString(value.cronExpression),
+    timezone: asNonEmptyString(value.timezone),
+    signingMode: asNonEmptyString(value.signingMode),
+    replayWindowSec: asInteger(value.replayWindowSec)
+  };
+}
+
+function normalizePaperclipRoutineTriggerList(value: unknown): ImportedRoutineTriggerSnapshot[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value
+    .map((trigger) => normalizePaperclipRoutineTrigger(trigger))
+    .filter((trigger): trigger is ImportedRoutineTriggerSnapshot => trigger !== null);
+}
+
 function normalizePaperclipRoutine(value: unknown): PaperclipRoutineRecord | null {
   if (!isRecord(value)) {
     return null;
@@ -3320,7 +3380,8 @@ function normalizePaperclipRoutine(value: unknown): PaperclipRoutineRecord | nul
     description: asNonEmptyString(value.description),
     status: asNonEmptyString(value.status),
     createdAt: asIsoTimestamp(value.createdAt),
-    updatedAt: asIsoTimestamp(value.updatedAt)
+    updatedAt: asIsoTimestamp(value.updatedAt),
+    triggers: normalizePaperclipRoutineTriggerList(value.triggers)
   };
 }
 
@@ -3350,6 +3411,205 @@ async function fetchPaperclipCompanyRoutines(
   return routines;
 }
 
+async function fetchPaperclipRoutine(
+  connection: PaperclipApiConnection,
+  routineId: string
+): Promise<PaperclipRoutineRecord> {
+  const payload = await fetchPaperclipApiJson(
+    connection,
+    `/api/routines/${encodeURIComponent(routineId)}`
+  );
+  const routine = normalizePaperclipRoutine(payload);
+  if (!routine) {
+    throw new Error("Paperclip returned an unexpected routine response.");
+  }
+
+  return routine;
+}
+
+async function updatePaperclipRoutine(
+  connection: PaperclipApiConnection,
+  routineId: string,
+  patch: {
+    title: string;
+    description: string | null;
+    status?: string;
+  }
+): Promise<void> {
+  await fetchPaperclipApiJson(connection, `/api/routines/${encodeURIComponent(routineId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch)
+  });
+}
+
+function buildRoutineTriggerCreateBody(
+  trigger: ImportedRoutineTriggerDefinition
+): Record<string, unknown> {
+  return {
+    kind: trigger.kind,
+    ...buildRoutineTriggerUpdateBody(trigger)
+  };
+}
+
+function buildRoutineTriggerUpdateBody(
+  trigger: ImportedRoutineTriggerDefinition
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    label: trigger.label,
+    enabled: trigger.enabled
+  };
+
+  if (trigger.kind === "schedule") {
+    body.cronExpression = trigger.cronExpression;
+    body.timezone = trigger.timezone;
+  }
+
+  if (trigger.kind === "webhook") {
+    body.signingMode = trigger.signingMode;
+    body.replayWindowSec = trigger.replayWindowSec;
+  }
+
+  return body;
+}
+
+function normalizeRoutineTriggerComparable(
+  trigger: ImportedRoutineTriggerDefinition | ImportedRoutineTriggerSnapshot
+): Record<string, unknown> | null {
+  if (trigger.kind === "schedule") {
+    if (!trigger.cronExpression) {
+      return null;
+    }
+
+    return {
+      kind: "schedule",
+      label: trigger.label,
+      enabled: trigger.enabled ?? true,
+      cronExpression: trigger.cronExpression,
+      timezone: trigger.timezone ?? "UTC"
+    };
+  }
+
+  if (trigger.kind === "webhook") {
+    return {
+      kind: "webhook",
+      label: trigger.label,
+      enabled: trigger.enabled ?? true,
+      signingMode: trigger.signingMode ?? "bearer",
+      replayWindowSec: trigger.replayWindowSec ?? 300
+    };
+  }
+
+  if (trigger.kind === "api") {
+    return {
+      kind: "api",
+      label: trigger.label,
+      enabled: trigger.enabled ?? true
+    };
+  }
+
+  return null;
+}
+
+function routineTriggersMatch(
+  source: ImportedRoutineTriggerDefinition,
+  existing: ImportedRoutineTriggerSnapshot
+): boolean {
+  return JSON.stringify(normalizeRoutineTriggerComparable(source))
+    === JSON.stringify(normalizeRoutineTriggerComparable(existing));
+}
+
+async function createPaperclipRoutineTrigger(
+  connection: PaperclipApiConnection,
+  routineId: string,
+  trigger: ImportedRoutineTriggerDefinition
+): Promise<void> {
+  await fetchPaperclipApiJson(
+    connection,
+    `/api/routines/${encodeURIComponent(routineId)}/triggers`,
+    {
+      method: "POST",
+      body: JSON.stringify(buildRoutineTriggerCreateBody(trigger))
+    }
+  );
+}
+
+async function updatePaperclipRoutineTrigger(
+  connection: PaperclipApiConnection,
+  triggerId: string,
+  trigger: ImportedRoutineTriggerDefinition
+): Promise<void> {
+  await fetchPaperclipApiJson(connection, `/api/routine-triggers/${encodeURIComponent(triggerId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(buildRoutineTriggerUpdateBody(trigger))
+  });
+}
+
+async function deletePaperclipRoutineTrigger(
+  connection: PaperclipApiConnection,
+  triggerId: string
+): Promise<void> {
+  await fetchPaperclipApiJson(connection, `/api/routine-triggers/${encodeURIComponent(triggerId)}`, {
+    method: "DELETE"
+  });
+}
+
+async function reconcilePaperclipRoutineTriggers(
+  connection: PaperclipApiConnection,
+  routineId: string,
+  sourceTriggers: ImportedRoutineTriggerDefinition[]
+): Promise<void> {
+  const routine = await fetchPaperclipRoutine(connection, routineId);
+  const existingTriggers = routine.triggers;
+  if (!existingTriggers) {
+    throw new Error("Paperclip did not return routine triggers for update.");
+  }
+
+  if (
+    existingTriggers.length === sourceTriggers.length
+    && sourceTriggers.every((trigger, index) => {
+      const existingTrigger = existingTriggers[index];
+      return existingTrigger ? routineTriggersMatch(trigger, existingTrigger) : false;
+    })
+  ) {
+    return;
+  }
+
+  const canPatchInPlace = sourceTriggers.every((trigger, index) => {
+    const existingTrigger = existingTriggers[index];
+    return existingTrigger === undefined || existingTrigger.kind === trigger.kind;
+  });
+
+  if (canPatchInPlace) {
+    for (const [index, trigger] of sourceTriggers.entries()) {
+      const existingTrigger = existingTriggers[index];
+      if (!existingTrigger) {
+        await createPaperclipRoutineTrigger(connection, routineId, trigger);
+        continue;
+      }
+
+      if (routineTriggersMatch(trigger, existingTrigger)) {
+        continue;
+      }
+
+      await updatePaperclipRoutineTrigger(connection, existingTrigger.id, trigger);
+    }
+
+    for (const trigger of existingTriggers.slice(sourceTriggers.length)) {
+      await deletePaperclipRoutineTrigger(connection, trigger.id);
+    }
+
+    return;
+  }
+
+  for (const trigger of existingTriggers) {
+    await deletePaperclipRoutineTrigger(connection, trigger.id);
+  }
+
+  for (const trigger of sourceTriggers) {
+    await createPaperclipRoutineTrigger(connection, routineId, trigger);
+  }
+}
+
 async function archivePaperclipRoutine(
   connection: PaperclipApiConnection,
   routineId: string
@@ -3360,6 +3620,77 @@ async function archivePaperclipRoutine(
       status: "archived"
     })
   });
+}
+
+async function updateExistingImportedRoutinesBeforeReplaceImport(
+  ctx: PluginContext,
+  connection: PaperclipApiConnection,
+  companyId: string,
+  files: Record<string, PortableCatalogFileEntry>
+): Promise<{
+  updatedTasks: ImportedRecurringTaskFileDefinition[];
+  warnings: string[];
+}> {
+  const recurringTasks = extractPortableRecurringTaskFileDefinitions(files);
+  if (recurringTasks.length === 0) {
+    return {
+      updatedTasks: [],
+      warnings: []
+    };
+  }
+
+  let routines: PaperclipRoutineRecord[];
+  try {
+    routines = await fetchPaperclipCompanyRoutines(connection, companyId);
+  } catch (error) {
+    return {
+      updatedTasks: [],
+      warnings: [
+        `Imported routines could not be checked for in-place updates: ${summarizeErrorMessage(error)}`
+      ]
+    };
+  }
+
+  const plans = findUpdatableImportedRoutinePlans(recurringTasks, routines);
+  if (plans.length === 0) {
+    return {
+      updatedTasks: [],
+      warnings: []
+    };
+  }
+
+  const updatedTasks: ImportedRecurringTaskFileDefinition[] = [];
+  const warnings: string[] = [];
+
+  for (const plan of plans) {
+    try {
+      await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
+
+      if (plan.task.routineTriggers !== null) {
+        await reconcilePaperclipRoutineTriggers(
+          connection,
+          plan.routine.id,
+          plan.task.routineTriggers
+        );
+      }
+
+      updatedTasks.push(plan.task);
+      ctx.logger.info("Updated imported Paperclip routine in place before replace-mode sync", {
+        companyId,
+        routineId: plan.routine.id,
+        routineTitle: plan.task.title
+      });
+    } catch (error) {
+      warnings.push(
+        `Imported routine "${plan.task.title}" could not be updated in place: ${summarizeErrorMessage(error)}`
+      );
+    }
+  }
+
+  return {
+    updatedTasks,
+    warnings
+  };
 }
 
 async function archiveImportedRoutineDuplicatesAfterReplaceImport(
