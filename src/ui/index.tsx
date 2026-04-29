@@ -4585,11 +4585,13 @@ export function AgentCompaniesSettingsPage({
       );
       const preIssueImportSource = buildStagedPaperclipImportSource(
         preparedImport.source,
-        "pre_issues"
+        "pre_issues",
+        { includeCompanyMetadata: preIssueImportInclude.company }
       );
       const issueOnlyImportSource = buildStagedPaperclipImportSource(
         preparedImport.source,
-        "issues"
+        "issues",
+        { includeCompanyMetadata: issueOnlyImportInclude.company }
       );
       let issuesBeforeImport: PaperclipIssueSnapshot[] | null =
         importDialog.targetMode === "new_company" ? [] : null;

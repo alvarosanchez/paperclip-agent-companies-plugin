@@ -3091,12 +3091,14 @@ async function executeDefaultSyncImport(
   );
   const preIssueImportSource = buildStagedPaperclipImportSource(
     input.preparedImport.source,
-    "pre_issues"
+    "pre_issues",
+    { includeCompanyMetadata: preIssueImportInclude.company }
   );
   let issueOnlyImportSource = filterPortableIssueFilesForExistingPaperclipIssues(
     buildStagedPaperclipImportSource(
       input.preparedImport.source,
-      "issues"
+      "issues",
+      { includeCompanyMetadata: issueOnlyImportInclude.company }
     ),
     input.existingIssues
   );

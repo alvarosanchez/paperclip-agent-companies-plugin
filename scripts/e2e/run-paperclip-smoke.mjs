@@ -18,6 +18,8 @@ const settingsIndexPath = '/instance/settings/plugins';
 const settingsPageHeading = 'Repository Sources';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
+const defaultPaperclipPackageVersion = '2026.428.0';
+const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const defaultTimeoutMs = 30000;
 const env = {
   ...process.env,
@@ -137,7 +139,7 @@ function contrastRatio(foreground, background) {
 }
 
 function getPaperclipCommandArgs(args) {
-  return ['-p', 'node@20', '-p', 'paperclipai', 'paperclipai', ...args];
+  return ['-p', 'node@20', '-p', `paperclipai@${paperclipPackageVersion}`, 'paperclipai', ...args];
 }
 
 function runCommand(command, args, options = {}) {
@@ -631,6 +633,7 @@ async function main() {
   });
 
   log(`Working directory ${stateRoot}`);
+  log(`Paperclip package paperclipai@${paperclipPackageVersion}`);
 
   serverPort = await findAvailablePort(requestedPort);
   embeddedDbPort = await findAvailablePort(requestedDbPort);
@@ -666,7 +669,18 @@ async function main() {
 
   await runCommand(
     'npx',
-    getPaperclipCommandArgs(['plugin', 'install', '--local', pluginRoot, '--data-dir', dataDir, '--config', configPath])
+    getPaperclipCommandArgs([
+      'plugin',
+      'install',
+      '--local',
+      pluginRoot,
+      '--data-dir',
+      dataDir,
+      '--config',
+      configPath,
+      '--api-base',
+      baseUrl
+    ])
   );
   log('Installed local paperclip-agent-companies-plugin plugin.');
 

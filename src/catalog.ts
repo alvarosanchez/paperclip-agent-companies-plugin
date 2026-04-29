@@ -273,7 +273,8 @@ function findPortablePaperclipExtensionPath(
 
 export function buildStagedPaperclipImportSource(
   source: CatalogPreparedCompanyImport["source"],
-  stage: PaperclipImportStage
+  stage: PaperclipImportStage,
+  options: { includeCompanyMetadata?: boolean } = {}
 ): CatalogPreparedCompanyImport["source"] {
   const extensionPath = findPortablePaperclipExtensionPath(source.files);
   if (!extensionPath) {
@@ -300,6 +301,11 @@ export function buildStagedPaperclipImportSource(
     ...parsedExtension
   };
   let didChange = false;
+
+  if (options.includeCompanyMetadata === false && Object.prototype.hasOwnProperty.call(nextExtension, "company")) {
+    delete nextExtension.company;
+    didChange = true;
+  }
 
   if (stage === "pre_issues" && Object.prototype.hasOwnProperty.call(nextExtension, "routines")) {
     delete nextExtension.routines;
