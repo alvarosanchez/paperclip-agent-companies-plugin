@@ -110,6 +110,8 @@ During import, the plugin packages the selected company contents as an inline Pa
 - On Paperclip `2026.427.0` and newer, post-import wake detection reads the imported company's current issues through Paperclip's plugin issue API and requests actionable assignment wakeups through `ctx.issues.requestWakeup` / `ctx.issues.requestWakeups`; backlog imports keep the legacy agent-wake fallback for compatibility.
 - Hosted imports that include assigned tasks stage agent creation before task import so newly imported assignees can be approved in time for Paperclip to preserve the task assignment and wake the agent.
 - Recurring tasks are imported through Paperclip's company portability flow as routines rather than one-time starter issues, while keeping any `.paperclip.yaml` routine sidecar metadata in the portable package.
+- On Paperclip `2026.428.0` and newer, newly created/imported companies do not require new-agent approval unless that company explicitly enables the policy. The plugin still stages agent import before task import and auto-approves matching `pending_approval` agents for older hosts or opt-in approval policies.
+- Paperclip `2026.428.0` added per-company attachment limits. The plugin preserves `.paperclip.yaml` `company.attachmentMaxBytes` metadata during new-company imports; tracked existing-company syncs deliberately leave host-owned company settings such as name, approval policy, and attachment cap under Paperclip/operator control.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
 
@@ -149,13 +151,16 @@ pnpm build
 
 Additional verification commands:
 
-- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups and recurring routine in-place sync against a disposable Paperclip instance
-- `pnpm verify:manual` for an interactive local verification run
+- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups and recurring routine in-place sync against a disposable Paperclip `paperclipai@2026.428.0` instance
+- `pnpm verify:manual` for an interactive local verification run against the same disposable Paperclip release target
+
+Set `PAPERCLIP_E2E_PAPERCLIP_VERSION=<version>` to test a different `paperclipai` npm release in either disposable harness.
 
 Manual verification highlights:
 
 - In **Imported Companies**, confirm the auto-sync cadence input defaults to `24` hours and updates the next-run messaging when you save a different value.
 - Toggle **Auto-sync** off and back on for a tracked import to verify the per-company setting still applies immediately.
+- On Paperclip `2026.428.0`, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
 
 ## Release Versioning
 

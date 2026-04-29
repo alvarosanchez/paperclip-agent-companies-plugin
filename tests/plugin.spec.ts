@@ -57,6 +57,7 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
+const TARGET_PAPERCLIP_RELEASE = "2026.428.0";
 
 function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
   const timestamp = new Date("2026-04-14T09:23:00.000Z");
@@ -449,6 +450,21 @@ describe("agent companies plugin", () => {
     ]);
   });
 
+  it("pins the SDK and disposable Paperclip harnesses to the target release", async () => {
+    const packageJson = JSON.parse(
+      await readFile(join(process.cwd(), "package.json"), "utf8")
+    ) as { devDependencies?: Record<string, string> };
+    expect(packageJson.devDependencies?.["@paperclipai/plugin-sdk"]).toBe(TARGET_PAPERCLIP_RELEASE);
+
+    for (const scriptName of ["run-paperclip-smoke.mjs", "manual-paperclip-verify.mjs"]) {
+      const script = await readFile(join(process.cwd(), "scripts", "e2e", scriptName), "utf8");
+      expect(script).toContain(`const defaultPaperclipPackageVersion = '${TARGET_PAPERCLIP_RELEASE}';`);
+      expect(script).toContain("`paperclipai@${paperclipPackageVersion}`");
+      expect(script).toContain("'--api-base'");
+      expect(script).toContain("baseUrl");
+    }
+  });
+
   it("detects authenticated Paperclip deployments as requiring board access", () => {
     expect(
       requiresPaperclipBoardAccess({
@@ -781,7 +797,7 @@ describe("agent companies plugin", () => {
     expect(detail?.item.markdown).toContain("Review pipeline health.");
   });
 
-  it("stages Paperclip extension metadata so routines only ship during the issue pass", () => {
+  it("stages Paperclip extension metadata by import phase and company update intent", () => {
     const source: CatalogPreparedCompanyImport["source"] = {
       type: "inline",
       files: {
@@ -791,6 +807,9 @@ schema: ${AGENT_COMPANIES_SCHEMA}
 ---
 `,
         ".paperclip.yaml": `schema: paperclip/v1
+company:
+  attachmentMaxBytes: 20971520
+  requireBoardApprovalForNewAgents: true
 agents:
   ceo:
     icon: crown
@@ -801,11 +820,22 @@ routines:
       }
     };
 
-    const preIssueSource = buildStagedPaperclipImportSource(source, "pre_issues");
-    const issueSource = buildStagedPaperclipImportSource(source, "issues");
+    const newCompanyPreIssueSource = buildStagedPaperclipImportSource(source, "pre_issues", {
+      includeCompanyMetadata: true
+    });
+    const existingCompanyPreIssueSource = buildStagedPaperclipImportSource(source, "pre_issues", {
+      includeCompanyMetadata: false
+    });
+    const issueSource = buildStagedPaperclipImportSource(source, "issues", {
+      includeCompanyMetadata: false
+    });
 
     expect(parseYaml(source.files[".paperclip.yaml"] as string)).toEqual({
       schema: "paperclip/v1",
+      company: {
+        attachmentMaxBytes: 20971520,
+        requireBoardApprovalForNewAgents: true
+      },
       agents: {
         ceo: {
           icon: "crown"
@@ -817,7 +847,19 @@ routines:
         }
       }
     });
-    expect(parseYaml(preIssueSource.files[".paperclip.yaml"] as string)).toEqual({
+    expect(parseYaml(newCompanyPreIssueSource.files[".paperclip.yaml"] as string)).toEqual({
+      schema: "paperclip/v1",
+      company: {
+        attachmentMaxBytes: 20971520,
+        requireBoardApprovalForNewAgents: true
+      },
+      agents: {
+        ceo: {
+          icon: "crown"
+        }
+      }
+    });
+    expect(parseYaml(existingCompanyPreIssueSource.files[".paperclip.yaml"] as string)).toEqual({
       schema: "paperclip/v1",
       agents: {
         ceo: {
