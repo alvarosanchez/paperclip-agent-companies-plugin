@@ -96,48 +96,9 @@ During import, the plugin packages the selected company contents as an inline Pa
 
 Adapter presets are named Paperclip adapter configurations stored in plugin state. Each preset contains an adapter type and optional adapter config. During import or re-import, operators can keep package defaults, apply one default preset to all selected agents, or override individual agents.
 
-Example:
+The hosted settings page renders a preset builder instead of requiring operators to hand-write a JSON array. It reads the running Paperclip host's adapter registry from `/api/adapters`, then loads each selected adapter's config schema from `/api/adapters/:type/config-schema` when available. The builder follows Paperclip's native adapter form shape, including standard adapter display labels, adapter-specific command keys, model and thinking-effort dropdowns, environment rows, and a test-environment action when the page is opened inside a company. Preset IDs are derived from display names and kept out of the form.
 
-```json
-[
-  {
-    "id": "codex-local",
-    "name": "Codex / local",
-    "adapterType": "codex_local",
-    "adapterConfig": {}
-  },
-  {
-    "id": "hermes-default",
-    "name": "Hermes / Default",
-    "adapterType": "hermes_local",
-    "adapterConfig": {
-      "env": {
-        "HERMES_HOME": "/home/workspace/Hermes"
-      },
-      "extraArgs": [
-        "--profile",
-        "Default"
-      ],
-      "hermesCommand": "/home/workspace/Hermes-install/venv/bin/hermes"
-    }
-  },
-  {
-    "id": "hermes-ops",
-    "name": "Hermes / Ops",
-    "adapterType": "hermes_local",
-    "adapterConfig": {
-      "env": {
-        "HERMES_HOME": "/home/workspace/Hermes"
-      },
-      "extraArgs": [
-        "--profile",
-        "ops"
-      ],
-      "hermesCommand": "/home/workspace/Hermes-install/venv/bin/hermes"
-    }
-  }
-]
-```
+If an adapter does not expose a config schema, or if an operator needs to set a config key that is not represented by the schema, the preset editor includes a collapsible advanced JSON section for those adapter-specific values.
 
 The selected preset mapping is saved with the tracked import, so later re-imports and syncs keep using the same adapter overrides.
 

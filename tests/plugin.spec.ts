@@ -46,6 +46,7 @@ import {
   extractPortableRecurringTaskDefinitions,
   findArchivableImportedRoutineIds
 } from "../src/portable-routines.js";
+import { buildAdapterPresetPayload, type AdapterPresetDraft } from "../src/ui/index.js";
 import { getImportedCompanyVersionInfo } from "../src/ui/version-status.js";
 
 const tempDirectories: string[] = [];
@@ -2675,6 +2676,91 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       }
     );
     expect(preparedImport.companyId).toBe(company?.id);
+  });
+
+  it("builds adapter presets from schema fields and advanced config fallback", () => {
+    const drafts: AdapterPresetDraft[] = [
+      {
+        localId: "draft-1",
+        id: "",
+        name: "Hermes Example",
+        adapterType: "hermes_local",
+        command: "/opt/hermes/bin/hermes",
+        model: "openai/gpt-5.5",
+        thinkingEffort: "high",
+        bypassSandbox: true,
+        enableSearch: true,
+        fastMode: true,
+        extraArgsText: "--profile example",
+        envBindings: {
+          HERMES_HOME: { type: "plain", value: "/var/lib/hermes" },
+          PAPERCLIP_PROFILE: { type: "plain", value: "example" }
+        },
+        timeoutSec: "0",
+        graceSec: "15",
+        schemaValues: {
+          workingDirectory: "",
+          enableApprovalRequests: true
+        },
+        advancedJson: JSON.stringify({
+          command: "/legacy/hermes",
+          hermesCommand: "/legacy/hermes-native",
+          model: "legacy-model",
+          env: { LEGACY: "1" },
+          profile: "legacy-profile",
+          extraArgs: ["--profile", "example"],
+          workingDirectory: "/should/be/removed"
+        })
+      },
+      {
+        localId: "draft-2",
+        id: "codex-local",
+        name: "Codex Local",
+        adapterType: "codex_local",
+        command: "",
+        model: "",
+        thinkingEffort: "",
+        bypassSandbox: false,
+        enableSearch: false,
+        fastMode: false,
+        extraArgsText: "",
+        envBindings: {},
+        timeoutSec: "",
+        graceSec: "",
+        schemaValues: {},
+        advancedJson: "{}"
+      }
+    ];
+
+    expect(buildAdapterPresetPayload(drafts)).toEqual([
+      {
+        id: "hermes-example",
+        name: "Hermes Example",
+        adapterType: "hermes_local",
+        adapterConfig: {
+          hermesCommand: "/opt/hermes/bin/hermes",
+          model: "openai/gpt-5.5",
+          effort: "high",
+          extraArgs: ["--profile", "example"],
+          env: {
+            HERMES_HOME: { type: "plain", value: "/var/lib/hermes" },
+            PAPERCLIP_PROFILE: { type: "plain", value: "example" }
+          },
+          timeoutSec: 0,
+          graceSec: 15,
+          enableApprovalRequests: true,
+          profile: "legacy-profile"
+        },
+        updatedAt: null
+      },
+      {
+        id: "codex-local",
+        name: "Codex Local",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        updatedAt: null
+      }
+    ]);
   });
 
   it("updates an existing tracked import contract when the same company is re-imported", async () => {
