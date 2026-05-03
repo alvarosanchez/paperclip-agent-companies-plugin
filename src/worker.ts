@@ -301,6 +301,7 @@ interface PaperclipAgentRecord {
   status: string | null;
   role: string | null;
   title: string | null;
+  adapterConfig: Record<string, unknown> | null;
 }
 
 interface PaperclipApprovalRecord {
@@ -1839,6 +1840,184 @@ function buildAdapterOverridesFromPresetSelection(
   return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
+function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function getPaperclipAgentEnvBySlug(
+  agents: PaperclipAgentRecord[],
+  selectedAgentSlugs: Set<string>
+): Map<string, Record<string, unknown>> {
+  const envBySlug = new Map<string, Record<string, unknown>>();
+
+  for (const agent of agents) {
+    const slug = normalizePaperclipSlug(agent.urlKey ?? agent.name);
+    const env = isRecord(agent.adapterConfig?.env) ? agent.adapterConfig.env : null;
+    if (!slug || !selectedAgentSlugs.has(slug) || !env || Object.keys(env).length === 0) {
+      continue;
+    }
+
+    envBySlug.set(slug, { ...env });
+  }
+
+  return envBySlug;
+}
+
+function hasPortableAgentAdapterMissingEnv(
+  source: CatalogPreparedCompanyImport["source"]
+): boolean {
+  const extensionPath = findPortablePaperclipExtensionPath(source.files);
+  if (!extensionPath) {
+    return false;
+  }
+
+  const extensionEntry = source.files[extensionPath];
+  if (typeof extensionEntry !== "string") {
+    return false;
+  }
+
+  const extension = parseYamlObject(extensionEntry);
+  const agents = extension && isRecord(extension.agents) ? extension.agents : null;
+  if (!agents) {
+    return false;
+  }
+
+  for (const rawAgent of Object.values(agents)) {
+    if (!isRecord(rawAgent) || !isRecord(rawAgent.adapter)) {
+      continue;
+    }
+
+    if (!hasOwnRecordKey(rawAgent.adapter, "config")) {
+      return true;
+    }
+
+    const adapterConfig = rawAgent.adapter.config;
+    if (isRecord(adapterConfig) && !hasOwnRecordKey(adapterConfig, "env")) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasAdapterOverrideMissingEnv(adapterOverrides: PaperclipAdapterOverrides | undefined): boolean {
+  if (!adapterOverrides) {
+    return false;
+  }
+
+  return Object.values(adapterOverrides).some((override) =>
+    !override.adapterConfig || !hasOwnRecordKey(override.adapterConfig, "env")
+  );
+}
+
+function preservePortableAgentAdapterEnv(
+  source: CatalogPreparedCompanyImport["source"],
+  envBySlug: Map<string, Record<string, unknown>>
+): CatalogPreparedCompanyImport["source"] {
+  if (envBySlug.size === 0) {
+    return source;
+  }
+
+  const extensionPath = findPortablePaperclipExtensionPath(source.files);
+  if (!extensionPath) {
+    return source;
+  }
+
+  const extensionEntry = source.files[extensionPath];
+  if (typeof extensionEntry !== "string") {
+    return source;
+  }
+
+  const extension = parseYamlObject(extensionEntry);
+  const agents = extension && isRecord(extension.agents) ? extension.agents : null;
+  if (!extension || !agents) {
+    return source;
+  }
+
+  const nextAgents = { ...agents };
+  let didChange = false;
+
+  for (const [rawSlug, rawAgent] of Object.entries(agents)) {
+    const slug = normalizePaperclipSlug(rawSlug);
+    const existingEnv = slug ? envBySlug.get(slug) : null;
+    if (!existingEnv || !isRecord(rawAgent) || !isRecord(rawAgent.adapter)) {
+      continue;
+    }
+
+    const adapter = { ...rawAgent.adapter };
+    if (hasOwnRecordKey(adapter, "config") && !isRecord(adapter.config)) {
+      continue;
+    }
+
+    const adapterConfig = isRecord(adapter.config) ? { ...adapter.config } : {};
+    if (hasOwnRecordKey(adapterConfig, "env")) {
+      continue;
+    }
+
+    adapterConfig.env = existingEnv;
+    adapter.config = adapterConfig;
+    nextAgents[rawSlug] = {
+      ...rawAgent,
+      adapter
+    };
+    didChange = true;
+  }
+
+  if (!didChange) {
+    return source;
+  }
+
+  const nextExtension = {
+    ...extension,
+    agents: nextAgents
+  };
+
+  return {
+    ...source,
+    files: {
+      ...source.files,
+      [extensionPath]: `${stringifyYaml(nextExtension).trimEnd()}\n`
+    }
+  };
+}
+
+function preserveAdapterOverrideEnv(
+  adapterOverrides: PaperclipAdapterOverrides | undefined,
+  envBySlug: Map<string, Record<string, unknown>>
+): PaperclipAdapterOverrides | undefined {
+  if (!adapterOverrides || envBySlug.size === 0) {
+    return adapterOverrides;
+  }
+
+  let didChange = false;
+  const nextOverrides: PaperclipAdapterOverrides = {};
+
+  for (const [agentSlug, override] of Object.entries(adapterOverrides)) {
+    const existingEnv = envBySlug.get(agentSlug);
+    if (!existingEnv) {
+      nextOverrides[agentSlug] = override;
+      continue;
+    }
+
+    const adapterConfig = override.adapterConfig ? { ...override.adapterConfig } : {};
+    if (hasOwnRecordKey(adapterConfig, "env")) {
+      nextOverrides[agentSlug] = override;
+      continue;
+    }
+
+    nextOverrides[agentSlug] = {
+      ...override,
+      adapterConfig: {
+        ...adapterConfig,
+        env: existingEnv
+      }
+    };
+    didChange = true;
+  }
+
+  return didChange ? nextOverrides : adapterOverrides;
+}
+
 function getCompanyContentItemPaperclipSlug(item: CompanyContentItem): string | null {
   return normalizePaperclipSlug(item.slug)
     ?? normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2));
@@ -3166,7 +3345,7 @@ async function executeDefaultSyncImport(
     input.preparedImport.selection,
     true
   );
-  const preIssueImportSource = buildStagedPaperclipImportSource(
+  let preIssueImportSource = buildStagedPaperclipImportSource(
     input.preparedImport.source,
     "pre_issues",
     { includeCompanyMetadata: preIssueImportInclude.company }
@@ -3181,11 +3360,34 @@ async function executeDefaultSyncImport(
   );
   const selectedAgentSlugs = getPortableImportedAgentSlugs(input.preparedImport.source.files);
   const catalogState = await loadCatalogState(ctx);
-  const adapterOverrides = buildAdapterOverridesFromPresetSelection(
+  let adapterOverrides = buildAdapterOverridesFromPresetSelection(
     catalogState.adapterPresets,
     selectedAgentSlugs,
     input.adapterPresetSelection
   );
+  const shouldPreserveAgentEnv =
+    preIssueImportInclude.agents
+    && selectedAgentSlugs.size > 0
+    && (
+      hasPortableAgentAdapterMissingEnv(preIssueImportSource)
+      || hasAdapterOverrideMissingEnv(adapterOverrides)
+    );
+
+  if (shouldPreserveAgentEnv) {
+    let existingAgents: PaperclipAgentRecord[];
+    try {
+      existingAgents = await fetchPaperclipCompanyAgents(connection, input.importedCompanyId);
+    } catch (error) {
+      throw new Error(
+        `Could not read existing Paperclip agent environment bindings before sync: ${summarizeErrorMessage(error)}`
+      );
+    }
+
+    const envBySlug = getPaperclipAgentEnvBySlug(existingAgents, selectedAgentSlugs);
+    preIssueImportSource = preservePortableAgentAdapterEnv(preIssueImportSource, envBySlug);
+    adapterOverrides = preserveAdapterOverrideEnv(adapterOverrides, envBySlug);
+  }
+
   let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
   if (hasEnabledPaperclipImportStage(preIssueImportInclude)) {
     importedPhaseOneResult = await postPaperclipCompanyImport(connection, {
@@ -3394,6 +3596,29 @@ function normalizePaperclipIssueList(value: unknown): PaperclipIssueRecord[] | n
     .filter((issue): issue is PaperclipIssueRecord => issue !== null);
 }
 
+function normalizePaperclipAgentAdapterConfig(value: Record<string, unknown>): Record<string, unknown> | null {
+  if (isRecord(value.adapterConfig)) {
+    return { ...value.adapterConfig };
+  }
+
+  const adapter = isRecord(value.adapter) ? value.adapter : null;
+  if (isRecord(adapter?.config)) {
+    return { ...adapter.config };
+  }
+
+  const runtimeConfig = isRecord(value.runtimeConfig) ? value.runtimeConfig : null;
+  if (isRecord(runtimeConfig?.adapterConfig)) {
+    return { ...runtimeConfig.adapterConfig };
+  }
+
+  const runtimeAdapter = isRecord(runtimeConfig?.adapter) ? runtimeConfig.adapter : null;
+  if (isRecord(runtimeAdapter?.config)) {
+    return { ...runtimeAdapter.config };
+  }
+
+  return null;
+}
+
 function normalizePaperclipAgent(value: unknown): PaperclipAgentRecord | null {
   if (!isRecord(value)) {
     return null;
@@ -3411,7 +3636,8 @@ function normalizePaperclipAgent(value: unknown): PaperclipAgentRecord | null {
     urlKey: asNonEmptyString(value.urlKey),
     status: asNonEmptyString(value.status),
     role: asNonEmptyString(value.role),
-    title: asNonEmptyString(value.title)
+    title: asNonEmptyString(value.title),
+    adapterConfig: normalizePaperclipAgentAdapterConfig(value)
   };
 }
 
