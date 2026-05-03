@@ -357,6 +357,37 @@ Design the next iteration of the platform.
   );
 }
 
+async function addCustomSlugAgentAdapterFixture(
+  repositoryRoot: string,
+  adapterConfigYaml = "        model: gpt-5.4\n"
+): Promise<void> {
+  await writeFile(
+    join(repositoryRoot, "alpha", ".paperclip.yaml"),
+    `schema: paperclip/v1
+agents:
+  alpha-chief:
+    adapter:
+      type: codex_local
+      config:
+${adapterConfigYaml}`
+  );
+
+  await writeFile(
+    join(repositoryRoot, "alpha", "agents", "ceo", "AGENTS.md"),
+    `---
+name: Alpha CEO
+slug: alpha-chief
+title: Chief Executive Officer
+metadata:
+  paperclip:
+    agentIcon: crown
+---
+
+Lead Alpha Labs and coordinate the delivery pipeline.
+`
+  );
+}
+
 async function addRecurringTaskFixture(repositoryRoot: string): Promise<void> {
   await mkdir(join(repositoryRoot, "alpha", "tasks", "monday-review"), { recursive: true });
   await writeFile(
@@ -1767,7 +1798,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
 
   it("preserves existing agent env when sync adapter updates omit env", async () => {
     const repositoryPath = await createRepositoryFixture();
-    await addPaperclipAgentIconFixture(repositoryPath);
+    await addCustomSlugAgentAdapterFixture(repositoryPath);
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
@@ -1809,7 +1840,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
             {
               id: "agent-123",
               name: "Alpha CEO",
-              urlKey: "ceo",
+              urlKey: "alpha-chief",
               status: "active",
               role: "ceo",
               title: "Chief Executive Officer",
@@ -1905,7 +1936,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         adapterPresetSelection: {
           defaultPresetId: null,
           agentPresetIds: {
-            ceo: "codex-ceo"
+            "alpha-chief": "codex-ceo"
           }
         }
       });
@@ -1929,12 +1960,207 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         agents?: Record<string, { adapter?: { config?: Record<string, unknown> } }>;
       };
 
-      expect(extension.agents?.ceo?.adapter?.config?.env).toEqual(existingEnv);
+      expect(extension.agents?.["alpha-chief"]?.adapter?.config?.env).toEqual(existingEnv);
       expect(
         (importRequest?.body as {
           adapterOverrides?: Record<string, { adapterConfig?: Record<string, unknown> }>;
-        } | null | undefined)?.adapterOverrides?.ceo?.adapterConfig?.env
+        } | null | undefined)?.adapterOverrides?.["alpha-chief"]?.adapterConfig?.env
       ).toEqual(existingEnv);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("keeps explicit sync env replacements instead of merging existing agent env", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addCustomSlugAgentAdapterFixture(
+      repositoryPath,
+      `        model: gpt-5.4
+        env:
+          PACKAGE_ONLY: from-package
+`
+    );
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const existingEnv = {
+      EXISTING_SECRET: {
+        type: "secret_ref",
+        secretId: "secret-existing",
+        version: "latest"
+      },
+      PLAIN_VALUE: "keep-me"
+    };
+    const presetEnv = {
+      PRESET_ONLY: "from-preset"
+    };
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-board-token";
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "agent-123",
+              name: "Alpha CEO",
+              urlKey: "alpha-chief",
+              status: "active",
+              role: "ceo",
+              title: "Chief Executive Officer",
+              adapterType: "codex_local",
+              adapterConfig: {
+                model: "gpt-5.4",
+                env: existingEnv
+              }
+            }
+          ]),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            agents: [{ action: "updated" }],
+            projects: [],
+            issues: [],
+            skills: [],
+            warnings: []
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.set-adapter-presets", {
+        adapterPresets: [
+          {
+            id: "codex-ceo",
+            name: "Codex / CEO",
+            adapterType: "codex_local",
+            adapterConfig: {
+              model: "gpt-5.4",
+              env: presetEnv
+            }
+          }
+        ]
+      });
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        },
+        adapterPresetSelection: {
+          defaultPresetId: null,
+          agentPresetIds: {
+            "alpha-chief": "codex-ceo"
+          }
+        }
+      });
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      const importRequest = fetchRequests.find(
+        (request) => request.url === "http://127.0.0.1:3210/api/companies/import"
+      );
+      const importBody = importRequest?.body as {
+        source?: {
+          files?: Record<string, unknown>;
+        };
+        adapterOverrides?: Record<string, { adapterConfig?: Record<string, unknown> }>;
+      } | null | undefined;
+      const extensionYaml = importBody?.source?.files?.[".paperclip.yaml"];
+      const extension = parseYaml(typeof extensionYaml === "string" ? extensionYaml : "") as {
+        agents?: Record<string, { adapter?: { config?: Record<string, unknown> } }>;
+      };
+
+      expect(extension.agents?.["alpha-chief"]?.adapter?.config?.env).toEqual({
+        PACKAGE_ONLY: "from-package"
+      });
+      expect(importBody?.adapterOverrides?.["alpha-chief"]?.adapterConfig?.env).toEqual(presetEnv);
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {
