@@ -124,6 +124,7 @@ The selected preset mapping is saved with the tracked import, so later re-import
 - Recurring tasks are imported through Paperclip's company portability flow as routines rather than one-time starter issues, while keeping any `.paperclip.yaml` routine sidecar metadata in the portable package.
 - On Paperclip `2026.428.0` and newer, newly created/imported companies do not require new-agent approval unless that company explicitly enables the policy. The plugin still stages agent import before task import and auto-approves matching `pending_approval` agents for older hosts or opt-in approval policies.
 - Paperclip `2026.428.0` added per-company attachment limits. The plugin preserves `.paperclip.yaml` `company.attachmentMaxBytes` metadata during new-company imports; tracked existing-company syncs deliberately leave host-owned company settings such as name, approval policy, and attachment cap under Paperclip/operator control.
+- When a synced package or adapter preset updates an agent adapter but omits `adapterConfig.env`, the worker preserves the target agent's existing environment bindings. A package or preset must include an explicit `env` value to replace those bindings.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
 
