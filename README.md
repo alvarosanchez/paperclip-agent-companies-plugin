@@ -17,6 +17,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 - Agent-company `TASK.md` files and Paperclip `ISSUE.md` manifests are grouped together under **Tasks** in the hosted UI
 - Required project and agent dependencies are auto-included whenever selected tasks depend on them
 - Saved sync contracts per tracked imported company, plus a re-import flow for updating the selection later
+- Saved adapter presets that can be applied as import defaults or per-agent overrides
 - Manual sync plus background auto-sync for tracked imported companies
 - Recurring `TASK.md` support: `recurring: true` tasks import as Paperclip routines, with `.paperclip.yaml` routine metadata preserved
 - Company-scoped Board access connection for authenticated Paperclip deployments
@@ -58,10 +59,11 @@ paperclipai plugin install --local .
 4. Review discovered companies and open **View contents** to inspect agents, projects, tasks, recurring tasks/routines, Paperclip issue manifests, and skills.
 5. Click **Import as new company** to create a fresh Paperclip company, or open **Import into...** to pick one of the other non-synced Paperclip companies already in the instance.
 6. Leave the default full selection in place or toggle down to just the parts and items you want. If a selected task depends on a project or agent, the plugin auto-includes those required dependencies.
-7. Importing into an existing non-synced company adopts that company for future syncs, including the company whose settings page you are currently viewing.
-8. Use **Re-import / Edit selection** from the tracked company card whenever you want to deliberately change the saved sync contract.
-9. If your Paperclip deployment requires authentication, open this plugin inside the imported company once and complete **Board access connection** in settings.
-10. Use the separate **Imported Companies** section for **Sync now**, per-company **Auto-sync** toggles, and the shared cadence control.
+7. Optionally configure **Adapter Presets** in settings, then select a default preset and per-agent overrides during import.
+8. Importing into an existing non-synced company adopts that company for future syncs, including the company whose settings page you are currently viewing.
+9. Use **Re-import / Edit selection** from the tracked company card whenever you want to deliberately change the saved sync contract.
+10. If your Paperclip deployment requires authentication, open this plugin inside the imported company once and complete **Board access connection** in settings.
+11. Use the separate **Imported Companies** section for **Sync now**, per-company **Auto-sync** toggles, and the shared cadence control.
 
 ## Package Expectations
 
@@ -89,6 +91,16 @@ During import, the plugin packages the selected company contents as an inline Pa
 - Maximum 250 files per imported company
 - Maximum 1 MiB per file
 - Maximum 8 MiB total encoded payload
+
+## Adapter Presets
+
+Adapter presets are named Paperclip adapter configurations stored in plugin state. Each preset contains an adapter type and optional adapter config. During import or re-import, operators can keep package defaults, apply one default preset to all selected agents, or override individual agents.
+
+The hosted settings page renders a preset builder instead of requiring operators to hand-write a JSON array. It reads the running Paperclip host's adapter registry from `/api/adapters`, then loads each selected adapter's config schema from `/api/adapters/:type/config-schema` when available. The builder follows Paperclip's native adapter form shape, including standard adapter display labels, adapter-specific command keys, model and thinking-effort dropdowns, environment rows, and a test-environment action when the page is opened inside a company. Preset IDs are derived from display names and kept out of the form.
+
+If an adapter does not expose a config schema, or if an operator needs to set a config key that is not represented by the schema, the preset editor includes a collapsible advanced JSON section for those adapter-specific values.
+
+The selected preset mapping is saved with the tracked import, so later re-imports and syncs keep using the same adapter overrides.
 
 ## Sync Behavior
 

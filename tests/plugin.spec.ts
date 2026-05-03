@@ -46,6 +46,7 @@ import {
   extractPortableRecurringTaskDefinitions,
   findArchivableImportedRoutineIds
 } from "../src/portable-routines.js";
+import { buildAdapterPresetPayload, type AdapterPresetDraft } from "../src/ui/index.js";
 import { getImportedCompanyVersionInfo } from "../src/ui/version-status.js";
 
 const tempDirectories: string[] = [];
@@ -1480,6 +1481,17 @@ routines:
 
   it("prefers active duplicate hire approvals during authenticated sync imports", async () => {
     const repositoryPath = await createRepositoryFixture();
+    await writeFile(
+      join(repositoryPath, "alpha", "agents", "ceo", "AGENTS.md"),
+      `---
+name: Alpha CEO
+slug: alpha-chief
+title: Chief Executive Officer
+---
+
+Lead Alpha Labs and coordinate the delivery pipeline.
+`
+    );
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
@@ -1513,7 +1525,7 @@ routines:
             {
               id: "agent-123",
               name: "Alpha CEO",
-              urlKey: "ceo",
+              urlKey: "alpha-chief",
               status: "pending_approval",
               role: "ceo",
               title: "Chief Executive Officer"
@@ -1628,7 +1640,25 @@ routines:
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
       expect(company?.id).toBeTruthy();
+      expect(company?.contents.agents.find((agent) => agent.path === "agents/ceo/AGENTS.md")?.slug)
+        .toBe("alpha-chief");
 
+      await harness.performAction("catalog.set-adapter-presets", {
+        adapterPresets: [
+          {
+            id: "hermes-paco-studio",
+            name: "Hermes / paco-studio",
+            adapterType: "hermes_local",
+            adapterConfig: {
+              hermesCommand: "/home/workspace/Hermes-install/venv/bin/hermes",
+              extraArgs: ["--profile", "paco-studio"],
+              env: {
+                HERMES_HOME: "/home/workspace/Hermes"
+              }
+            }
+          }
+        ]
+      });
       await harness.performAction("catalog.record-company-import", {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
@@ -1640,6 +1670,12 @@ routines:
           tasks: { mode: "none" },
           issues: { mode: "none" },
           skills: { mode: "none" }
+        },
+        adapterPresetSelection: {
+          defaultPresetId: null,
+          agentPresetIds: {
+            "alpha-chief": "hermes-paco-studio"
+          }
         }
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
@@ -1680,7 +1716,19 @@ routines:
               mode: "existing_company",
               companyId: "paperclip-company-123"
             },
-            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
+            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
+            adapterOverrides: {
+              "alpha-chief": {
+                adapterType: "hermes_local",
+                adapterConfig: {
+                  hermesCommand: "/home/workspace/Hermes-install/venv/bin/hermes",
+                  extraArgs: ["--profile", "paco-studio"],
+                  env: {
+                    HERMES_HOME: "/home/workspace/Hermes"
+                  }
+                }
+              }
+            }
           })
         }),
         {
@@ -2500,6 +2548,18 @@ routines:
 
     expect(company?.importedCompanies).toEqual([]);
 
+    await harness.performAction("catalog.set-adapter-presets", {
+      adapterPresets: [
+        {
+          id: "codex-ceo",
+          name: "Codex / CEO",
+          adapterType: "codex_local",
+          adapterConfig: {
+            model: "gpt-5.4"
+          }
+        }
+      ]
+    });
     await harness.performAction("catalog.record-company-import", {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
@@ -2511,6 +2571,12 @@ routines:
         tasks: { mode: "none" },
         issues: { mode: "none" },
         skills: { mode: "none" }
+      },
+      adapterPresetSelection: {
+        defaultPresetId: null,
+        agentPresetIds: {
+          ceo: "codex-ceo"
+        }
       },
       syncCollisionStrategy: "skip"
     });
@@ -2548,6 +2614,7 @@ routines:
         issuePrefix: candidate.importedCompany.issuePrefix,
         importedSourceVersion: candidate.importedCompany.importedSourceVersion,
         selection: candidate.importedCompany.selection,
+        adapterPresetSelection: candidate.importedCompany.adapterPresetSelection,
         syncCollisionStrategy: candidate.importedCompany.syncCollisionStrategy
       }))
     ).toEqual([
@@ -2563,6 +2630,12 @@ routines:
           issues: { mode: "none" },
           skills: { mode: "none" }
         },
+        adapterPresetSelection: {
+          defaultPresetId: null,
+          agentPresetIds: {
+            ceo: "codex-ceo"
+          }
+        },
         syncCollisionStrategy: "skip"
       },
       {
@@ -2577,7 +2650,22 @@ routines:
           issues: { mode: "all" },
           skills: { mode: "all" }
         },
+        adapterPresetSelection: {
+          defaultPresetId: null,
+          agentPresetIds: {}
+        },
         syncCollisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
+      }
+    ]);
+    expect(afterImportRecord.adapterPresets).toEqual([
+      {
+        id: "codex-ceo",
+        name: "Codex / CEO",
+        adapterType: "codex_local",
+        adapterConfig: {
+          model: "gpt-5.4"
+        },
+        updatedAt: null
       }
     ]);
 
@@ -2588,6 +2676,91 @@ routines:
       }
     );
     expect(preparedImport.companyId).toBe(company?.id);
+  });
+
+  it("builds adapter presets from schema fields and advanced config fallback", () => {
+    const drafts: AdapterPresetDraft[] = [
+      {
+        localId: "draft-1",
+        id: "",
+        name: "Hermes Example",
+        adapterType: "hermes_local",
+        command: "/opt/hermes/bin/hermes",
+        model: "openai/gpt-5.5",
+        thinkingEffort: "high",
+        bypassSandbox: true,
+        enableSearch: true,
+        fastMode: true,
+        extraArgsText: "--profile example",
+        envBindings: {
+          HERMES_HOME: { type: "plain", value: "/var/lib/hermes" },
+          PAPERCLIP_PROFILE: { type: "plain", value: "example" }
+        },
+        timeoutSec: "0",
+        graceSec: "15",
+        schemaValues: {
+          workingDirectory: "",
+          enableApprovalRequests: true
+        },
+        advancedJson: JSON.stringify({
+          command: "/legacy/hermes",
+          hermesCommand: "/legacy/hermes-native",
+          model: "legacy-model",
+          env: { LEGACY: "1" },
+          profile: "legacy-profile",
+          extraArgs: ["--profile", "example"],
+          workingDirectory: "/should/be/removed"
+        })
+      },
+      {
+        localId: "draft-2",
+        id: "codex-local",
+        name: "Codex Local",
+        adapterType: "codex_local",
+        command: "",
+        model: "",
+        thinkingEffort: "",
+        bypassSandbox: false,
+        enableSearch: false,
+        fastMode: false,
+        extraArgsText: "",
+        envBindings: {},
+        timeoutSec: "",
+        graceSec: "",
+        schemaValues: {},
+        advancedJson: "{}"
+      }
+    ];
+
+    expect(buildAdapterPresetPayload(drafts)).toEqual([
+      {
+        id: "hermes-example",
+        name: "Hermes Example",
+        adapterType: "hermes_local",
+        adapterConfig: {
+          hermesCommand: "/opt/hermes/bin/hermes",
+          model: "openai/gpt-5.5",
+          effort: "high",
+          extraArgs: ["--profile", "example"],
+          env: {
+            HERMES_HOME: { type: "plain", value: "/var/lib/hermes" },
+            PAPERCLIP_PROFILE: { type: "plain", value: "example" }
+          },
+          timeoutSec: 0,
+          graceSec: 15,
+          enableApprovalRequests: true,
+          profile: "legacy-profile"
+        },
+        updatedAt: null
+      },
+      {
+        id: "codex-local",
+        name: "Codex Local",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        updatedAt: null
+      }
+    ]);
   });
 
   it("updates an existing tracked import contract when the same company is re-imported", async () => {

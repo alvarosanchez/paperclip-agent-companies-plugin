@@ -55,6 +55,7 @@ import {
   type PluginSettingsPageProps
 } from "@paperclipai/plugin-sdk/ui";
 import {
+  type AdapterPreset,
   type CatalogCompanyContentDetail,
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
@@ -63,6 +64,7 @@ import {
   type CompanyContentSectionDefinition,
   type CompanyImportPartSelection,
   type CompanyImportSelection,
+  type ImportAdapterPresetSelection,
   type CompanyContentItem,
   type CompanyContents,
   type CatalogCompanySummary,
@@ -95,6 +97,7 @@ import { getImportedCompanyVersionInfo } from "./version-status.js";
 
 const EMPTY_CATALOG: CatalogSnapshot = {
   autoSyncCadenceHours: DEFAULT_AUTO_SYNC_CADENCE_HOURS,
+  adapterPresets: [],
   repositories: [],
   companies: [],
   importedCompanies: [],
@@ -121,6 +124,8 @@ const PAGE_STYLES = `
   --ac-text-muted: var(--muted-foreground, oklch(0.708 0 0));
   --ac-info: var(--chart-2, oklch(0.696 0.17 162.48));
   --ac-info-soft: color-mix(in oklab, var(--ac-info) 16%, transparent);
+  --ac-success: var(--chart-2, oklch(0.696 0.17 162.48));
+  --ac-warning: var(--chart-4, oklch(0.769 0.188 70.08));
   --ac-danger: var(--destructive, oklch(0.637 0.237 25.331));
   --ac-danger-soft: color-mix(in oklab, var(--ac-danger) 16%, transparent);
   --ac-primary: var(--primary, oklch(0.985 0 0));
@@ -389,7 +394,13 @@ const PAGE_STYLES = `
 }
 
 .agent-companies-settings__button:focus-visible,
-.agent-companies-settings__input:focus-visible {
+.agent-companies-settings__input:focus-visible,
+.agent-companies-settings__select:focus-visible,
+.agent-companies-settings__textarea:focus-visible,
+.agent-companies-settings__native-input:focus-visible,
+.agent-companies-settings__native-select:focus-visible,
+.agent-companies-settings__native-toggle:focus-visible,
+.agent-companies-settings__env-remove:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ring, var(--ac-primary)) 72%, transparent);
   outline-offset: 2px;
 }
@@ -508,8 +519,447 @@ const PAGE_STYLES = `
   font-size: 13px;
 }
 
+.agent-companies-settings__select {
+  width: 100%;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  min-height: 36px;
+  padding: 0 34px 0 12px;
+  background: var(--ac-bg);
+  color: var(--ac-text);
+  font-size: 13px;
+}
+
 .agent-companies-settings__input::placeholder {
   color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__textarea {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--ac-bg);
+  color: var(--ac-text);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, SF Mono, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.agent-companies-settings__textarea--compact {
+  min-height: 84px;
+}
+
+.agent-companies-settings__adapter-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-companies-settings__preset-list {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-companies-settings__preset-card {
+  display: grid;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  background: var(--ac-surface);
+}
+
+.agent-companies-settings__preset-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.agent-companies-settings__preset-title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.agent-companies-settings__field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.agent-companies-settings__field-grid--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.agent-companies-settings__field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.agent-companies-settings__native-section-title {
+  margin: 8px 0 -4px;
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.agent-companies-settings__native-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 -4px;
+}
+
+.agent-companies-settings__native-section-head .agent-companies-settings__native-section-title {
+  margin: 0;
+}
+
+.agent-companies-settings__native-adapter-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--ac-border);
+  border-radius: 0;
+  background: var(--ac-bg);
+}
+
+.agent-companies-settings__native-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 16px;
+  font-size: 12px;
+  line-height: 1.25;
+  font-weight: 500;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__native-help {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: color-mix(in oklab, var(--ac-text-muted) 62%, transparent);
+  cursor: help;
+}
+
+.agent-companies-settings__native-help svg {
+  width: 12px;
+  height: 12px;
+}
+
+.agent-companies-settings__native-help:hover,
+.agent-companies-settings__native-help:focus-visible {
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__native-help-text {
+  position: absolute;
+  z-index: 30;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: max-content;
+  max-width: 280px;
+  transform: translateX(-50%) translateY(2px);
+  padding: 7px 9px;
+  border: 1px solid var(--ac-border-strong);
+  border-radius: 8px;
+  background: var(--ac-bg);
+  box-shadow: 0 12px 28px color-mix(in oklab, var(--ac-bg) 42%, transparent);
+  color: var(--ac-text);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.agent-companies-settings__native-help-text::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--ac-border-strong);
+  border-bottom: 1px solid var(--ac-border-strong);
+  background: var(--ac-bg);
+  transform: translate(-50%, -4px) rotate(45deg);
+}
+
+.agent-companies-settings__native-help:hover .agent-companies-settings__native-help-text,
+.agent-companies-settings__native-help:focus-visible .agent-companies-settings__native-help-text {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.agent-companies-settings__native-input,
+.agent-companies-settings__native-select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ac-text);
+  font-size: 13px;
+}
+
+.agent-companies-settings__native-input {
+  padding: 0 12px;
+}
+
+.agent-companies-settings__native-select {
+  padding: 0 34px 0 12px;
+}
+
+.agent-companies-settings__native-mono {
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+}
+
+.agent-companies-settings__native-input::placeholder {
+  color: color-mix(in oklab, var(--ac-text-muted) 62%, transparent);
+}
+
+.agent-companies-settings__model-field {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-companies-settings__model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-companies-settings__model-chip {
+  appearance: none;
+  min-height: 26px;
+  border: 1px solid var(--ac-border);
+  border-radius: 999px;
+  padding: 0 9px;
+  background: transparent;
+  color: var(--ac-text-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.agent-companies-settings__model-chip:hover:not(:disabled) {
+  color: var(--ac-text);
+  background: var(--ac-surface-soft);
+}
+
+.agent-companies-settings__model-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.agent-companies-settings__native-toggle-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 24px;
+}
+
+.agent-companies-settings__native-toggle {
+  appearance: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ac-surface-soft);
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.agent-companies-settings__native-toggle[aria-checked="true"] {
+  background: oklch(0.627 0.194 149.214);
+}
+
+.agent-companies-settings__native-toggle span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: white;
+  transition: transform 140ms ease;
+}
+
+.agent-companies-settings__native-toggle[aria-checked="true"] span {
+  transform: translateX(16px);
+}
+
+.agent-companies-settings__native-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.agent-companies-settings__env-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-companies-settings__env-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) 108px minmax(160px, 1.5fr) auto 20px;
+  gap: 6px;
+  align-items: center;
+}
+
+.agent-companies-settings__env-seal,
+.agent-companies-settings__env-remove {
+  appearance: none;
+  min-height: 36px;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ac-text-muted);
+  font-size: 12px;
+}
+
+.agent-companies-settings__env-seal {
+  padding: 0 10px;
+}
+
+.agent-companies-settings__env-remove {
+  border: 0;
+  min-width: 20px;
+  padding: 0;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.agent-companies-settings__env-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.agent-companies-settings__env-remove-spacer {
+  display: block;
+  width: 20px;
+  min-height: 36px;
+}
+
+.agent-companies-settings__checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  font-size: 13px;
+}
+
+.agent-companies-settings__checkbox-row input {
+  width: 16px;
+  height: 16px;
+}
+
+.agent-companies-settings__adapter-test-result {
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  background: var(--ac-surface-soft);
+  color: var(--ac-text);
+}
+
+.agent-companies-settings__adapter-test-result[data-status="pass"] {
+  border-color: color-mix(in oklab, var(--ac-success) 42%, var(--ac-border));
+  background: color-mix(in oklab, var(--ac-success) 10%, transparent);
+}
+
+.agent-companies-settings__adapter-test-result[data-status="warn"] {
+  border-color: color-mix(in oklab, var(--ac-warning) 42%, var(--ac-border));
+  background: color-mix(in oklab, var(--ac-warning) 10%, transparent);
+}
+
+.agent-companies-settings__adapter-test-result[data-status="fail"] {
+  border-color: color-mix(in oklab, var(--ac-danger) 42%, var(--ac-border));
+  background: color-mix(in oklab, var(--ac-danger) 10%, transparent);
+}
+
+.agent-companies-settings__adapter-test-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-weight: 700;
+}
+
+.agent-companies-settings__adapter-test-checks {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.agent-companies-settings__adapter-test-check {
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.agent-companies-settings__adapter-test-level {
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__field-help {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__field-help[data-tone="error"] {
+  color: var(--ac-danger);
+}
+
+.agent-companies-settings__advanced-config {
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  background: var(--ac-bg);
+}
+
+.agent-companies-settings__advanced-config summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ac-text-muted);
+}
+
+.agent-companies-settings__adapter-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--ac-border);
+  border-radius: 8px;
+  background: var(--ac-surface-soft);
 }
 
 .agent-companies-settings__repo-list,
@@ -1314,6 +1764,15 @@ const PAGE_STYLES = `
     grid-template-columns: 1fr;
   }
 
+  .agent-companies-settings__field-grid,
+  .agent-companies-settings__preset-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-companies-settings__env-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .agent-companies-settings__repo-actions {
     width: 100%;
     justify-content: flex-start;
@@ -1383,10 +1842,164 @@ interface PendingActionState {
     | "scanning-repository"
     | "removing"
     | "toggling-auto-sync"
+    | "updating-adapter-presets"
     | "updating-cadence";
   repositoryId?: string;
   sourceCompanyId?: string;
   importedCompanyId?: string;
+}
+
+interface HostAdapterInfo {
+  type: string;
+  label: string;
+  disabled: boolean;
+}
+
+interface HostAdapterModel {
+  id: string;
+  label: string;
+}
+
+interface HostAdapterDetectedModel {
+  model: string | null;
+  candidates: string[];
+}
+
+interface CompanySecret {
+  id: string;
+  name: string;
+}
+
+type AdapterEnvBinding =
+  | string
+  | { type: "plain"; value: string }
+  | { type: "secret_ref"; secretId: string; version?: string };
+
+type AdapterEnvRow = {
+  key: string;
+  source: "plain" | "secret";
+  plainValue: string;
+  secretId: string;
+};
+
+interface AdapterEnvironmentTestResult {
+  status: "pass" | "warn" | "fail";
+  testedAt: string;
+  checks: Array<{
+    code: string;
+    level: "info" | "warn" | "error";
+    message: string;
+    detail?: string;
+    hint?: string;
+  }>;
+}
+
+interface AdapterConfigFieldSchema {
+  type?: string | string[];
+  controlType?: string;
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  options?: Array<{ label?: string; value?: unknown; group?: string } | string>;
+  meta?: Record<string, unknown>;
+}
+
+interface AdapterConfigSchema {
+  type?: string;
+  properties?: Record<string, AdapterConfigFieldSchema>;
+  required?: string[];
+}
+
+const STANDARD_ADAPTER_LABELS: Record<string, string> = {
+  claude_local: "Claude Code (local)",
+  codex_local: "Codex (local)",
+  gemini_local: "Gemini CLI (local)",
+  hermes_local: "Hermes Agent (local)",
+  opencode_local: "OpenCode (local)",
+  pi_local: "Pi (local)",
+  cursor: "Cursor",
+  openclaw_gateway: "OpenClaw Gateway (gateway)",
+  process: "Process",
+  http: "HTTP"
+};
+
+const STANDARD_ADAPTER_ORDER = [
+  "claude_local",
+  "codex_local",
+  "gemini_local",
+  "hermes_local",
+  "opencode_local",
+  "pi_local",
+  "cursor",
+  "openclaw_gateway",
+  "process",
+  "http"
+];
+
+const STANDARD_ENABLED_ADAPTER_TYPES = [
+  "claude_local",
+  "codex_local",
+  "gemini_local",
+  "hermes_local",
+  "opencode_local",
+  "pi_local",
+  "cursor"
+];
+
+const STANDARD_ADAPTER_COMMAND_PLACEHOLDERS: Record<string, string> = {
+  claude_local: "claude",
+  codex_local: "codex",
+  gemini_local: "gemini",
+  hermes_local: "hermes",
+  opencode_local: "opencode",
+  pi_local: "pi",
+  cursor: "agent"
+};
+
+const ADAPTER_FIELD_HINTS: Record<string, string> = {
+  adapterType: "How this preset runs imported agents.",
+  command: "Override the path to the CLI command the adapter should call.",
+  hermesCommand: "Path to the Hermes CLI binary. Use an absolute path when Paperclip's service PATH may not include hermes.",
+  model: "Override the default model used by the adapter. Type a manual model ID when the adapter does not expose a catalog.",
+  thinkingEffort: "Control model reasoning depth. Supported values vary by adapter/model.",
+  effort: "Control model reasoning depth. Supported values vary by adapter/model.",
+  modelReasoningEffort: "Control Codex reasoning depth.",
+  mode: "Cursor execution mode.",
+  variant: "OpenCode reasoning variant.",
+  extraArgs: "Additional command-line arguments passed to local adapters.",
+  env: "Environment variables injected into the adapter process. Use plain values or secret references.",
+  timeoutSec: "Maximum seconds a run can take before being terminated. Empty means adapter default.",
+  graceSec: "Seconds to wait after interrupt before force-killing the process.",
+  cwd: "Deprecated legacy working directory fallback for local adapters. Prefer project workspaces.",
+  workingDirectory: "Deprecated legacy working directory fallback for local adapters. Prefer project workspaces.",
+  provider: "Optional provider override. Leave empty or auto when the adapter can infer the provider from its own configuration.",
+  toolsets: "Comma-separated toolsets to enable for Hermes.",
+  persistSession: "Resume adapter sessions across heartbeats when supported.",
+  worktreeMode: "Use a git worktree for isolated changes when supported.",
+  checkpoints: "Enable filesystem checkpoints when supported.",
+  enableSearch: "Enable web search capability during runs when supported by the adapter.",
+  fastMode: "Enable Codex Fast mode when supported by the selected model.",
+  bypassSandbox: "Run without sandbox restrictions when supported by the adapter."
+};
+
+export interface AdapterPresetDraft {
+  localId: string;
+  id: string;
+  name: string;
+  adapterType: string;
+  command: string;
+  model: string;
+  thinkingEffort: string;
+  bypassSandbox: boolean;
+  enableSearch: boolean;
+  fastMode: boolean;
+  extraArgsText: string;
+  envBindings: Record<string, AdapterEnvBinding>;
+  timeoutSec: string;
+  graceSec: string;
+  schemaValues: Record<string, unknown>;
+  advancedJson: string;
 }
 
 interface ImportState {
@@ -1409,6 +2022,7 @@ interface ImportDialogState {
   targetCompanyName: string;
   companyName: string;
   selection: CompanyImportSelection;
+  adapterPresetSelection: ImportAdapterPresetSelection;
   collisionStrategy: CatalogSyncCollisionStrategy;
 }
 
@@ -1767,6 +2381,11 @@ function normalizePaperclipSlug(value: unknown): string | null {
   return normalized || null;
 }
 
+function getCompanyContentItemPaperclipSlug(item: CompanyContentItem): string | null {
+  return normalizePaperclipSlug(item.slug)
+    ?? normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2));
+}
+
 function getSelectedCompanyContentSlugs(
   items: CompanyContentItem[],
   selection: CompanyImportPartSelection
@@ -1775,7 +2394,7 @@ function getSelectedCompanyContentSlugs(
 
   if (selection.mode === "all") {
     for (const item of items) {
-      const slug = normalizePaperclipSlug(item.path.split("/").filter(Boolean).at(-2));
+      const slug = getCompanyContentItemPaperclipSlug(item);
       if (slug) {
         selectedSlugs.add(slug);
       }
@@ -1786,7 +2405,10 @@ function getSelectedCompanyContentSlugs(
 
   if (selection.mode === "selected") {
     for (const itemPath of selection.itemPaths ?? []) {
-      const slug = normalizePaperclipSlug(itemPath.split("/").filter(Boolean).at(-2));
+      const item = items.find((candidate) => candidate.path === itemPath);
+      const slug = item
+        ? getCompanyContentItemPaperclipSlug(item)
+        : normalizePaperclipSlug(itemPath.split("/").filter(Boolean).at(-2));
       if (slug) {
         selectedSlugs.add(slug);
       }
@@ -1794,6 +2416,38 @@ function getSelectedCompanyContentSlugs(
   }
 
   return selectedSlugs;
+}
+
+function buildAdapterOverridesFromPresets(
+  adapterPresets: AdapterPreset[],
+  selectedAgentSlugs: Set<string>,
+  selection: ImportAdapterPresetSelection
+): Record<string, { adapterType: string; adapterConfig?: Record<string, unknown> }> | undefined {
+  const presetsById = new Map(adapterPresets.map((preset) => [preset.id, preset]));
+  const overrides: Record<string, { adapterType: string; adapterConfig?: Record<string, unknown> }> = {};
+
+  for (const agentSlug of selectedAgentSlugs) {
+    const presetId = Object.prototype.hasOwnProperty.call(selection.agentPresetIds, agentSlug)
+      ? selection.agentPresetIds[agentSlug]
+      : selection.defaultPresetId;
+    if (!presetId) {
+      continue;
+    }
+
+    const preset = presetsById.get(presetId);
+    if (!preset) {
+      continue;
+    }
+
+    overrides[agentSlug] = {
+      adapterType: preset.adapterType,
+      ...(Object.keys(preset.adapterConfig).length > 0
+        ? { adapterConfig: preset.adapterConfig }
+        : {})
+    };
+  }
+
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
 function normalizePaperclipAgentSnapshots(value: unknown): Array<{
@@ -2173,6 +2827,773 @@ async function fetchPaperclipHealth(): Promise<PaperclipHealthResponse | null> {
   }
 }
 
+function normalizeHostAdapters(value: unknown): HostAdapterInfo[] {
+  const adapters = new Map<string, HostAdapterInfo>();
+
+  for (const type of STANDARD_ENABLED_ADAPTER_TYPES) {
+    adapters.set(type, {
+      type,
+      label: STANDARD_ADAPTER_LABELS[type] ?? type,
+      disabled: false
+    });
+  }
+
+  if (!Array.isArray(value)) {
+    return sortHostAdapters([...adapters.values()]);
+  }
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const type = typeof candidate.type === "string" ? candidate.type.trim() : "";
+    if (!type) {
+      continue;
+    }
+
+    const isStandardComingSoon = STANDARD_ADAPTER_ORDER.includes(type) && !STANDARD_ENABLED_ADAPTER_TYPES.includes(type);
+    adapters.set(type, {
+      type,
+      label:
+        STANDARD_ADAPTER_LABELS[type] ??
+        (typeof candidate.label === "string" && candidate.label.trim()
+          ? candidate.label.trim()
+          : type),
+      disabled: candidate.disabled === true || isStandardComingSoon
+    });
+  }
+
+  return sortHostAdapters([...adapters.values()]);
+}
+
+function sortHostAdapters(adapters: HostAdapterInfo[]): HostAdapterInfo[] {
+  return adapters.sort((left, right) => {
+    const leftIndex = STANDARD_ADAPTER_ORDER.indexOf(left.type);
+    const rightIndex = STANDARD_ADAPTER_ORDER.indexOf(right.type);
+
+    if (leftIndex >= 0 || rightIndex >= 0) {
+      return (leftIndex >= 0 ? leftIndex : Number.MAX_SAFE_INTEGER) -
+        (rightIndex >= 0 ? rightIndex : Number.MAX_SAFE_INTEGER);
+    }
+
+    return left.label.localeCompare(right.label, undefined, { sensitivity: "base" }) ||
+      left.type.localeCompare(right.type, undefined, { sensitivity: "base" });
+  });
+}
+
+function normalizeAdapterConfigSchema(value: unknown): AdapterConfigSchema | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const properties: Record<string, AdapterConfigFieldSchema> = {};
+
+  if (Array.isArray(value.fields)) {
+    for (const rawField of value.fields) {
+      if (!isRecord(rawField)) {
+        continue;
+      }
+
+      const key = typeof rawField.key === "string" ? rawField.key.trim() : "";
+      if (!key) {
+        continue;
+      }
+
+      const options = normalizeSchemaOptions(rawField.options);
+      const controlType = typeof rawField.type === "string" ? rawField.type : undefined;
+      properties[key] = {
+        type: mapConfigFieldTypeToSchemaType(controlType),
+        controlType,
+        title:
+          typeof rawField.label === "string" && rawField.label.trim()
+            ? rawField.label.trim()
+            : undefined,
+        description:
+          typeof rawField.hint === "string" && rawField.hint.trim()
+            ? rawField.hint.trim()
+            : ADAPTER_FIELD_HINTS[key],
+        default: rawField.default,
+        options,
+        meta: isRecord(rawField.meta) ? rawField.meta : undefined
+      };
+    }
+
+    return {
+      type: "object",
+      properties,
+      required: Array.isArray(value.required)
+        ? value.required.filter((entry): entry is string => typeof entry === "string")
+        : []
+    };
+  }
+
+  if (!isRecord(value.properties)) {
+    return null;
+  }
+
+  for (const [key, rawField] of Object.entries(value.properties)) {
+    if (!isRecord(rawField)) {
+      continue;
+    }
+
+    properties[key] = {
+      type:
+        typeof rawField.type === "string" || Array.isArray(rawField.type)
+          ? rawField.type as string | string[]
+          : undefined,
+      title: typeof rawField.title === "string" ? rawField.title : undefined,
+      description:
+        typeof rawField.description === "string" && rawField.description.trim()
+          ? rawField.description
+          : ADAPTER_FIELD_HINTS[key],
+      default: rawField.default,
+      enum: Array.isArray(rawField.enum) ? rawField.enum : undefined,
+      options: normalizeSchemaOptions(rawField.options)
+    };
+  }
+
+  return {
+    type: typeof value.type === "string" ? value.type : undefined,
+    properties,
+    required: Array.isArray(value.required)
+      ? value.required.filter((entry): entry is string => typeof entry === "string")
+      : []
+  };
+}
+
+function normalizeSchemaOptions(value: unknown): AdapterConfigFieldSchema["options"] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const options = value.flatMap((option): NonNullable<AdapterConfigFieldSchema["options"]> => {
+    if (typeof option === "string") {
+      return [option];
+    }
+
+    if (!isRecord(option)) {
+      return [];
+    }
+
+    return [{
+      label: typeof option.label === "string" ? option.label : undefined,
+      value: option.value,
+      group: typeof option.group === "string" ? option.group : undefined
+    }];
+  });
+
+  return options.length > 0 ? options : undefined;
+}
+
+function mapConfigFieldTypeToSchemaType(type: string | undefined): string {
+  switch (type) {
+    case "toggle":
+      return "boolean";
+    case "number":
+      return "number";
+    case "select":
+    case "combobox":
+    case "textarea":
+    case "text":
+    default:
+      return "string";
+  }
+}
+
+function normalizeAdapterModels(value: unknown): HostAdapterModel[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((candidate): HostAdapterModel[] => {
+    if (!isRecord(candidate)) {
+      return [];
+    }
+
+    const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+    if (!id) {
+      return [];
+    }
+
+    return [{
+      id,
+      label:
+        typeof candidate.label === "string" && candidate.label.trim()
+          ? candidate.label.trim()
+          : id
+    }];
+  });
+}
+
+function normalizeDetectedModel(value: unknown): HostAdapterDetectedModel {
+  if (!isRecord(value)) {
+    return { model: null, candidates: [] };
+  }
+
+  const model = typeof value.model === "string" && value.model.trim()
+    ? value.model.trim()
+    : null;
+  const candidates = Array.isArray(value.candidates)
+    ? value.candidates.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+
+  return { model, candidates };
+}
+
+function normalizeSchemaType(type: AdapterConfigFieldSchema["type"]): string {
+  if (Array.isArray(type)) {
+    return type.find((entry) => entry !== "null") ?? "string";
+  }
+
+  return type ?? "string";
+}
+
+function formatSchemaFieldLabel(key: string, field: AdapterConfigFieldSchema): string {
+  if (field.title?.trim()) {
+    return field.title.trim();
+  }
+
+  return key
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .replace(/[_-]+/gu, " ")
+    .replace(/\b\w/gu, (letter) => letter.toUpperCase());
+}
+
+function formatSchemaOptionLabel(value: unknown): string {
+  if (value === null) {
+    return "None";
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return JSON.stringify(value);
+}
+
+function getSchemaOptionValue(option: AdapterConfigFieldSchema["options"] extends Array<infer T> ? T : unknown): unknown {
+  return typeof option === "string" ? option : isRecord(option) ? option.value : option;
+}
+
+function getSchemaOptionLabel(option: unknown): string {
+  if (isRecord(option) && typeof option.label === "string" && option.label.trim()) {
+    return option.label.trim();
+  }
+
+  return formatSchemaOptionLabel(getSchemaOptionValue(option));
+}
+
+function getSchemaFieldValue(draft: AdapterPresetDraft, key: string, field: AdapterConfigFieldSchema): unknown {
+  if (Object.prototype.hasOwnProperty.call(draft.schemaValues, key)) {
+    return draft.schemaValues[key];
+  }
+
+  return field.default;
+}
+
+function isSchemaComboboxField(field: AdapterConfigFieldSchema): boolean {
+  return field.controlType === "combobox";
+}
+
+function getAdapterFieldHint(key: string, field?: AdapterConfigFieldSchema): string | undefined {
+  return field?.description?.trim() || ADAPTER_FIELD_HINTS[key];
+}
+
+const COMMON_ADAPTER_CONFIG_KEYS = new Set([
+  "command",
+  "hermesCommand",
+  "model",
+  "thinkingEffort",
+  "effort",
+  "modelReasoningEffort",
+  "reasoningEffort",
+  "mode",
+  "variant",
+  "dangerouslyBypassApprovalsAndSandbox",
+  "dangerouslyBypassSandbox",
+  "search",
+  "fastMode",
+  "extraArgs",
+  "env",
+  "timeoutSec",
+  "graceSec"
+]);
+
+const ADAPTER_SECTION_CONFIG_KEYS = new Set([
+  "cwd",
+  "workingDirectory"
+]);
+
+function removeCommonAdapterConfigKeys(config: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...config };
+  for (const key of COMMON_ADAPTER_CONFIG_KEYS) {
+    delete next[key];
+  }
+  return next;
+}
+
+function normalizeAdapterEnvBindings(value: unknown): Record<string, AdapterEnvBinding> {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const bindings: Record<string, AdapterEnvBinding> = {};
+  for (const [key, entryValue] of Object.entries(value)) {
+    if (typeof entryValue === "string") {
+      bindings[key] = { type: "plain", value: entryValue };
+      continue;
+    }
+
+    if (!isRecord(entryValue)) {
+      continue;
+    }
+
+    if (entryValue.type === "secret_ref" && typeof entryValue.secretId === "string") {
+      bindings[key] = {
+        type: "secret_ref",
+        secretId: entryValue.secretId,
+        version: typeof entryValue.version === "string" ? entryValue.version : "latest"
+      };
+      continue;
+    }
+
+    if (entryValue.type === "plain" && typeof entryValue.value === "string") {
+      bindings[key] = { type: "plain", value: entryValue.value };
+    }
+  }
+
+  return bindings;
+}
+
+function formatAdapterExtraArgsText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map(formatAdapterArgToken)
+      .join(" ");
+  }
+
+  return typeof value === "string" ? value : "";
+}
+
+function formatAdapterArgToken(value: string): string {
+  const trimmed = value.trim();
+  if (!/[\s"'\\]/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return JSON.stringify(trimmed);
+}
+
+function parseAdapterExtraArgsText(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  if (trimmed.includes(",")) {
+    return trimmed
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  const args: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaping = false;
+
+  for (const char of trimmed) {
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaping = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (escaping) {
+    current += "\\";
+  }
+
+  if (current) {
+    args.push(current);
+  }
+
+  return args;
+}
+
+function formatOptionalNumberText(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+}
+
+function parseOptionalNumberText(value: string, label: string, presetName: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} for "${presetName}" must be a number.`);
+  }
+
+  return parsed;
+}
+
+function normalizeAdapterEnvForSave(
+  value: Record<string, AdapterEnvBinding>,
+  presetName: string
+): Record<string, AdapterEnvBinding> {
+  const env: Record<string, AdapterEnvBinding> = {};
+
+  for (const [rawKey, binding] of Object.entries(value)) {
+    const key = rawKey.trim();
+    if (!key) {
+      continue;
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
+      throw new Error(`Env key "${key}" for "${presetName}" is not a valid environment variable name.`);
+    }
+
+    if (typeof binding === "string") {
+      env[key] = { type: "plain", value: binding };
+      continue;
+    }
+
+    if (binding.type === "secret_ref" && binding.secretId) {
+      env[key] = { type: "secret_ref", secretId: binding.secretId, version: binding.version ?? "latest" };
+      continue;
+    }
+
+    if (binding.type === "plain") {
+      env[key] = { type: "plain", value: binding.value };
+    }
+  }
+
+  return env;
+}
+
+function createAdapterPresetDraft(
+  preset: Pick<AdapterPreset, "id" | "name" | "adapterType" | "adapterConfig">,
+  index: number
+): AdapterPresetDraft {
+  const adapterConfig = isRecord(preset.adapterConfig) ? preset.adapterConfig : {};
+  const advancedConfig = removeCommonAdapterConfigKeys(adapterConfig);
+
+  return {
+    localId: `${preset.id || "preset"}-${index}-${Math.random().toString(36).slice(2)}`,
+    id: preset.id,
+    name: preset.name,
+    adapterType: preset.adapterType,
+    command: getAdapterCommandValue(preset.adapterType, adapterConfig),
+    model: typeof adapterConfig.model === "string" ? adapterConfig.model : "",
+    thinkingEffort: getAdapterThinkingEffortValue(preset.adapterType, adapterConfig),
+    bypassSandbox:
+      adapterConfig.dangerouslyBypassApprovalsAndSandbox === true ||
+      adapterConfig.dangerouslyBypassSandbox === true,
+    enableSearch: adapterConfig.search === true,
+    fastMode: adapterConfig.fastMode === true,
+    extraArgsText: formatAdapterExtraArgsText(adapterConfig.extraArgs),
+    envBindings: normalizeAdapterEnvBindings(adapterConfig.env),
+    timeoutSec: formatOptionalNumberText(adapterConfig.timeoutSec),
+    graceSec: formatOptionalNumberText(adapterConfig.graceSec),
+    schemaValues: { ...advancedConfig },
+    advancedJson: JSON.stringify(advancedConfig, null, 2)
+  };
+}
+
+function createEmptyAdapterPresetDraft(adapterType: string, index: number): AdapterPresetDraft {
+  return {
+    localId: `new-preset-${Date.now()}-${index}`,
+    id: "",
+    name: "",
+    adapterType,
+    command: "",
+    model: "",
+    thinkingEffort: "",
+    bypassSandbox: false,
+    enableSearch: false,
+    fastMode: false,
+    extraArgsText: "",
+    envBindings: {},
+    timeoutSec: "",
+    graceSec: "",
+    schemaValues: {},
+    advancedJson: "{}"
+  };
+}
+
+function createAdapterPresetId(name: string, fallbackIndex: number): string {
+  const normalized = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+
+  return normalized || `adapter-preset-${fallbackIndex + 1}`;
+}
+
+function getAdapterCommandKey(adapterType: string): string {
+  return adapterType === "hermes_local" ? "hermesCommand" : "command";
+}
+
+function getAdapterCommandValue(adapterType: string, adapterConfig: Record<string, unknown>): string {
+  const preferredValue = adapterConfig[getAdapterCommandKey(adapterType)];
+  if (typeof preferredValue === "string") {
+    return preferredValue;
+  }
+
+  const fallbackValue = adapterConfig.command;
+  return typeof fallbackValue === "string" ? fallbackValue : "";
+}
+
+function parseAdapterPresetAdvancedJson(draft: AdapterPresetDraft): Record<string, unknown> {
+  const trimmed = draft.advancedJson.trim();
+  if (!trimmed) {
+    return {};
+  }
+
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error(`Advanced config for "${draft.name || draft.id || "unnamed preset"}" must be a JSON object.`);
+  }
+
+  return parsed;
+}
+
+function getAdapterThinkingEffortKey(adapterType: string): string {
+  if (adapterType === "codex_local") {
+    return "modelReasoningEffort";
+  }
+  if (adapterType === "cursor") {
+    return "mode";
+  }
+  if (adapterType === "opencode_local") {
+    return "variant";
+  }
+  return "effort";
+}
+
+function getAdapterThinkingEffortValue(adapterType: string, adapterConfig: Record<string, unknown>): string {
+  const preferredKey = getAdapterThinkingEffortKey(adapterType);
+  const preferredValue = adapterConfig[preferredKey];
+  if (typeof preferredValue === "string") {
+    return preferredValue;
+  }
+
+  for (const key of ["thinkingEffort", "modelReasoningEffort", "reasoningEffort", "effort", "mode", "variant"]) {
+    const value = adapterConfig[key];
+    if (typeof value === "string") {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function getAdapterThinkingEffortOptions(adapterType: string): Array<{ id: string; label: string }> {
+  if (adapterType === "codex_local") {
+    return [
+      { id: "", label: "Auto" },
+      { id: "minimal", label: "Minimal" },
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium" },
+      { id: "high", label: "High" },
+      { id: "xhigh", label: "X-High" }
+    ];
+  }
+
+  if (adapterType === "opencode_local") {
+    return [
+      { id: "", label: "Auto" },
+      { id: "minimal", label: "Minimal" },
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium" },
+      { id: "high", label: "High" },
+      { id: "xhigh", label: "X-High" },
+      { id: "max", label: "Max" }
+    ];
+  }
+
+  if (adapterType === "cursor") {
+    return [
+      { id: "", label: "Auto" },
+      { id: "plan", label: "Plan" },
+      { id: "ask", label: "Ask" }
+    ];
+  }
+
+  return [
+    { id: "", label: "Auto" },
+    { id: "low", label: "Low" },
+    { id: "medium", label: "Medium" },
+    { id: "high", label: "High" }
+  ];
+}
+
+function adapterShowsThinkingEffort(adapterType: string): boolean {
+  return adapterType !== "gemini_local";
+}
+
+function adapterShowsCodexToggles(adapterType: string): boolean {
+  return adapterType === "codex_local";
+}
+
+export function buildAdapterPresetConfig(draft: AdapterPresetDraft): Record<string, unknown> {
+  const adapterConfig: Record<string, unknown> = {
+    ...parseAdapterPresetAdvancedJson(draft)
+  };
+
+  for (const [key, value] of Object.entries(draft.schemaValues)) {
+    if (value === undefined || value === null || value === "") {
+      delete adapterConfig[key];
+    } else {
+      adapterConfig[key] = value;
+    }
+  }
+
+  const command = draft.command.trim();
+  const model = draft.model.trim();
+  const thinkingEffort = draft.thinkingEffort.trim();
+  const extraArgs = parseAdapterExtraArgsText(draft.extraArgsText);
+  const env = normalizeAdapterEnvForSave(draft.envBindings, draft.name || draft.id || "unnamed preset");
+  const timeoutSec = parseOptionalNumberText(draft.timeoutSec, "Timeout", draft.name || draft.id || "unnamed preset");
+  const graceSec = parseOptionalNumberText(draft.graceSec, "Interrupt grace period", draft.name || draft.id || "unnamed preset");
+
+  if (command) {
+    adapterConfig[getAdapterCommandKey(draft.adapterType)] = command;
+  } else {
+    delete adapterConfig[getAdapterCommandKey(draft.adapterType)];
+  }
+  for (const key of ["command", "hermesCommand"]) {
+    if (key !== getAdapterCommandKey(draft.adapterType)) {
+      delete adapterConfig[key];
+    }
+  }
+
+  if (model) {
+    adapterConfig.model = model;
+  } else {
+    delete adapterConfig.model;
+  }
+
+  for (const key of ["thinkingEffort", "modelReasoningEffort", "reasoningEffort", "effort", "mode", "variant"]) {
+    delete adapterConfig[key];
+  }
+  if (thinkingEffort && adapterShowsThinkingEffort(draft.adapterType)) {
+    adapterConfig[getAdapterThinkingEffortKey(draft.adapterType)] = thinkingEffort;
+  }
+
+  if (adapterShowsCodexToggles(draft.adapterType)) {
+    if (draft.bypassSandbox) {
+      adapterConfig.dangerouslyBypassApprovalsAndSandbox = true;
+      delete adapterConfig.dangerouslyBypassSandbox;
+    } else {
+      delete adapterConfig.dangerouslyBypassApprovalsAndSandbox;
+      delete adapterConfig.dangerouslyBypassSandbox;
+    }
+
+    if (draft.enableSearch) {
+      adapterConfig.search = true;
+    } else {
+      delete adapterConfig.search;
+    }
+
+    if (draft.fastMode) {
+      adapterConfig.fastMode = true;
+    } else {
+      delete adapterConfig.fastMode;
+    }
+  } else {
+    delete adapterConfig.dangerouslyBypassApprovalsAndSandbox;
+    delete adapterConfig.dangerouslyBypassSandbox;
+    delete adapterConfig.search;
+    delete adapterConfig.fastMode;
+  }
+
+    if (extraArgs.length > 0) {
+      adapterConfig.extraArgs = extraArgs;
+    } else {
+      delete adapterConfig.extraArgs;
+    }
+
+    if (Object.keys(env).length > 0) {
+      adapterConfig.env = env;
+    } else {
+      delete adapterConfig.env;
+    }
+
+    if (timeoutSec !== undefined) {
+      adapterConfig.timeoutSec = timeoutSec;
+    } else {
+      delete adapterConfig.timeoutSec;
+    }
+
+    if (graceSec !== undefined) {
+      adapterConfig.graceSec = graceSec;
+    } else {
+      delete adapterConfig.graceSec;
+    }
+
+  return adapterConfig;
+}
+
+export function buildAdapterPresetPayload(drafts: AdapterPresetDraft[]): AdapterPreset[] {
+  return drafts.flatMap((draft, index): AdapterPreset[] => {
+    const id = createAdapterPresetId(draft.name, index);
+    const name = draft.name.trim();
+    const adapterType = draft.adapterType.trim();
+
+    if (!id || !name || !adapterType) {
+      throw new Error("Every adapter preset needs a name and adapter type.");
+    }
+
+    const adapterConfig = buildAdapterPresetConfig(draft);
+
+    return [{
+      id,
+      name,
+      adapterType,
+      adapterConfig,
+      updatedAt: null
+    }];
+  });
+}
+
 async function resolveOrCreateCompanySecret(
   companyId: string,
   name: string,
@@ -2463,6 +3884,26 @@ function cloneCompanyImportSelection(selection: CompanyImportSelection): Company
       mode: selection.skills.mode,
       ...(selection.skills.itemPaths ? { itemPaths: [...selection.skills.itemPaths] } : {})
     }
+  };
+}
+
+function createDefaultImportAdapterPresetSelection(): ImportAdapterPresetSelection {
+  return {
+    defaultPresetId: null,
+    agentPresetIds: {}
+  };
+}
+
+function cloneImportAdapterPresetSelection(
+  selection: ImportAdapterPresetSelection | null | undefined
+): ImportAdapterPresetSelection {
+  if (!selection) {
+    return createDefaultImportAdapterPresetSelection();
+  }
+
+  return {
+    defaultPresetId: selection.defaultPresetId ?? null,
+    agentPresetIds: { ...selection.agentPresetIds }
   };
 }
 
@@ -3815,10 +5256,13 @@ function CompanyDetailsDialog(props: {
 }
 
 function ImportCompanyDialog(props: {
+  adapterPresets: AdapterPreset[];
   company: CatalogCompanySummary;
   dialogState: ImportDialogState;
   errorText: string | null;
   importState: ImportState | null;
+  onChangeAgentAdapterPreset(agentSlug: string, value: string): void;
+  onChangeDefaultAdapterPreset(value: string): void;
   onChangeCollisionStrategy(value: CatalogSyncCollisionStrategy): void;
   onChangeCompanyName(value: string): void;
   onClose(): void;
@@ -3827,10 +5271,13 @@ function ImportCompanyDialog(props: {
   onSubmit(event: FormEvent<HTMLFormElement>): Promise<void>;
 }): React.JSX.Element {
   const {
+    adapterPresets,
     company,
     dialogState,
     errorText,
     importState,
+    onChangeAgentAdapterPreset,
+    onChangeDefaultAdapterPreset,
     onChangeCollisionStrategy,
     onChangeCompanyName,
     onClose,
@@ -3847,6 +5294,14 @@ function ImportCompanyDialog(props: {
     company.contents,
     dialogState.selection
   );
+  const selectedAgents = company.contents.agents
+    .map((item) => ({
+      item,
+      slug: getCompanyContentItemPaperclipSlug(item)
+    }))
+    .filter((entry): entry is { item: CompanyContentItem; slug: string } =>
+      Boolean(entry.slug) && isSelectionItemChecked(dialogState.selection.agents, entry.item.path)
+    );
 
   return (
     <div
@@ -4047,6 +5502,68 @@ function ImportCompanyDialog(props: {
             </fieldset>
 
             <fieldset>
+              <legend className="agent-companies-settings__metric-label">Adapter Presets</legend>
+              <p className="agent-companies-settings__metric-note">
+                Adapter choices are saved with this import so later re-imports and syncs keep the same runtime mapping.
+              </p>
+              {adapterPresets.length === 0 ? (
+                <div className="agent-companies-settings__notice">
+                  Add adapter presets in settings before import if you want to override package defaults.
+                </div>
+              ) : (
+                <div className="agent-companies-settings__adapter-grid">
+                  <label className="agent-companies-settings__adapter-row">
+                    <span className="agent-companies-settings__status-copy">
+                      <span className="agent-companies-settings__status-title">Default adapter preset</span>
+                      <span className="agent-companies-settings__status-body">Applied to selected agents without a per-agent override.</span>
+                    </span>
+                    <select
+                      className="agent-companies-settings__input"
+                      disabled={isBusy}
+                      onChange={(event) => onChangeDefaultAdapterPreset(event.target.value)}
+                      value={dialogState.adapterPresetSelection.defaultPresetId ?? "__package__"}
+                    >
+                      <option value="__package__">Keep package adapter</option>
+                      {adapterPresets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedAgents.map(({ item, slug }) => {
+                    const hasOverride = Object.prototype.hasOwnProperty.call(
+                      dialogState.adapterPresetSelection.agentPresetIds,
+                      slug
+                    );
+                    const selectedValue = hasOverride
+                      ? dialogState.adapterPresetSelection.agentPresetIds[slug] ?? "__package__"
+                      : "__default__";
+
+                    return (
+                      <label className="agent-companies-settings__adapter-row" key={slug}>
+                        <span className="agent-companies-settings__status-copy">
+                          <span className="agent-companies-settings__status-title">{item.name}</span>
+                          <span className="agent-companies-settings__status-body">{slug}</span>
+                        </span>
+                        <select
+                          className="agent-companies-settings__input"
+                          disabled={isBusy}
+                          onChange={(event) => onChangeAgentAdapterPreset(slug, event.target.value)}
+                          value={selectedValue}
+                        >
+                          <option value="__default__">Use default preset</option>
+                          <option value="__package__">Keep package adapter</option>
+                          {adapterPresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>{preset.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </fieldset>
+
+            <fieldset>
               <legend className="agent-companies-settings__metric-label">Collision Handling</legend>
               <div className="agent-companies-settings__status-grid">
                 {[
@@ -4208,6 +5725,1095 @@ function CompanyGroupCard({
   );
 }
 
+function AdapterPresetBuilder({
+  drafts,
+  hostAdapters,
+  adapterSchemas,
+  companyId,
+  pending,
+  onAdd,
+  onRemove,
+  onChange,
+  onSave
+}: {
+  drafts: AdapterPresetDraft[];
+  hostAdapters: HostAdapterInfo[];
+  adapterSchemas: Record<string, AdapterConfigSchema | null>;
+  companyId: string | null;
+  pending: boolean;
+  onAdd(): void;
+  onRemove(localId: string): void;
+  onChange(localId: string, patch: Partial<AdapterPresetDraft>): void;
+  onSave(event: FormEvent<HTMLFormElement>): void;
+}): React.JSX.Element {
+  return (
+    <form className="agent-companies-settings__status-grid" onSubmit={onSave}>
+      {drafts.length === 0 ? (
+        <div className="agent-companies-settings__empty">
+          <h3 className="agent-companies-settings__empty-title">No adapter presets yet</h3>
+          <p className="agent-companies-settings__empty-copy">
+            Add presets for runtime-specific adapter defaults, then select them during import or re-import.
+          </p>
+        </div>
+      ) : (
+        <div className="agent-companies-settings__preset-list">
+          {drafts.map((draft) => (
+            <AdapterPresetDraftCard
+              adapterSchemas={adapterSchemas}
+              companyId={companyId}
+              draft={draft}
+              hostAdapters={hostAdapters}
+              key={draft.localId}
+              onChange={onChange}
+              onRemove={onRemove}
+              pending={pending}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="agent-companies-settings__dialog-form-actions">
+        <button
+          className="agent-companies-settings__button"
+          disabled={pending}
+          onClick={onAdd}
+          type="button"
+        >
+          Add preset
+        </button>
+        <button
+          className="agent-companies-settings__button agent-companies-settings__button--primary"
+          disabled={pending}
+          type="submit"
+        >
+          {pending ? "Saving..." : "Save presets"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function AdapterPresetDraftCard({
+  draft,
+  hostAdapters,
+  adapterSchemas,
+  companyId,
+  pending,
+  onRemove,
+  onChange
+}: {
+  draft: AdapterPresetDraft;
+  hostAdapters: HostAdapterInfo[];
+  adapterSchemas: Record<string, AdapterConfigSchema | null>;
+  companyId: string | null;
+  pending: boolean;
+  onRemove(localId: string): void;
+  onChange(localId: string, patch: Partial<AdapterPresetDraft>): void;
+}): React.JSX.Element {
+  const schema = adapterSchemas[draft.adapterType] ?? null;
+  const adapterSectionFields = Object.entries(schema?.properties ?? {}).filter(([key]) =>
+    ADAPTER_SECTION_CONFIG_KEYS.has(key)
+  );
+  const [modelOptions, setModelOptions] = useState<HostAdapterModel[]>([]);
+  const [modelOptionsError, setModelOptionsError] = useState<string | null>(null);
+  const [detectedModel, setDetectedModel] = useState<HostAdapterDetectedModel | null>(null);
+  const [detectingModel, setDetectingModel] = useState(false);
+  const [refreshingModels, setRefreshingModels] = useState(false);
+  const [availableSecrets, setAvailableSecrets] = useState<CompanySecret[]>([]);
+  const [testingEnvironment, setTestingEnvironment] = useState(false);
+  const [testEnvironmentError, setTestEnvironmentError] = useState<string | null>(null);
+  const [testEnvironmentResult, setTestEnvironmentResult] = useState<AdapterEnvironmentTestResult | null>(null);
+  const adapterOptions = [
+    ...hostAdapters,
+    draft.adapterType && !hostAdapters.some((adapter) => adapter.type === draft.adapterType)
+      ? { type: draft.adapterType, label: draft.adapterType, disabled: false }
+      : null
+  ].filter((adapter): adapter is HostAdapterInfo => adapter !== null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadModels(): Promise<void> {
+      if (!companyId || !draft.adapterType.trim()) {
+        setModelOptions([]);
+        setModelOptionsError(null);
+        return;
+      }
+
+      try {
+        setModelOptionsError(null);
+        const models = normalizeAdapterModels(
+          await fetchHostJson<unknown>(
+            `/api/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(draft.adapterType)}/models`
+          )
+        );
+        if (!cancelled) {
+          setModelOptions(models);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setModelOptions([]);
+          setModelOptionsError(getErrorMessage(error));
+        }
+      }
+    }
+
+    void loadModels();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId, draft.adapterType]);
+
+  const refreshModelOptions = async (): Promise<void> => {
+    if (!companyId || !draft.adapterType.trim()) {
+      return;
+    }
+
+    setRefreshingModels(true);
+    try {
+      setModelOptionsError(null);
+      const models = normalizeAdapterModels(
+        await fetchHostJson<unknown>(
+          `/api/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(draft.adapterType)}/models?refresh=1`
+        )
+      );
+      setModelOptions(models);
+    } catch (error) {
+      setModelOptionsError(getErrorMessage(error));
+    } finally {
+      setRefreshingModels(false);
+    }
+  };
+
+  const detectAdapterModel = async (): Promise<void> => {
+    if (!companyId || !draft.adapterType.trim()) {
+      return;
+    }
+
+    setDetectingModel(true);
+    try {
+      const result = normalizeDetectedModel(
+        await fetchHostJson<unknown>(
+          `/api/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(draft.adapterType)}/detect-model`
+        )
+      );
+      setDetectedModel(result);
+      if (result.model) {
+        onChange(draft.localId, { model: result.model });
+      }
+    } catch (error) {
+      setModelOptionsError(getErrorMessage(error));
+    } finally {
+      setDetectingModel(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSecrets(): Promise<void> {
+      if (!companyId) {
+        setAvailableSecrets([]);
+        return;
+      }
+
+      try {
+        const secrets = await fetchHostJson<CompanySecret[]>(
+          `/api/companies/${encodeURIComponent(companyId)}/secrets`
+        );
+        if (!cancelled) {
+          setAvailableSecrets(Array.isArray(secrets) ? secrets : []);
+        }
+      } catch {
+        if (!cancelled) {
+          setAvailableSecrets([]);
+        }
+      }
+    }
+
+    void loadSecrets();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId]);
+
+  const handleCreateSecret = async (name: string, value: string): Promise<CompanySecret> => {
+    if (!companyId) {
+      throw new Error("Open the plugin inside a company to create secrets.");
+    }
+
+    const created = await fetchHostJson<CompanySecret>(
+      `/api/companies/${encodeURIComponent(companyId)}/secrets`,
+      {
+        method: "POST",
+        body: JSON.stringify({ name, value })
+      }
+    );
+    setAvailableSecrets((secrets) => [...secrets.filter((secret) => secret.id !== created.id), created]);
+    return created;
+  };
+
+  const handleTestEnvironment = async () => {
+    if (!companyId) {
+      setTestEnvironmentError("Open the plugin inside a company to test an adapter environment.");
+      setTestEnvironmentResult(null);
+      return;
+    }
+
+    setTestingEnvironment(true);
+    setTestEnvironmentError(null);
+    setTestEnvironmentResult(null);
+
+    try {
+      const result = await fetchHostJson<AdapterEnvironmentTestResult>(
+        `/api/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(draft.adapterType)}/test-environment`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            adapterConfig: buildAdapterPresetConfig(draft)
+          })
+        }
+      );
+      setTestEnvironmentResult(result);
+    } catch (error) {
+      setTestEnvironmentError(getErrorMessage(error));
+    } finally {
+      setTestingEnvironment(false);
+    }
+  };
+
+  return (
+    <section className="agent-companies-settings__preset-card">
+      <div className="agent-companies-settings__preset-toolbar">
+        <div>
+          <h3 className="agent-companies-settings__preset-title">
+            {draft.name.trim() || "Untitled adapter preset"}
+          </h3>
+        </div>
+        <button
+          className="agent-companies-settings__button agent-companies-settings__button--danger"
+          disabled={pending}
+          onClick={() => onRemove(draft.localId)}
+          type="button"
+        >
+          Remove
+        </button>
+      </div>
+
+      <div className="agent-companies-settings__native-section-head">
+        <h4 className="agent-companies-settings__native-section-title">Adapter</h4>
+        <button
+          className="agent-companies-settings__button"
+          disabled={pending || testingEnvironment}
+          onClick={() => void handleTestEnvironment()}
+          type="button"
+        >
+          {testingEnvironment ? "Testing..." : "Test environment"}
+        </button>
+      </div>
+
+      <div className="agent-companies-settings__native-adapter-section">
+        <div className="agent-companies-settings__field-grid">
+          <label className="agent-companies-settings__field">
+            <AdapterFieldLabel label="Adapter type" hint="How this preset runs agents imported from the catalog." />
+            <select
+              className="agent-companies-settings__native-select"
+              disabled={pending}
+              onChange={(event) => {
+                onChange(draft.localId, {
+                  adapterType: event.target.value,
+                  model: "",
+                  thinkingEffort: "",
+                  bypassSandbox: false,
+                  enableSearch: false,
+                  fastMode: false,
+                  schemaValues: {},
+                  advancedJson: "{}"
+                });
+              }}
+              value={draft.adapterType}
+            >
+              {adapterOptions.length === 0 ? (
+                <option value={draft.adapterType}>{draft.adapterType || "No adapters loaded"}</option>
+              ) : (
+                adapterOptions.map((adapter) => (
+                  <option disabled={adapter.disabled} key={adapter.type} value={adapter.type}>
+                    {adapter.label}{adapter.disabled ? " (coming soon)" : ""}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+          <label className="agent-companies-settings__field">
+            <AdapterFieldLabel label="Preset name" />
+            <input
+              className="agent-companies-settings__native-input"
+              disabled={pending}
+              onChange={(event) => {
+                const name = event.target.value;
+                onChange(draft.localId, { name });
+              }}
+              placeholder="Hermes / Ops"
+              value={draft.name}
+            />
+          </label>
+        </div>
+        {adapterSectionFields.map(([key, field]) => (
+          <AdapterSchemaField
+            draft={draft}
+            field={field}
+            fieldKey={key}
+            key={key}
+            onChange={onChange}
+            pending={pending}
+            required={schema?.required?.includes(key) ?? false}
+          />
+        ))}
+        {testEnvironmentError ? (
+          <div className="agent-companies-settings__adapter-test-result" data-status="fail">
+            {testEnvironmentError}
+          </div>
+        ) : null}
+        {testEnvironmentResult ? (
+          <AdapterEnvironmentResult result={testEnvironmentResult} />
+        ) : null}
+      </div>
+
+      <h4 className="agent-companies-settings__native-section-title">Permissions &amp; Configuration</h4>
+
+      <AdapterCommonConfigFields
+        availableSecrets={availableSecrets}
+        draft={draft}
+        modelOptions={modelOptions}
+        modelOptionsError={modelOptionsError}
+        detectedModel={detectedModel}
+        detectingModel={detectingModel}
+        onDetectModel={detectAdapterModel}
+        onRefreshModels={refreshModelOptions}
+        refreshingModels={refreshingModels}
+        onCreateSecret={handleCreateSecret}
+        onChange={onChange}
+        pending={pending}
+      />
+
+      <AdapterSchemaFieldGrid
+        draft={draft}
+        onChange={onChange}
+        pending={pending}
+        schema={schema}
+      />
+
+      <details className="agent-companies-settings__advanced-config">
+        <summary>Advanced adapter config JSON</summary>
+        <label className="agent-companies-settings__field">
+          <textarea
+            className="agent-companies-settings__textarea"
+            disabled={pending}
+            onChange={(event) => onChange(draft.localId, { advancedJson: event.target.value })}
+            spellCheck={false}
+            value={draft.advancedJson}
+          />
+        </label>
+        <p className="agent-companies-settings__field-help">
+          Optional. Use this for adapter config values not exposed by the host schema. Form fields override matching JSON keys when saved.
+        </p>
+      </details>
+    </section>
+  );
+}
+
+function AdapterCommonConfigFields({
+  availableSecrets,
+  detectedModel,
+  detectingModel,
+  draft,
+  modelOptions,
+  modelOptionsError,
+  onDetectModel,
+  onRefreshModels,
+  onCreateSecret,
+  pending,
+  refreshingModels,
+  onChange
+}: {
+  availableSecrets: CompanySecret[];
+  detectedModel: HostAdapterDetectedModel | null;
+  detectingModel: boolean;
+  draft: AdapterPresetDraft;
+  modelOptions: HostAdapterModel[];
+  modelOptionsError: string | null;
+  onDetectModel(): Promise<void>;
+  onRefreshModels(): Promise<void>;
+  onCreateSecret(name: string, value: string): Promise<CompanySecret>;
+  pending: boolean;
+  refreshingModels: boolean;
+  onChange(localId: string, patch: Partial<AdapterPresetDraft>): void;
+}): React.JSX.Element {
+  const thinkingEffortOptions = getAdapterThinkingEffortOptions(draft.adapterType);
+
+  return (
+    <div className="agent-companies-settings__native-adapter-section">
+      <label className="agent-companies-settings__field">
+        <AdapterFieldLabel label="Command" hint={getAdapterFieldHint(getAdapterCommandKey(draft.adapterType))} />
+        <input
+          className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+          disabled={pending}
+          onChange={(event) => onChange(draft.localId, { command: event.target.value })}
+          placeholder={STANDARD_ADAPTER_COMMAND_PLACEHOLDERS[draft.adapterType] ?? "Optional command override"}
+          value={draft.command}
+        />
+      </label>
+      <label className="agent-companies-settings__field">
+        <AdapterFieldLabel label="Model" hint={getAdapterFieldHint("model")} />
+        <AdapterModelInput
+          detectedModel={detectedModel}
+          detectingModel={detectingModel}
+          disabled={pending}
+          listId={`adapter-model-options-${draft.localId}`}
+          modelOptions={modelOptions}
+          onChange={(model) => onChange(draft.localId, { model })}
+          onDetectModel={onDetectModel}
+          onRefreshModels={onRefreshModels}
+          refreshingModels={refreshingModels}
+          required={draft.adapterType === "opencode_local" || draft.adapterType === "pi_local"}
+          value={draft.model}
+        />
+        {modelOptionsError ? (
+          <p className="agent-companies-settings__field-help">
+            Models could not be loaded: {modelOptionsError}
+          </p>
+        ) : null}
+      </label>
+      {adapterShowsThinkingEffort(draft.adapterType) ? (
+        <label className="agent-companies-settings__field">
+          <AdapterFieldLabel label={draft.adapterType === "cursor" ? "Mode" : "Thinking effort"} hint={getAdapterFieldHint(getAdapterThinkingEffortKey(draft.adapterType))} />
+          <select
+            className="agent-companies-settings__native-select"
+            disabled={pending}
+            onChange={(event) => onChange(draft.localId, { thinkingEffort: event.target.value })}
+            value={draft.thinkingEffort}
+          >
+            {thinkingEffortOptions.map((option) => (
+              <option key={option.id || "auto"} value={option.id}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {adapterShowsCodexToggles(draft.adapterType) ? (
+        <>
+          <AdapterToggleField
+            checked={draft.bypassSandbox}
+            disabled={pending}
+            hint={getAdapterFieldHint("bypassSandbox") ?? ""}
+            label="Bypass sandbox"
+            onChange={(value) => onChange(draft.localId, { bypassSandbox: value })}
+          />
+          <AdapterToggleField
+            checked={draft.enableSearch}
+            disabled={pending}
+            hint={getAdapterFieldHint("enableSearch") ?? ""}
+            label="Enable search"
+            onChange={(value) => onChange(draft.localId, { enableSearch: value })}
+          />
+          <AdapterToggleField
+            checked={draft.fastMode}
+            disabled={pending}
+            hint={getAdapterFieldHint("fastMode") ?? ""}
+            label="Fast mode"
+            onChange={(value) => onChange(draft.localId, { fastMode: value })}
+          />
+        </>
+      ) : null}
+      <label className="agent-companies-settings__field">
+        <AdapterFieldLabel label="Extra args (comma-separated)" hint={getAdapterFieldHint("extraArgs")} />
+        <input
+          className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+          disabled={pending}
+          onChange={(event) => onChange(draft.localId, { extraArgsText: event.target.value })}
+          placeholder="e.g. --verbose --flag value"
+          value={draft.extraArgsText}
+        />
+      </label>
+      <label className="agent-companies-settings__field">
+        <AdapterFieldLabel label="Environment variables" hint={getAdapterFieldHint("env")} />
+        <AdapterEnvRows
+          disabled={pending}
+          onChange={(value) => onChange(draft.localId, { envBindings: value ?? {} })}
+          onCreateSecret={onCreateSecret}
+          secrets={availableSecrets}
+          value={draft.envBindings}
+        />
+      </label>
+      <label className="agent-companies-settings__field">
+        <AdapterFieldLabel label="Timeout (sec)" hint={getAdapterFieldHint("timeoutSec")} />
+        <input
+          className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+          disabled={pending}
+          inputMode="numeric"
+          onChange={(event) => onChange(draft.localId, { timeoutSec: event.target.value })}
+          placeholder="0"
+          value={draft.timeoutSec}
+        />
+      </label>
+      <label className="agent-companies-settings__field">
+        <AdapterFieldLabel label="Interrupt grace period (sec)" hint={getAdapterFieldHint("graceSec")} />
+        <input
+          className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+          disabled={pending}
+          inputMode="numeric"
+          onChange={(event) => onChange(draft.localId, { graceSec: event.target.value })}
+          placeholder="15"
+          value={draft.graceSec}
+        />
+      </label>
+    </div>
+  );
+}
+
+function AdapterFieldLabel({
+  label,
+  hint
+}: {
+  label: string;
+  hint?: string;
+}): React.JSX.Element {
+  return (
+    <span className="agent-companies-settings__native-label">
+      {label}
+      {hint ? (
+        <span
+          aria-label={`Help: ${label}`}
+          className="agent-companies-settings__native-help"
+          role="button"
+          tabIndex={0}
+        >
+          <CircleHelp aria-hidden="true" />
+          <span className="agent-companies-settings__native-help-text" role="tooltip">
+            {hint}
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function getModelDisplayLabel(modelOptions: HostAdapterModel[], value: string): string {
+  return modelOptions.find((model) => model.id === value)?.label ?? value;
+}
+
+function AdapterModelInput({
+  detectedModel,
+  detectingModel,
+  disabled,
+  listId,
+  modelOptions,
+  onChange,
+  onDetectModel,
+  onRefreshModels,
+  refreshingModels,
+  required,
+  value
+}: {
+  detectedModel: HostAdapterDetectedModel | null;
+  detectingModel: boolean;
+  disabled: boolean;
+  listId: string;
+  modelOptions: HostAdapterModel[];
+  onChange(value: string): void;
+  onDetectModel(): Promise<void>;
+  onRefreshModels(): Promise<void>;
+  refreshingModels: boolean;
+  required: boolean;
+  value: string;
+}): React.JSX.Element {
+  const candidateModels = [
+    detectedModel?.model,
+    ...(detectedModel?.candidates ?? [])
+  ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+
+  return (
+    <div className="agent-companies-settings__model-field">
+      <input
+        className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+        disabled={disabled}
+        list={listId}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={required ? "Select or enter model (required)" : "Default"}
+        value={value}
+      />
+      <datalist id={listId}>
+        {modelOptions.map((model) => (
+          <option key={model.id} value={model.id}>
+            {model.label}
+          </option>
+        ))}
+      </datalist>
+      <div className="agent-companies-settings__model-actions">
+        {!required ? (
+          <button
+            className="agent-companies-settings__model-chip"
+            disabled={disabled || !value}
+            onClick={() => onChange("")}
+            type="button"
+          >
+            Default
+          </button>
+        ) : null}
+        <button
+          className="agent-companies-settings__model-chip"
+          disabled={disabled || detectingModel}
+          onClick={() => void onDetectModel()}
+          type="button"
+        >
+          {detectingModel ? "Detecting..." : detectedModel?.model ? "Re-detect model" : "Detect model"}
+        </button>
+        <button
+          className="agent-companies-settings__model-chip"
+          disabled={disabled || refreshingModels}
+          onClick={() => void onRefreshModels()}
+          type="button"
+        >
+          {refreshingModels ? "Refreshing..." : "Refresh models"}
+        </button>
+        {candidateModels
+          .filter((model, index, list) => model !== value && list.indexOf(model) === index)
+          .slice(0, 3)
+          .map((model) => (
+            <button
+              className="agent-companies-settings__model-chip"
+              disabled={disabled}
+              key={model}
+              onClick={() => onChange(model)}
+              title={model}
+              type="button"
+            >
+              Use {getModelDisplayLabel(modelOptions, model)}
+            </button>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function AdapterToggleField({
+  checked,
+  disabled,
+  label,
+  hint,
+  onChange
+}: {
+  checked: boolean;
+  disabled: boolean;
+  label: string;
+  hint: string;
+  onChange(value: boolean): void;
+}): React.JSX.Element {
+  return (
+    <div className="agent-companies-settings__native-toggle-row">
+      <AdapterFieldLabel label={label} hint={hint} />
+      <button
+        aria-checked={checked}
+        className="agent-companies-settings__native-toggle"
+        disabled={disabled}
+        onClick={() => onChange(!checked)}
+        role="switch"
+        type="button"
+      >
+        <span />
+      </button>
+    </div>
+  );
+}
+
+function AdapterEnvironmentResult({ result }: { result: AdapterEnvironmentTestResult }): React.JSX.Element {
+  const statusLabel =
+    result.status === "pass" ? "Passed" : result.status === "warn" ? "Warnings" : "Failed";
+
+  return (
+    <div className="agent-companies-settings__adapter-test-result" data-status={result.status}>
+      <div className="agent-companies-settings__adapter-test-head">
+        <span>{statusLabel}</span>
+        <span>{new Date(result.testedAt).toLocaleTimeString()}</span>
+      </div>
+      <div className="agent-companies-settings__adapter-test-checks">
+        {result.checks.map((check, index) => (
+          <div className="agent-companies-settings__adapter-test-check" key={`${check.code}-${index}`}>
+            <span className="agent-companies-settings__adapter-test-level">{check.level}</span>
+            <span> · {check.message}</span>
+            {check.detail ? <span> ({check.detail})</span> : null}
+            {check.hint ? <span> Hint: {check.hint}</span> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function adapterEnvBindingsToRows(value: Record<string, AdapterEnvBinding>): AdapterEnvRow[] {
+  const entries = Object.entries(value).map(([key, binding]): AdapterEnvRow => {
+    if (typeof binding === "string") {
+      return { key, source: "plain", plainValue: binding, secretId: "" };
+    }
+
+    if (binding.type === "secret_ref") {
+      return { key, source: "secret", plainValue: "", secretId: binding.secretId };
+    }
+
+    return { key, source: "plain", plainValue: binding.value, secretId: "" };
+  });
+
+  return [...entries, { key: "", source: "plain", plainValue: "", secretId: "" }];
+}
+
+function adapterEnvRowsToBindings(rows: AdapterEnvRow[]): Record<string, AdapterEnvBinding> | undefined {
+  const bindings: Record<string, AdapterEnvBinding> = {};
+  for (const row of rows) {
+    const key = row.key.trim();
+    if (!key) {
+      continue;
+    }
+    if (row.source === "secret" && row.secretId) {
+      bindings[key] = { type: "secret_ref", secretId: row.secretId, version: "latest" };
+    } else {
+      bindings[key] = { type: "plain", value: row.plainValue };
+    }
+  }
+  return Object.keys(bindings).length > 0 ? bindings : undefined;
+}
+
+function defaultAdapterSecretName(key: string): string {
+  return key
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/gu, "_")
+    .replace(/^_+|_+$/gu, "")
+    .slice(0, 64);
+}
+
+function AdapterEnvRows({
+  value,
+  disabled,
+  secrets,
+  onCreateSecret,
+  onChange
+}: {
+  value: Record<string, AdapterEnvBinding>;
+  disabled: boolean;
+  secrets: CompanySecret[];
+  onCreateSecret(name: string, value: string): Promise<CompanySecret>;
+  onChange(value: Record<string, AdapterEnvBinding> | undefined): void;
+}): React.JSX.Element {
+  const [rows, setRows] = useState<AdapterEnvRow[]>(() => adapterEnvBindingsToRows(value));
+  const [sealError, setSealError] = useState<string | null>(null);
+  const valueRef = useRef(value);
+  const emittingRef = useRef(false);
+
+  useEffect(() => {
+    if (emittingRef.current) {
+      emittingRef.current = false;
+      valueRef.current = value;
+      return;
+    }
+    if (value !== valueRef.current) {
+      valueRef.current = value;
+      setRows(adapterEnvBindingsToRows(value));
+    }
+  }, [value]);
+
+  const emitRows = (nextRows: AdapterEnvRow[]) => {
+    emittingRef.current = true;
+    onChange(adapterEnvRowsToBindings(nextRows));
+  };
+
+  const updateRow = (index: number, patch: Partial<AdapterEnvRow>) => {
+    const nextRows = rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row);
+    const lastRow = nextRows[nextRows.length - 1];
+    if (lastRow?.key || lastRow?.plainValue || lastRow?.secretId) {
+      nextRows.push({ key: "", source: "plain", plainValue: "", secretId: "" });
+    }
+    setRows(nextRows);
+    emitRows(nextRows);
+  };
+
+  const removeRow = (index: number) => {
+    const nextRows = rows.filter((_, rowIndex) => rowIndex !== index);
+    const lastRow = nextRows[nextRows.length - 1];
+    if (!lastRow || lastRow.key || lastRow.plainValue || lastRow.secretId) {
+      nextRows.push({ key: "", source: "plain", plainValue: "", secretId: "" });
+    }
+    setRows(nextRows);
+    emitRows(nextRows);
+  };
+
+  const sealRow = async (index: number) => {
+    const row = rows[index];
+    if (!row) {
+      return;
+    }
+    const key = row.key.trim();
+    const plain = row.plainValue;
+    if (!key || plain.length === 0) {
+      return;
+    }
+
+    const suggested = defaultAdapterSecretName(key) || "secret";
+    const name = window.prompt("Secret name", suggested)?.trim();
+    if (!name) {
+      return;
+    }
+
+    try {
+      setSealError(null);
+      const created = await onCreateSecret(name, plain);
+      updateRow(index, { source: "secret", secretId: created.id });
+    } catch (error) {
+      setSealError(getErrorMessage(error));
+    }
+  };
+
+  return (
+    <div className="agent-companies-settings__env-grid">
+      {rows.map((row, index) => {
+        const isTrailing =
+          index === rows.length - 1 &&
+          !row.key &&
+          !row.plainValue &&
+          !row.secretId;
+
+        return (
+          <div className="agent-companies-settings__env-row" key={index}>
+            <input
+              className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+              disabled={disabled}
+              onChange={(event) => updateRow(index, { key: event.target.value })}
+              placeholder="KEY"
+              value={row.key}
+            />
+            <select
+              className="agent-companies-settings__native-select"
+              disabled={disabled}
+              onChange={(event) =>
+                updateRow(index, {
+                  source: event.target.value === "secret" ? "secret" : "plain",
+                  ...(event.target.value === "plain" ? { secretId: "" } : {})
+                })
+              }
+              value={row.source}
+            >
+              <option value="plain">Plain</option>
+              <option value="secret">Secret</option>
+            </select>
+            {row.source === "secret" ? (
+              <>
+                <select
+                  className="agent-companies-settings__native-select"
+                  disabled={disabled}
+                  onChange={(event) => updateRow(index, { secretId: event.target.value })}
+                  value={row.secretId}
+                >
+                  <option value="">Select secret...</option>
+                  {secrets.map((secret) => (
+                    <option key={secret.id} value={secret.id}>{secret.name}</option>
+                  ))}
+                </select>
+                <button
+                  className="agent-companies-settings__env-seal"
+                  disabled={disabled || !row.key.trim() || !row.plainValue}
+                  onClick={() => void sealRow(index)}
+                  title="Create secret from current plain value"
+                  type="button"
+                >
+                  New
+                </button>
+              </>
+            ) : (
+              <>
+                <input
+                  className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+                  disabled={disabled}
+                  onChange={(event) => updateRow(index, { plainValue: event.target.value })}
+                  placeholder="value"
+                  value={row.plainValue}
+                />
+                <button
+                  className="agent-companies-settings__env-seal"
+                  disabled={disabled || !row.key.trim() || !row.plainValue}
+                  onClick={() => void sealRow(index)}
+                  title="Store value as secret and replace with reference"
+                  type="button"
+                >
+                  Seal
+                </button>
+              </>
+            )}
+            {!isTrailing ? (
+              <button
+                aria-label="Remove environment variable"
+                className="agent-companies-settings__env-remove"
+                disabled={disabled}
+                onClick={() => removeRow(index)}
+                type="button"
+              >
+                ×
+              </button>
+            ) : (
+              <span className="agent-companies-settings__env-remove-spacer" />
+            )}
+          </div>
+        );
+      })}
+      {sealError ? <p className="agent-companies-settings__field-help" data-tone="error">{sealError}</p> : null}
+      <p className="agent-companies-settings__field-help">
+        PAPERCLIP_* variables are injected automatically at runtime.
+      </p>
+    </div>
+  );
+}
+
+function AdapterSchemaFieldGrid({
+  draft,
+  schema,
+  pending,
+  onChange
+}: {
+  draft: AdapterPresetDraft;
+  schema: AdapterConfigSchema | null;
+  pending: boolean;
+  onChange(localId: string, patch: Partial<AdapterPresetDraft>): void;
+}): React.JSX.Element {
+  const entries = Object.entries(schema?.properties ?? {}).filter(
+    ([key]) => !COMMON_ADAPTER_CONFIG_KEYS.has(key) && !ADAPTER_SECTION_CONFIG_KEYS.has(key)
+  );
+
+  if (entries.length === 0) {
+    return <></>;
+  }
+
+  const required = new Set(schema?.required ?? []);
+
+  return (
+    <div className="agent-companies-settings__native-adapter-section">
+      {entries.map(([key, field]) => (
+        <AdapterSchemaField
+          draft={draft}
+          field={field}
+          fieldKey={key}
+          key={key}
+          onChange={onChange}
+          pending={pending}
+          required={required.has(key)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AdapterSchemaField({
+  draft,
+  fieldKey,
+  field,
+  pending,
+  required,
+  onChange
+}: {
+  draft: AdapterPresetDraft;
+  fieldKey: string;
+  field: AdapterConfigFieldSchema;
+  pending: boolean;
+  required: boolean;
+  onChange(localId: string, patch: Partial<AdapterPresetDraft>): void;
+}): React.JSX.Element {
+  const fieldType = normalizeSchemaType(field.type);
+  const rawValue = getSchemaFieldValue(draft, fieldKey, field);
+  const label = `${formatSchemaFieldLabel(fieldKey, field)}${required ? " *" : ""}`;
+  const updateValue = (value: unknown) => {
+    onChange(draft.localId, {
+      schemaValues: {
+        ...draft.schemaValues,
+        [fieldKey]: value
+      }
+    });
+  };
+  const enumOptions = field.enum ?? field.options;
+  const fieldHint = getAdapterFieldHint(fieldKey, field);
+
+  return (
+    <label className="agent-companies-settings__field">
+      <AdapterFieldLabel label={label} hint={fieldHint} />
+      {isSchemaComboboxField(field) ? (
+        <>
+          <input
+            className="agent-companies-settings__native-input"
+            disabled={pending}
+            list={`schema-options-${draft.localId}-${fieldKey}`}
+            onChange={(event) => updateValue(event.target.value || undefined)}
+            placeholder={fieldHint}
+            value={typeof rawValue === "string" ? rawValue : rawValue == null ? "" : String(rawValue)}
+          />
+          {Array.isArray(enumOptions) && enumOptions.length > 0 ? (
+            <datalist id={`schema-options-${draft.localId}-${fieldKey}`}>
+              {enumOptions.map((option) => (
+                <option key={String(getSchemaOptionValue(option))} value={String(getSchemaOptionValue(option))}>
+                  {getSchemaOptionLabel(option)}
+                </option>
+              ))}
+            </datalist>
+          ) : null}
+        </>
+      ) : Array.isArray(enumOptions) && enumOptions.length > 0 ? (
+        <select
+          className="agent-companies-settings__native-select"
+          disabled={pending}
+          onChange={(event) => updateValue(event.target.value)}
+          value={rawValue === undefined || rawValue === null ? "" : String(rawValue)}
+        >
+          <option value="">Default</option>
+          {enumOptions.map((option) => (
+            <option key={String(getSchemaOptionValue(option))} value={String(getSchemaOptionValue(option))}>
+              {getSchemaOptionLabel(option)}
+            </option>
+          ))}
+        </select>
+      ) : fieldType === "boolean" ? (
+        <AdapterToggleField
+          checked={rawValue === true}
+          disabled={pending}
+          hint={fieldHint ?? ""}
+          label={rawValue === true ? "Enabled" : "Disabled"}
+          onChange={updateValue}
+        />
+      ) : field.controlType === "textarea" ? (
+        <textarea
+          className="agent-companies-settings__textarea agent-companies-settings__textarea--compact"
+          disabled={pending}
+          onChange={(event) => updateValue(event.target.value || undefined)}
+          value={typeof rawValue === "string" ? rawValue : rawValue == null ? "" : String(rawValue)}
+        />
+      ) : fieldType === "number" || fieldType === "integer" ? (
+        <input
+          className="agent-companies-settings__native-input agent-companies-settings__native-mono"
+          disabled={pending}
+          onChange={(event) => {
+            const value = event.target.value.trim();
+            updateValue(value ? Number(value) : undefined);
+          }}
+          type="number"
+          value={typeof rawValue === "number" ? String(rawValue) : ""}
+        />
+      ) : (
+        <input
+          className="agent-companies-settings__native-input"
+          disabled={pending}
+          onChange={(event) => updateValue(event.target.value || undefined)}
+          value={typeof rawValue === "string" ? rawValue : rawValue == null ? "" : String(rawValue)}
+        />
+      )}
+    </label>
+  );
+}
+
 export function AgentCompaniesSettingsPage({
   context
 }: PluginSettingsPageProps): React.JSX.Element {
@@ -4222,6 +6828,7 @@ export function AgentCompaniesSettingsPage({
   const syncCompany = usePluginAction("catalog.sync-company");
   const setCompanyAutoSync = usePluginAction("catalog.set-company-auto-sync");
   const setAutoSyncCadence = usePluginAction("catalog.set-auto-sync-cadence");
+  const setAdapterPresets = usePluginAction("catalog.set-adapter-presets");
   const addRepository = usePluginAction("catalog.add-repository");
   const removeRepository = usePluginAction("catalog.remove-repository");
   const scanRepository = usePluginAction("catalog.scan-repository");
@@ -4231,6 +6838,10 @@ export function AgentCompaniesSettingsPage({
   const catalog = data ?? EMPTY_CATALOG;
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const [repositoryInput, setRepositoryInput] = useState("");
+  const [adapterPresetDrafts, setAdapterPresetDrafts] = useState<AdapterPresetDraft[]>([]);
+  const [hostAdapters, setHostAdapters] = useState<HostAdapterInfo[]>([]);
+  const [hostAdaptersError, setHostAdaptersError] = useState<string | null>(null);
+  const [adapterSchemas, setAdapterSchemas] = useState<Record<string, AdapterConfigSchema | null>>({});
   const [autoSyncCadenceInput, setAutoSyncCadenceInput] = useState(
     String(DEFAULT_AUTO_SYNC_CADENCE_HOURS)
   );
@@ -4308,6 +6919,80 @@ export function AgentCompaniesSettingsPage({
   useEffect(() => {
     setAutoSyncCadenceInput(String(catalog.autoSyncCadenceHours));
   }, [catalog.autoSyncCadenceHours]);
+
+  useEffect(() => {
+    setAdapterPresetDrafts(
+      catalog.adapterPresets.map((preset, index) => createAdapterPresetDraft(preset, index))
+    );
+  }, [catalog.adapterPresets]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadHostAdapters(): Promise<void> {
+      try {
+        const adapters = normalizeHostAdapters(await fetchHostJson<unknown>("/api/adapters"));
+        if (cancelled) {
+          return;
+        }
+
+        setHostAdapters(adapters);
+        setHostAdaptersError(null);
+      } catch (loadError) {
+        if (cancelled) {
+          return;
+        }
+
+        setHostAdaptersError(getErrorMessage(loadError));
+      }
+    }
+
+    void loadHostAdapters();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const adapterTypes = new Set(
+      adapterPresetDrafts
+        .map((draft) => draft.adapterType.trim())
+        .filter(Boolean)
+        .filter((adapterType) => !Object.prototype.hasOwnProperty.call(adapterSchemas, adapterType))
+    );
+
+    if (adapterTypes.size === 0) {
+      return;
+    }
+
+    async function loadSchemas(): Promise<void> {
+      const nextSchemas: Record<string, AdapterConfigSchema | null> = {};
+      for (const adapterType of adapterTypes) {
+        try {
+          nextSchemas[adapterType] = normalizeAdapterConfigSchema(
+            await fetchHostJson<unknown>(`/api/adapters/${encodeURIComponent(adapterType)}/config-schema`)
+          );
+        } catch {
+          nextSchemas[adapterType] = null;
+        }
+      }
+
+      if (!cancelled) {
+        setAdapterSchemas((current) => ({
+          ...current,
+          ...nextSchemas
+        }));
+      }
+    }
+
+    void loadSchemas();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [adapterPresetDrafts, adapterSchemas]);
 
   async function ensurePaperclipApiBaseRegistered(): Promise<void> {
     const apiBase = resolveBrowserOrigin();
@@ -4467,6 +7152,7 @@ export function AgentCompaniesSettingsPage({
         company.contents,
         createDefaultCompanyImportSelection()
       ),
+      adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
       collisionStrategy: "replace"
     });
     setImportError(null);
@@ -4501,6 +7187,7 @@ export function AgentCompaniesSettingsPage({
         company.contents,
         createDefaultCompanyImportSelection()
       ),
+      adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
       collisionStrategy: "replace"
     });
     setImportError(null);
@@ -4530,6 +7217,9 @@ export function AgentCompaniesSettingsPage({
       selection: resolveCompanyImportSelection(
         company.contents,
         cloneCompanyImportSelection(company.importedCompany.selection)
+      ),
+      adapterPresetSelection: cloneImportAdapterPresetSelection(
+        company.importedCompany.adapterPresetSelection
       ),
       collisionStrategy: company.importedCompany.syncCollisionStrategy
     });
@@ -4572,6 +7262,11 @@ export function AgentCompaniesSettingsPage({
       const selectedAgentSlugs = getSelectedCompanyContentSlugs(
         importCompany.contents.agents,
         preparedImport.selection.agents
+      );
+      const adapterOverrides = buildAdapterOverridesFromPresets(
+        catalog.adapterPresets,
+        selectedAgentSlugs,
+        importDialog.adapterPresetSelection
       );
       const preIssueImportInclude = buildPaperclipImportInclude(
         preparedImport.selection,
@@ -4633,7 +7328,8 @@ export function AgentCompaniesSettingsPage({
             source: preIssueImportSource,
             include: preIssueImportInclude,
             target,
-            collisionStrategy: importDialog.collisionStrategy
+            collisionStrategy: importDialog.collisionStrategy,
+            ...(adapterOverrides ? { adapterOverrides } : {})
           })
         });
       }
@@ -4795,6 +7491,7 @@ export function AgentCompaniesSettingsPage({
             importedCompanyName,
             importedCompanyIssuePrefix,
             selection: preparedImport.selection,
+            adapterPresetSelection: importDialog.adapterPresetSelection,
             syncCollisionStrategy: importDialog.collisionStrategy,
             issuesBeforeImport
           });
@@ -4811,6 +7508,9 @@ export function AgentCompaniesSettingsPage({
           : warningDetails.length;
         const importDetails = [
           `Selected contents: ${buildCompanyImportSelectionSummary(preparedImport.selection, importCompany.contents)}`,
+          adapterOverrides
+            ? `Adapter overrides: ${Object.keys(adapterOverrides).length} selected agent${Object.keys(adapterOverrides).length === 1 ? "" : "s"}.`
+            : "Adapter overrides: package defaults.",
           getRecurringTaskImportHint(importCompany.contents),
           `Auto-sync: enabled ${formatAutoSyncCadenceLabel(catalog.autoSyncCadenceHours)} by default after import.`,
           importDialog.collisionStrategy === "replace"
@@ -4896,6 +7596,43 @@ export function AgentCompaniesSettingsPage({
           }
         : currentDialog
     );
+  }
+
+  function handleChangeDefaultAdapterPreset(value: string): void {
+    setImportDialog((currentDialog) =>
+      currentDialog
+        ? {
+            ...currentDialog,
+            adapterPresetSelection: {
+              ...currentDialog.adapterPresetSelection,
+              defaultPresetId: value === "__package__" ? null : value
+            }
+          }
+        : currentDialog
+    );
+  }
+
+  function handleChangeAgentAdapterPreset(agentSlug: string, value: string): void {
+    setImportDialog((currentDialog) => {
+      if (!currentDialog) {
+        return currentDialog;
+      }
+
+      const agentPresetIds = { ...currentDialog.adapterPresetSelection.agentPresetIds };
+      if (value === "__default__") {
+        delete agentPresetIds[agentSlug];
+      } else {
+        agentPresetIds[agentSlug] = value === "__package__" ? null : value;
+      }
+
+      return {
+        ...currentDialog,
+        adapterPresetSelection: {
+          ...currentDialog.adapterPresetSelection,
+          agentPresetIds
+        }
+      };
+    });
   }
 
   function handleToggleImportSelectionPart(
@@ -5027,6 +7764,77 @@ export function AgentCompaniesSettingsPage({
     } catch (actionError) {
       setNotice({
         tone: "error",
+        text: getErrorMessage(actionError)
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  function handleAddAdapterPreset(): void {
+    const adapterType =
+      hostAdapters.find((adapter) => !adapter.disabled)?.type ??
+      hostAdapters[0]?.type ??
+      "claude_local";
+
+    setAdapterPresetDrafts((currentDrafts) => [
+      ...currentDrafts,
+      createEmptyAdapterPresetDraft(adapterType, currentDrafts.length)
+    ]);
+  }
+
+  function handleRemoveAdapterPreset(localId: string): void {
+    setAdapterPresetDrafts((currentDrafts) =>
+      currentDrafts.filter((draft) => draft.localId !== localId)
+    );
+  }
+
+  function handleChangeAdapterPresetDraft(
+    localId: string,
+    patch: Partial<AdapterPresetDraft>
+  ): void {
+    setAdapterPresetDrafts((currentDrafts) =>
+      currentDrafts.map((draft) =>
+        draft.localId === localId
+          ? {
+              ...draft,
+              ...patch
+            }
+          : draft
+      )
+    );
+  }
+
+  async function handleSaveAdapterPresets(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    let adapterPresets: AdapterPreset[];
+    try {
+      adapterPresets = buildAdapterPresetPayload(adapterPresetDrafts);
+    } catch (buildError) {
+      setNotice({
+        tone: "error",
+        title: "Adapter presets not saved",
+        text: getErrorMessage(buildError)
+      });
+      return;
+    }
+
+    setPendingAction({ kind: "updating-adapter-presets" });
+    setNotice(null);
+
+    try {
+      await setAdapterPresets({ adapterPresets });
+      refresh();
+      setNotice({
+        tone: "success",
+        title: "Adapter presets saved",
+        text: "Imports can now use these presets as defaults or per-agent overrides."
+      });
+    } catch (actionError) {
+      setNotice({
+        tone: "error",
+        title: "Adapter presets not saved",
         text: getErrorMessage(actionError)
       });
     } finally {
@@ -5471,6 +8279,43 @@ export function AgentCompaniesSettingsPage({
         </div>
       </section>
 
+      <section className="agent-companies-settings__panel">
+        <div className="agent-companies-settings__panel-head">
+          <div>
+            <h2 className="agent-companies-settings__panel-title">Adapter Presets</h2>
+            <p className="agent-companies-settings__panel-copy">
+              Named adapter configurations become import defaults and per-agent overrides. Adapter types and schema fields are read from the running Paperclip host.
+            </p>
+          </div>
+          <div className="agent-companies-settings__badge-row">
+            <span className="agent-companies-settings__badge agent-companies-settings__badge--accent">
+              {catalog.adapterPresets.length} preset{catalog.adapterPresets.length === 1 ? "" : "s"}
+            </span>
+            {hostAdapters.length > 0 ? (
+              <span className="agent-companies-settings__badge">
+                {hostAdapters.length} adapter type{hostAdapters.length === 1 ? "" : "s"}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        {hostAdaptersError ? (
+          <div className="agent-companies-settings__notice" data-tone="error">
+            Adapter registry unavailable: {hostAdaptersError}
+          </div>
+        ) : null}
+        <AdapterPresetBuilder
+          adapterSchemas={adapterSchemas}
+          companyId={context.companyId ?? null}
+          drafts={adapterPresetDrafts}
+          hostAdapters={hostAdapters}
+          onAdd={handleAddAdapterPreset}
+          onChange={handleChangeAdapterPresetDraft}
+          onRemove={handleRemoveAdapterPreset}
+          onSave={(event) => void handleSaveAdapterPresets(event)}
+          pending={pendingAction !== null}
+        />
+      </section>
+
       <div className="agent-companies-settings__layout">
         <section className="agent-companies-settings__panel">
           <div className="agent-companies-settings__panel-head">
@@ -5707,12 +8552,15 @@ export function AgentCompaniesSettingsPage({
 
       {importCompany && importDialog ? (
         <ImportCompanyDialog
+          adapterPresets={catalog.adapterPresets}
           company={importCompany}
           dialogState={importDialog}
           errorText={importError}
           importState={importState}
+          onChangeAgentAdapterPreset={handleChangeAgentAdapterPreset}
           onChangeCollisionStrategy={handleChangeImportCollisionStrategy}
           onChangeCompanyName={handleChangeImportCompanyName}
+          onChangeDefaultAdapterPreset={handleChangeDefaultAdapterPreset}
           onClose={() => {
             if (importState) {
               return;
