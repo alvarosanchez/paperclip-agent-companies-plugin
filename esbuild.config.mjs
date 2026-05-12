@@ -1,4 +1,5 @@
 import esbuild from "esbuild";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createPluginBundlerPresets } from "@paperclipai/plugin-sdk/bundlers";
 
@@ -6,10 +7,13 @@ const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
 const watch = process.argv.includes("--watch");
 const sourcemap = watch;
 const yamlBrowserEntry = fileURLToPath(new URL("./node_modules/yaml/browser/index.js", import.meta.url));
+const packageJson = JSON.parse(await readFile(new URL("./package.json", import.meta.url), "utf8"));
+const packageVersion = typeof packageJson.version === "string" ? packageJson.version : "0.0.0-dev";
 
 const catalogCtx = await esbuild.context({
-  entryPoints: ["src/catalog.ts"],
-  outfile: "dist/catalog.js",
+  entryPoints: ["src/catalog.ts", "src/plugin-constants.ts"],
+  outdir: "dist",
+  entryNames: "[name]",
   format: "esm",
   platform: "neutral",
   target: "es2022",
@@ -27,7 +31,10 @@ const workerCtx = await esbuild.context({
 });
 const manifestCtx = await esbuild.context({
   ...presets.esbuild.manifest,
-  sourcemap
+  sourcemap,
+  define: {
+    __PACKAGE_VERSION__: JSON.stringify(packageVersion)
+  }
 });
 const uiCtx = await esbuild.context({
   ...presets.esbuild.ui,

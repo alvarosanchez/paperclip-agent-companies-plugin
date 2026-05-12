@@ -1,12 +1,13 @@
-import { createRequire } from "node:module";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
-import { DEFAULT_AUTO_SYNC_CADENCE_HOURS, PLUGIN_DISPLAY_NAME, PLUGIN_ID } from "./catalog.js";
+import { DEFAULT_AUTO_SYNC_CADENCE_HOURS, PLUGIN_DISPLAY_NAME, PLUGIN_ID } from "./plugin-constants.js";
 
-const require = createRequire(import.meta.url);
-const packageJson = require("../package.json") as { version?: unknown };
+declare const __PACKAGE_VERSION__: string | undefined;
+
+const BUILD_PACKAGE_VERSION =
+  typeof __PACKAGE_VERSION__ === "string" ? __PACKAGE_VERSION__.trim() : "";
 const MANIFEST_VERSION =
   process.env.PLUGIN_VERSION?.trim() ||
-  (typeof packageJson.version === "string" && packageJson.version.trim()) ||
+  BUILD_PACKAGE_VERSION ||
   process.env.npm_package_version?.trim() ||
   "0.0.0-dev";
 
