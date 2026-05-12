@@ -11,8 +11,9 @@ const packageJson = JSON.parse(await readFile(new URL("./package.json", import.m
 const packageVersion = typeof packageJson.version === "string" ? packageJson.version : "0.0.0-dev";
 
 const catalogCtx = await esbuild.context({
-  entryPoints: ["src/catalog.ts"],
-  outfile: "dist/catalog.js",
+  entryPoints: ["src/catalog.ts", "src/plugin-constants.ts"],
+  outdir: "dist",
+  entryNames: "[name]",
   format: "esm",
   platform: "neutral",
   target: "es2022",

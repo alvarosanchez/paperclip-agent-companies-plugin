@@ -498,6 +498,13 @@ describe("agent companies plugin", () => {
     }
   });
 
+  it("emits the dependency-light constants module used by the unbundled catalog build", async () => {
+    const buildConfig = await readFile(join(process.cwd(), "esbuild.config.mjs"), "utf8");
+
+    expect(buildConfig).toContain('entryPoints: ["src/catalog.ts", "src/plugin-constants.ts"]');
+    expect(buildConfig).toContain('outdir: "dist"');
+  });
+
   it("detects authenticated Paperclip deployments as requiring board access", () => {
     expect(
       requiresPaperclipBoardAccess({
