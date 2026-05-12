@@ -1,0 +1,10 @@
+export const PLUGIN_ID = "paperclip-agent-companies-plugin";
+export const PLUGIN_DISPLAY_NAME = "Agent Companies Plugin";
+export const DEFAULT_REPOSITORY_URL = "https://github.com/paperclipai/companies";
+export const CATALOG_STATE_KEY = "agent-companies.catalog.v1";
+export const AGENT_COMPANIES_SCHEMA = "agentcompanies/v1";
+export const COMPANY_CONTENT_KEYS = ["agents", "projects", "tasks", "issues", "skills"] as const;
+export const DEFAULT_AUTO_SYNC_ENABLED = true;
+export const DEFAULT_AUTO_SYNC_CADENCE_HOURS = 24;
+export const MIN_AUTO_SYNC_CADENCE_HOURS = 1;
+export const DEFAULT_SYNC_COLLISION_STRATEGY = "replace" as const;

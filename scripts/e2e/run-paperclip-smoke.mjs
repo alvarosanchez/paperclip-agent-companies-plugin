@@ -16,9 +16,16 @@ const instanceId = 'paperclip-agent-companies-plugin-e2e';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
 const settingsPageHeading = 'Repository Sources';
+const seedCompanyNames = [
+  'Alpha Seed Company',
+  'Beta Seed Company',
+  'Gamma Seed Company',
+  'Delta Seed Company',
+  'Epsilon Seed Company'
+];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.428.0';
+const defaultPaperclipPackageVersion = '2026.512.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const defaultTimeoutMs = 30000;
 const env = {
@@ -556,7 +563,7 @@ async function ensureCompaniesSeeded(minimumCount = 2) {
     const createdCompany = await fetchJson(companiesUrl, {
       method: 'POST',
       body: JSON.stringify({
-        name: `Dummy Company ${ordinal}`,
+        name: seedCompanyNames[ordinal - 1] ?? `Zeta Seed Company ${ordinal}`,
         description: `Seed company ${ordinal} for paperclip-agent-companies-plugin e2e verification.`
       })
     });
@@ -614,7 +621,7 @@ async function cleanup() {
     }
   }
 
-  await rm(stateRoot, { recursive: true, force: true });
+  await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
 }
 
 async function gotoWithTimeout(page, url) {
@@ -762,7 +769,7 @@ async function main() {
       hasText: 'Modal Demo Company'
     });
     await fixtureCompanyCard.first().waitFor({ timeout: 120000 });
-    const importTargetCompany = seededCompanies.find((company) => company?.name === 'Dummy Company 2') ?? seededCompanies[1];
+    const importTargetCompany = seededCompanies.find((company) => company?.name === 'Beta Seed Company') ?? seededCompanies[1];
     if (!importTargetCompany?.id || !importTargetCompany?.name) {
       throw new Error('Expected a second seeded company to exist for the Import into... smoke flow.');
     }
