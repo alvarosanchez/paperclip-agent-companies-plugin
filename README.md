@@ -27,7 +27,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 ## Requirements
 
 - Node.js 20 or newer
-- A Paperclip instance with plugin support, version `2026.512.0` or newer
+- A Paperclip instance with plugin support, version `2026.517.0` or newer
 - `git` available in the plugin worker environment for remote repositories
 - Access to any private repositories you want to scan
 
@@ -165,7 +165,7 @@ pnpm build
 
 Additional verification commands:
 
-- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups and recurring routine in-place sync against a disposable Paperclip `paperclipai@2026.512.0` instance
+- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups and recurring routine in-place sync against a disposable Paperclip `paperclipai@2026.517.0` instance
 - `pnpm verify:manual` for an interactive local verification run against the same disposable Paperclip release target
 
 Set `PAPERCLIP_E2E_PAPERCLIP_VERSION=<version>` to test a different `paperclipai` npm release in either disposable harness.
@@ -174,7 +174,7 @@ Manual verification highlights:
 
 - In **Imported Companies**, confirm the auto-sync cadence input defaults to `24` hours and updates the next-run messaging when you save a different value.
 - Toggle **Auto-sync** off and back on for a tracked import to verify the per-company setting still applies immediately.
-- On Paperclip `2026.512.0`, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
+- On Paperclip `2026.517.0`, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
 
 ## Release Versioning
 

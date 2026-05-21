@@ -58,7 +58,7 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
-const TARGET_PAPERCLIP_RELEASE = "2026.512.0";
+const TARGET_PAPERCLIP_RELEASE = "2026.517.0";
 
 function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
   const timestamp = new Date("2026-04-14T09:23:00.000Z");
