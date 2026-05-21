@@ -30,7 +30,7 @@ const seedCompanyNames = [
 ];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.512.0';
+const defaultPaperclipPackageVersion = '2026.517.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const env = {
   ...process.env,
@@ -550,7 +550,7 @@ async function main() {
   console.log('Confirm that Beta Seed Company disappears from later Import into... dropdowns after it becomes a tracked synced import.');
   console.log('Confirm that the imported company appears in the separate Imported Companies section with an Imported version badge, a disabled Up to date action, a checked Auto-sync toggle, a visible Sync contract summary, and a Re-import / Edit selection action.');
   console.log('When the imported selection includes an assigned task, confirm the imported assignee still shows timer heartbeats disabled and that the agent nevertheless received a recent non-timer heartbeat run for the imported issue after import.');
-  console.log('On Paperclip 2026.512.0, imported agents should normally skip pending approval unless the target company explicitly opted into new-agent approval.');
+  console.log(`On Paperclip ${paperclipPackageVersion}, imported agents should normally skip pending approval unless the target company explicitly opted into new-agent approval.`);
   console.log('Use Re-import / Edit selection to change the saved selection and verify the Sync contract summary updates on the tracked company card.');
   console.log('Optional: open the plugin from another existing non-synced company and verify that Import into... can adopt that company too when it is not already tracked.');
   console.log('Change the source company version, click Rescan, and confirm the tracked company card shows the newer Latest version badge and the action switches to Sync now.');
