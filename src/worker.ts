@@ -1077,6 +1077,19 @@ function getRequiredString(params: Record<string, unknown>, key: string): string
   return value;
 }
 
+function getOptionalCatalogSourceCompanyId(params: Record<string, unknown>): string | null {
+  return asNonEmptyString(params.sourceCompanyId) ?? asNonEmptyString(params.companyId);
+}
+
+function getCatalogSourceCompanyId(params: Record<string, unknown>): string {
+  const sourceCompanyId = getOptionalCatalogSourceCompanyId(params);
+  if (!sourceCompanyId) {
+    throw new Error("sourceCompanyId or companyId is required.");
+  }
+
+  return sourceCompanyId;
+}
+
 function getRequiredInteger(
   params: Record<string, unknown>,
   key: string,
@@ -4631,20 +4644,25 @@ async function requestLegacyPaperclipIssueWake(
   );
 }
 
-function isBacklogPluginWakeCompatibilityError(
-  error: unknown,
-  target: PaperclipIssueWakeTarget
-): boolean {
-  return target.issueStatus === "backlog"
-    && summarizeErrorMessage(error).toLowerCase().includes("not wakeable in status: backlog");
+function isBacklogPluginWakeCompatibilityError(error: unknown): boolean {
+  return summarizeErrorMessage(error).toLowerCase().includes("not wakeable in status: backlog");
 }
 
-async function requestLegacyBacklogPaperclipIssueWake(
+function isPluginInvocationScopeDeniedError(error: unknown): boolean {
+  const code = isRecord(error) && typeof error.code === "number" ? error.code : null;
+  const message = summarizeErrorMessage(error).toLowerCase();
+  return code === -32005
+    || message.includes("current invocation is scoped")
+    || message.includes("invocation_scope_denied");
+}
+
+async function requestLegacyPaperclipIssueWakeForCompany(
   ctx: PluginContext,
   companyId: string,
-  target: PaperclipIssueWakeTarget
+  target: PaperclipIssueWakeTarget,
+  message: string
 ): Promise<PaperclipIssueWakeRequestResult> {
-  ctx.logger.info("Falling back to legacy Paperclip agent wake route for imported backlog issue", {
+  ctx.logger.info(message, {
     companyId,
     agentId: target.agentId,
     issueId: target.issueId,
@@ -4653,6 +4671,19 @@ async function requestLegacyBacklogPaperclipIssueWake(
 
   const connection = await resolvePaperclipApiConnection(ctx, companyId);
   return requestLegacyPaperclipIssueWake(connection, target);
+}
+
+async function requestLegacyBacklogPaperclipIssueWake(
+  ctx: PluginContext,
+  companyId: string,
+  target: PaperclipIssueWakeTarget
+): Promise<PaperclipIssueWakeRequestResult> {
+  return requestLegacyPaperclipIssueWakeForCompany(
+    ctx,
+    companyId,
+    target,
+    "Falling back to legacy Paperclip agent wake route for imported backlog issue"
+  );
 }
 
 async function requestPaperclipIssueWake(
@@ -4681,11 +4712,20 @@ async function requestPaperclipIssueWake(
       reusedExistingExecution: false
     };
   } catch (error) {
-    if (!isBacklogPluginWakeCompatibilityError(error, target)) {
-      throw error;
+    if (isBacklogPluginWakeCompatibilityError(error)) {
+      return requestLegacyBacklogPaperclipIssueWake(ctx, companyId, target);
     }
 
-    return requestLegacyBacklogPaperclipIssueWake(ctx, companyId, target);
+    if (isPluginInvocationScopeDeniedError(error)) {
+      return requestLegacyPaperclipIssueWakeForCompany(
+        ctx,
+        companyId,
+        target,
+        "Falling back to legacy Paperclip agent wake route because the current plugin invocation is scoped to another company"
+      );
+    }
+
+    throw error;
   }
 }
 
@@ -4802,11 +4842,20 @@ async function requestWakeForNewlyAssignedPaperclipIssues(
   try {
     afterIssues = await listPaperclipCompanyIssuesFromHost(ctx, companyId);
   } catch (error) {
-    ctx.logger.warn("Skipped Paperclip issue wake requests because the latest issue list could not be read", {
-      companyId,
-      error: summarizeErrorMessage(error)
-    });
-    return;
+    if (isPluginInvocationScopeDeniedError(error)) {
+      const fallbackIssues = await tryFetchPaperclipCompanyIssues(ctx, companyId);
+      if (fallbackIssues) {
+        afterIssues = fallbackIssues;
+      } else {
+        return;
+      }
+    } else {
+      ctx.logger.warn("Skipped Paperclip issue wake requests because the latest issue list could not be read", {
+        companyId,
+        error: summarizeErrorMessage(error)
+      });
+      return;
+    }
   }
 
   const wakeTargets = selectPaperclipIssueWakeTargets(beforeIssues, afterIssues);
@@ -5260,20 +5309,20 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
 
       ctx.data.register("catalog.company-content.read", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
-        const companyId = asNonEmptyString(params.companyId);
+        const sourceCompanyId = getOptionalCatalogSourceCompanyId(params);
         const itemPath = asNonEmptyString(params.itemPath);
 
-        if (!companyId || !itemPath) {
+        if (!sourceCompanyId || !itemPath) {
           return null;
         }
 
-        return readCatalogCompanyContentDetail(ctx, companyId, itemPath);
+        return readCatalogCompanyContentDetail(ctx, sourceCompanyId, itemPath);
       });
 
       ctx.actions.register("catalog.prepare-company-import", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
-        const companyId = getRequiredString(params, "companyId");
-        return buildCatalogCompanyImportSource(ctx, companyId, params.selection);
+        const sourceCompanyId = getCatalogSourceCompanyId(params);
+        return buildCatalogCompanyImportSource(ctx, sourceCompanyId, params.selection);
       });
 
       ctx.actions.register("paperclip-runtime.set-api-base", async (rawParams) => {

@@ -15,6 +15,7 @@ const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-agent-companies-plugin-e2e';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
+const companySettingsPath = '/company/settings/agent-companies';
 const settingsPageHeading = 'Repository Sources';
 const seedCompanyNames = [
   'Alpha Seed Company',
@@ -25,7 +26,7 @@ const seedCompanyNames = [
 ];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.517.0';
+const defaultPaperclipPackageVersion = '2026.529.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const defaultTimeoutMs = 30000;
 const env = {
@@ -699,6 +700,7 @@ async function main() {
   page.setDefaultTimeout(defaultTimeoutMs);
   const consoleMessages = [];
   const pageErrors = [];
+  const pluginUiRequests = [];
 
   page.on('console', (message) => {
     consoleMessages.push({
@@ -708,6 +710,27 @@ async function main() {
   });
   page.on('pageerror', (error) => {
     pageErrors.push(error instanceof Error ? error.stack ?? error.message : String(error));
+  });
+  page.on('requestfailed', (request) => {
+    const url = request.url();
+    if (url.includes('/api/plugins/ui-contributions') || url.includes('/_plugins/')) {
+      pluginUiRequests.push({
+        method: request.method(),
+        status: 'failed',
+        url,
+        failure: request.failure()?.errorText ?? null
+      });
+    }
+  });
+  page.on('response', (response) => {
+    const url = response.url();
+    if (url.includes('/api/plugins/ui-contributions') || url.includes('/_plugins/')) {
+      pluginUiRequests.push({
+        method: response.request().method(),
+        status: response.status(),
+        url
+      });
+    }
   });
 
   try {
@@ -964,6 +987,22 @@ async function main() {
     await importedCompanyCard.getByText(syncContractSummary, { exact: false }).waitFor({ timeout: 120000 });
     await importedCompanyCard.getByText('Imported v1.0.0', { exact: false }).waitFor({ timeout: 120000 });
 
+    if (!importedCompany.issuePrefix) {
+      throw new Error(`Expected imported company "${importTargetCompany.name}" to include an issue prefix for company settings routing.`);
+    }
+    const companySettingsUrl = new URL(`/${importedCompany.issuePrefix}${companySettingsPath}`, baseUrl).toString();
+    await page.evaluate((path) => {
+      window.history.pushState({}, '', path);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }, `/${importedCompany.issuePrefix}${companySettingsPath}`);
+    log(`Opened company settings page: ${companySettingsUrl}`);
+    await page.waitForURL(companySettingsUrl, { timeout: 120000 });
+    await page.getByText(settingsPageHeading, { exact: true }).first().waitFor({ timeout: 120000 });
+    await page.locator('[data-testid="catalog-page"]').waitFor({ timeout: 120000 });
+    await page.getByText('Board access connection', { exact: false }).first().waitFor({ timeout: 120000 });
+    await importedCompanyCard.first().waitFor({ timeout: 120000 });
+    await importedCompanyCard.getByText(syncContractSummary, { exact: false }).waitFor({ timeout: 120000 });
+
     await importIntoTrigger.click();
     const remainingImportTargets = page.locator('[data-testid="company-import-target-option"]');
     await remainingImportTargets.first().waitFor({ timeout: 120000 });
@@ -1145,7 +1184,8 @@ async function main() {
           finalUrl: page.url(),
           bodyText,
           consoleMessages,
-          pageErrors
+          pageErrors,
+          pluginUiRequests
         },
         null,
         2

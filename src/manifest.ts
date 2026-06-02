@@ -53,6 +53,13 @@ const manifest: PaperclipPluginManifestV1 = {
         id: "agent-companies-settings",
         displayName: "Repository Catalog",
         exportName: "AgentCompaniesSettingsPage"
+      },
+      {
+        type: "companySettingsPage",
+        id: "agent-companies-company-settings",
+        displayName: "Agent Companies",
+        exportName: "AgentCompaniesSettingsPage",
+        routePath: "agent-companies"
       }
     ]
   }

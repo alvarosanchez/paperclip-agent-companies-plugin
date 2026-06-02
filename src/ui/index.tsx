@@ -3473,7 +3473,7 @@ function adapterShowsCodexToggles(adapterType: string): boolean {
   return adapterType === "codex_local";
 }
 
-export function buildAdapterPresetConfig(draft: AdapterPresetDraft): Record<string, unknown> {
+function buildAdapterPresetConfig(draft: AdapterPresetDraft): Record<string, unknown> {
   const adapterConfig: Record<string, unknown> = {
     ...parseAdapterPresetAdvancedJson(draft)
   };
@@ -3572,7 +3572,7 @@ export function buildAdapterPresetConfig(draft: AdapterPresetDraft): Record<stri
   return adapterConfig;
 }
 
-export function buildAdapterPresetPayload(drafts: AdapterPresetDraft[]): AdapterPreset[] {
+function buildAdapterPresetPayload(drafts: AdapterPresetDraft[]): AdapterPreset[] {
   return drafts.flatMap((draft, index): AdapterPreset[] => {
     const id = createAdapterPresetId(draft.name, index);
     const name = draft.name.trim();
@@ -3593,6 +3593,11 @@ export function buildAdapterPresetPayload(drafts: AdapterPresetDraft[]): Adapter
     }];
   });
 }
+
+export const adapterPresetTestUtils = {
+  buildAdapterPresetConfig,
+  buildAdapterPresetPayload
+};
 
 async function resolveOrCreateCompanySecret(
   companyId: string,
@@ -4976,7 +4981,7 @@ function CompanyDetailsDialog(props: {
     "catalog.company-content.read",
     selectedSelection
       ? {
-          companyId: company.id,
+          sourceCompanyId: company.id,
           itemPath: selectedSelection.item.path
         }
       : {}
@@ -7255,7 +7260,7 @@ export function AgentCompaniesSettingsPage({
     try {
       await ensurePaperclipApiBaseRegistered();
       const preparedImport = await prepareCompanyImport({
-        companyId: importCompany.id,
+        sourceCompanyId: importCompany.id,
         selection: importDialog.selection
       }) as CatalogPreparedCompanyImport;
       const postImportDetails: string[] = [];

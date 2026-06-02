@@ -18,6 +18,7 @@ const instanceId = 'paperclip-agent-companies-plugin-manual';
 const pluginId = 'paperclip-agent-companies-plugin';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
+const companySettingsPath = '/company/settings/agent-companies';
 const settingsPageHeading = 'Repository Sources';
 const defaultRepositoryUrl = 'https://github.com/paperclipai/companies';
 const manualVerificationRepositoryUrl = 'https://github.com/alvarosanchez/micronaut-agent-company';
@@ -30,7 +31,7 @@ const seedCompanyNames = [
 ];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.517.0';
+const defaultPaperclipPackageVersion = '2026.529.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const env = {
   ...process.env,
@@ -525,11 +526,18 @@ async function main() {
   await ensurePluginInstalled(configPath);
   await ensureManualVerificationRepositoryConfigured();
   const manualUrl = new URL(settingsIndexPath, baseUrl).toString();
+  const firstCompanyPrefix = companies.find((company) => typeof company?.issuePrefix === 'string')?.issuePrefix ?? null;
+  const companySettingsUrl = firstCompanyPrefix
+    ? new URL(`/${firstCompanyPrefix}${companySettingsPath}`, baseUrl).toString()
+    : null;
   await runCommand('open', [manualUrl], { stdio: 'ignore' });
 
   console.log('');
   console.log('Manual verification instance is ready.');
   console.log(`Open: ${manualUrl}`);
+  if (companySettingsUrl) {
+    console.log(`Company settings route: ${companySettingsUrl}`);
+  }
   console.log(`Seeded companies: ${companies.map((company) => company?.name ?? 'Unknown company').join(', ')}`);
   console.log(`Plugin: ${pluginDisplayName}`);
   console.log(`Paperclip package: paperclipai@${paperclipPackageVersion}`);
@@ -542,6 +550,7 @@ async function main() {
   }
   console.log('The URL has been opened in your default browser.');
   console.log(`Open ${pluginDisplayName} from the installed plugins list.`);
+  console.log('Open the company settings route and confirm the same settings page mounts under Company Settings > Agent Companies.');
   console.log(`Confirm that the ${settingsPageHeading} settings page shows the preloaded ${manualVerificationRepositoryUrl} source.`);
   console.log('Confirm that the Imported Companies section shows an auto-sync cadence input defaulting to 24 hours before you import anything.');
   console.log('Confirm that discovered companies are listed and each card shows both Import as new company and Import into... actions.');
