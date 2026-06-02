@@ -1084,7 +1084,7 @@ function getOptionalCatalogSourceCompanyId(params: Record<string, unknown>): str
 function getCatalogSourceCompanyId(params: Record<string, unknown>): string {
   const sourceCompanyId = getOptionalCatalogSourceCompanyId(params);
   if (!sourceCompanyId) {
-    throw new Error("sourceCompanyId is required.");
+    throw new Error("sourceCompanyId or companyId is required.");
   }
 
   return sourceCompanyId;
@@ -4644,12 +4644,8 @@ async function requestLegacyPaperclipIssueWake(
   );
 }
 
-function isBacklogPluginWakeCompatibilityError(
-  error: unknown,
-  target: PaperclipIssueWakeTarget
-): boolean {
-  return target.issueStatus === "backlog"
-    && summarizeErrorMessage(error).toLowerCase().includes("not wakeable in status: backlog");
+function isBacklogPluginWakeCompatibilityError(error: unknown): boolean {
+  return summarizeErrorMessage(error).toLowerCase().includes("not wakeable in status: backlog");
 }
 
 function isPluginInvocationScopeDeniedError(error: unknown): boolean {
@@ -4716,7 +4712,7 @@ async function requestPaperclipIssueWake(
       reusedExistingExecution: false
     };
   } catch (error) {
-    if (isBacklogPluginWakeCompatibilityError(error, target)) {
+    if (isBacklogPluginWakeCompatibilityError(error)) {
       return requestLegacyBacklogPaperclipIssueWake(ctx, companyId, target);
     }
 

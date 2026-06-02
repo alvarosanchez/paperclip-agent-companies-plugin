@@ -1130,6 +1130,22 @@ routines:
     expect(prepared.companyName).toBe("Alpha Labs");
   });
 
+  it("explains the accepted catalog source id aliases when preparing imports", async () => {
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:04.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await plugin.definition.setup(harness.ctx);
+
+    await expect(harness.performAction("catalog.prepare-company-import", {})).rejects.toThrow(
+      "sourceCompanyId or companyId is required."
+    );
+  });
+
   it("packages selected company parts and items as an inline import source", async () => {
     const repositoryPath = await createRepositoryFixture();
     const plugin = createAgentCompaniesPlugin({
@@ -4206,6 +4222,140 @@ Lead Alpha Labs and coordinate the delivery pipeline.
             issueIdentifier: "ALP-1",
             wakeSource: "on_demand",
             wakeRunId: "run-legacy-123",
+            reusedExistingExecution: false
+          })
+        })
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("falls back to legacy wakes when the host reports an assigned issue is backlog", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; method: string; body: unknown }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? "GET";
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        method,
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/agents/agent-123/wakeup") {
+        return new Response(
+          JSON.stringify({
+            id: "run-legacy-backlog-123",
+            status: "queued"
+          }),
+          {
+            status: 202,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+      (harness.ctx.issues as unknown as {
+        requestWakeup(): Promise<unknown>;
+      }).requestWakeup = async () => {
+        throw new Error("Issue is not wakeable in status: backlog");
+      };
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      harness.seed({
+        issues: [
+          createIssueRecord({
+            id: "issue-1",
+            companyId: "paperclip-company-123",
+            identifier: "ALP-1",
+            title: "Seed Default Company",
+            status: "todo",
+            assigneeAgentId: "agent-123"
+          })
+        ]
+      });
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP",
+        issuesBeforeImport: []
+      });
+
+      expect(fetchRequests).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
+          method: "POST",
+          body: {
+            source: "on_demand",
+            triggerDetail: "manual",
+            reason: "issue_assigned",
+            payload: {
+              issueId: "issue-1",
+              taskId: "issue-1",
+              mutation: "import"
+            }
+          }
+        }
+      ]);
+      expect(harness.logs).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          message: "Queued Paperclip wake request for a newly assigned imported issue",
+          meta: expect.objectContaining({
+            companyId: "paperclip-company-123",
+            agentId: "agent-123",
+            issueId: "issue-1",
+            issueIdentifier: "ALP-1",
+            wakeSource: "on_demand",
+            wakeRunId: "run-legacy-backlog-123",
             reusedExistingExecution: false
           })
         })
