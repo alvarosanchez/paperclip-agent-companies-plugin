@@ -46,7 +46,7 @@ import {
   extractPortableRecurringTaskDefinitions,
   findArchivableImportedRoutineIds
 } from "../src/portable-routines.js";
-import { buildAdapterPresetPayload, type AdapterPresetDraft } from "../src/ui/index.js";
+import { adapterPresetTestUtils, type AdapterPresetDraft } from "../src/ui/index.js";
 import { getImportedCompanyVersionInfo } from "../src/ui/version-status.js";
 
 const tempDirectories: string[] = [];
@@ -58,7 +58,8 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
-const TARGET_PAPERCLIP_RELEASE = "2026.517.0";
+const TARGET_PAPERCLIP_RELEASE = "2026.529.0";
+const { buildAdapterPresetPayload } = adapterPresetTestUtils;
 
 function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
   const timestamp = new Date("2026-04-14T09:23:00.000Z");
@@ -479,6 +480,13 @@ describe("agent companies plugin", () => {
         id: "agent-companies-settings",
         displayName: "Repository Catalog",
         exportName: "AgentCompaniesSettingsPage"
+      },
+      {
+        type: "companySettingsPage",
+        id: "agent-companies-company-settings",
+        displayName: "Agent Companies",
+        exportName: "AgentCompaniesSettingsPage",
+        routePath: "agent-companies"
       }
     ]);
   });
@@ -492,6 +500,7 @@ describe("agent companies plugin", () => {
     for (const scriptName of ["run-paperclip-smoke.mjs", "manual-paperclip-verify.mjs"]) {
       const script = await readFile(join(process.cwd(), "scripts", "e2e", scriptName), "utf8");
       expect(script).toContain(`const defaultPaperclipPackageVersion = '${TARGET_PAPERCLIP_RELEASE}';`);
+      expect(script).toContain("const companySettingsPath = '/company/settings/agent-companies';");
       expect(script).toContain("`paperclipai@${paperclipPackageVersion}`");
       expect(script).toContain("'--api-base'");
       expect(script).toContain("baseUrl");
@@ -775,7 +784,7 @@ describe("agent companies plugin", () => {
     const detail = await harness.getData<CatalogCompanyContentDetail | null>(
       "catalog.company-content.read",
       {
-        companyId: company?.id,
+        sourceCompanyId: company?.id,
         itemPath: "skills/repo-audit/SKILL.md"
       }
     );
@@ -823,7 +832,7 @@ describe("agent companies plugin", () => {
     const detail = await harness.getData<CatalogCompanyContentDetail | null>(
       "catalog.company-content.read",
       {
-        companyId: company?.id,
+        sourceCompanyId: company?.id,
         itemPath: "tasks/monday-review/TASK.md"
       }
     );
@@ -1080,6 +1089,45 @@ routines:
     ]);
     expect(typeof prepared.source.files["COMPANY.md"]).toBe("string");
     expect(typeof prepared.source.files["skills/repo-audit/assets/icon.svg"]).toBe("string");
+  });
+
+  it("prepares imports with a catalog source id when the host supplies company scope", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:03.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+    expect(company?.id).toBeTruthy();
+
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        sourceCompanyId: company?.id
+      },
+      {
+        companyId: "paperclip-host-company-123"
+      }
+    );
+
+    expect(prepared.companyId).toBe(company?.id);
+    expect(prepared.companyName).toBe("Alpha Labs");
   });
 
   it("packages selected company parts and items as an inline import source", async () => {
@@ -4014,6 +4062,170 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     );
   });
 
+  it("falls back to REST issue reads and legacy wakes when a scoped action targets another company", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; method: string; body: unknown }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? "GET";
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        method,
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "issue-1",
+              identifier: "ALP-1",
+              title: "Seed Default Company",
+              status: "todo",
+              assigneeAgentId: "agent-123"
+            }
+          ]),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/agents/agent-123/wakeup") {
+        return new Response(
+          JSON.stringify({
+            id: "run-legacy-123",
+            status: "queued"
+          }),
+          {
+            status: 202,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+      const scopeDeniedError = Object.assign(
+        new Error(
+          'Plugin is not allowed to perform "issues.list": requested company "paperclip-company-123" but the current invocation is scoped to company "paperclip-company-other"'
+        ),
+        { code: -32005 }
+      );
+      (harness.ctx.issues as unknown as {
+        list(): Promise<unknown>;
+        requestWakeup(): Promise<unknown>;
+      }).list = async () => {
+        throw scopeDeniedError;
+      };
+      (harness.ctx.issues as unknown as {
+        requestWakeup(): Promise<unknown>;
+      }).requestWakeup = async () => {
+        throw scopeDeniedError;
+      };
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction(
+        "catalog.record-company-import",
+        {
+          sourceCompanyId: company?.id,
+          importedCompanyId: "paperclip-company-123",
+          importedCompanyName: "Alpha Labs Imported",
+          importedCompanyIssuePrefix: "ALP",
+          issuesBeforeImport: []
+        },
+        {
+          companyId: "paperclip-company-other"
+        }
+      );
+
+      expect(fetchRequests).toEqual([
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
+          method: "GET",
+          body: null
+        },
+        {
+          url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
+          method: "POST",
+          body: {
+            source: "on_demand",
+            triggerDetail: "manual",
+            reason: "issue_assigned",
+            payload: {
+              issueId: "issue-1",
+              taskId: "issue-1",
+              mutation: "import"
+            }
+          }
+        }
+      ]);
+      expect(harness.logs).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          message: "Queued Paperclip wake request for a newly assigned imported issue",
+          meta: expect.objectContaining({
+            companyId: "paperclip-company-123",
+            agentId: "agent-123",
+            issueId: "issue-1",
+            issueIdentifier: "ALP-1",
+            wakeSource: "on_demand",
+            wakeRunId: "run-legacy-123",
+            reusedExistingExecution: false
+          })
+        })
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
   it("falls back to an assignment-style wake when the explicit import wake is skipped", async () => {
     const repositoryPath = await createRepositoryFixture();
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
@@ -5779,7 +5991,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const detail = await harness.getData<CatalogCompanyContentDetail | null>(
       "catalog.company-content.read",
       {
-        companyId: `${repository.id}:alpha/COMPANY.md`,
+        sourceCompanyId: `${repository.id}:alpha/COMPANY.md`,
         itemPath: "skills/repo-audit/SKILL.md"
       }
     );

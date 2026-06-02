@@ -11,7 +11,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 
 - Repository discovery from GitHub shorthand (`owner/repo`), full git URLs, or local checkouts
 - Automatic detection of `COMPANY.md` manifests with `schema: agentcompanies/v1`
-- A hosted Paperclip settings page with separate discovered-source and imported-company sections
+- Hosted Paperclip settings surfaces with separate discovered-source and imported-company sections, available from both Installed Plugins and Company Settings
 - Separate import actions for creating a new Paperclip company or importing into an existing non-synced company
 - Per-part and per-item import selection for agents, projects, tasks, and skills, with everything selected by default
 - Agent-company `TASK.md` files and Paperclip `ISSUE.md` manifests are grouped together under **Tasks** in the hosted UI
@@ -27,7 +27,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 ## Requirements
 
 - Node.js 20 or newer
-- A Paperclip instance with plugin support, version `2026.517.0` or newer
+- A Paperclip instance with plugin support, version `2026.529.0` or newer
 - `git` available in the plugin worker environment for remote repositories
 - Access to any private repositories you want to scan
 
@@ -54,7 +54,7 @@ paperclipai plugin install --local .
 ## Quick Start
 
 1. Open **Installed Plugins** in Paperclip.
-2. Open **Agent Companies Plugin**.
+2. Open **Agent Companies Plugin**, or open **Company Settings** > **Agent Companies** when working inside a specific company.
 3. Add a repository source with `owner/repo`, a full repository URL, or a local checkout path.
 4. Review discovered companies and open **View contents** to inspect agents, projects, tasks, recurring tasks/routines, Paperclip issue manifests, and skills.
 5. Click **Import as new company** to create a fresh Paperclip company, or open **Import into...** to pick one of the other non-synced Paperclip companies already in the instance.
@@ -62,7 +62,7 @@ paperclipai plugin install --local .
 7. Optionally configure **Adapter Presets** in settings, then select a default preset and per-agent overrides during import.
 8. Importing into an existing non-synced company adopts that company for future syncs, including the company whose settings page you are currently viewing.
 9. Use **Re-import / Edit selection** from the tracked company card whenever you want to deliberately change the saved sync contract.
-10. If your Paperclip deployment requires authentication, open this plugin inside the imported company once and complete **Board access connection** in settings.
+10. If your Paperclip deployment requires authentication, open **Company Settings** > **Agent Companies** inside the imported company once and complete **Board access connection**.
 11. Use the separate **Imported Companies** section for **Sync now**, per-company **Auto-sync** toggles, and the shared cadence control.
 
 ## Package Expectations
@@ -125,6 +125,8 @@ The selected preset mapping is saved with the tracked import, so later re-import
 - On Paperclip `2026.428.0` and newer, newly created/imported companies do not require new-agent approval unless that company explicitly enables the policy. The plugin still stages agent import before task import and auto-approves matching `pending_approval` agents for older hosts or opt-in approval policies.
 - Paperclip `2026.428.0` added per-company attachment limits. The plugin preserves `.paperclip.yaml` `company.attachmentMaxBytes` metadata during new-company imports; tracked existing-company syncs deliberately leave host-owned company settings such as name, approval policy, and attachment cap under Paperclip/operator control.
 - Paperclip `2026.512.0` added new plugin host surfaces for managed resources, local folders, scoped APIs, and plugin database namespaces. This plugin keeps its manifest on the existing catalog/import/sync capabilities until it owns one of those behaviors directly.
+- Paperclip `2026.525.0` added company-scoped plugin settings pages. This plugin declares both the global installed-plugin settings slot and the company settings slot at `/:companyPrefix/company/settings/agent-companies`, reusing the same company-aware settings UI so Board access and company-specific import adoption are available where operators already manage a company.
+- Paperclip `2026.529.0` made skills first-class in the host catalog and CLI. The plugin continues to inventory `skills/` packages and sends selected skills through Paperclip's portability import flow, so no extra manifest capability is needed unless the plugin later manages host-owned skills directly.
 - When a synced package or adapter preset updates an agent adapter but omits `adapterConfig.env`, the worker preserves the target agent's existing environment bindings. A package or preset must include an explicit `env` value to replace those bindings.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
@@ -165,7 +167,7 @@ pnpm build
 
 Additional verification commands:
 
-- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups and recurring routine in-place sync against a disposable Paperclip `paperclipai@2026.517.0` instance
+- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups, recurring routine in-place sync, and the company settings route against a disposable Paperclip `paperclipai@2026.529.0` instance
 - `pnpm verify:manual` for an interactive local verification run against the same disposable Paperclip release target
 
 Set `PAPERCLIP_E2E_PAPERCLIP_VERSION=<version>` to test a different `paperclipai` npm release in either disposable harness.
@@ -174,7 +176,8 @@ Manual verification highlights:
 
 - In **Imported Companies**, confirm the auto-sync cadence input defaults to `24` hours and updates the next-run messaging when you save a different value.
 - Toggle **Auto-sync** off and back on for a tracked import to verify the per-company setting still applies immediately.
-- On Paperclip `2026.517.0`, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
+- Open **Company Settings** > **Agent Companies** for a seeded or imported company and confirm the same repository catalog settings page mounts with the company-scoped Board access controls.
+- On Paperclip `2026.529.0`, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
 
 ## Release Versioning
 
