@@ -1804,6 +1804,11 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           authorization: "Bearer paperclip-board-token",
           body: null
         },
+        {
+          url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents",
+          authorization: "Bearer paperclip-board-token",
+          body: null
+        },
         expect.objectContaining({
           url: "http://127.0.0.1:3210/api/companies/import",
           authorization: "Bearer paperclip-board-token",
@@ -2054,13 +2059,14 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     }
   });
 
-  it("keeps explicit sync env replacements instead of merging existing agent env", async () => {
+  it("merges existing agent env into explicit sync env with sync values winning", async () => {
     const repositoryPath = await createRepositoryFixture();
     await addCustomSlugAgentAdapterFixture(
       repositoryPath,
       `        model: gpt-5.4
         env:
           PACKAGE_ONLY: from-package
+          SHARED_VALUE: from-package
 `
     );
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
@@ -2073,10 +2079,12 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         secretId: "secret-existing",
         version: "latest"
       },
-      PLAIN_VALUE: "keep-me"
+      PLAIN_VALUE: "keep-me",
+      SHARED_VALUE: "from-existing"
     };
     const presetEnv = {
-      PRESET_ONLY: "from-preset"
+      PRESET_ONLY: "from-preset",
+      SHARED_VALUE: "from-preset"
     };
 
     process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
@@ -2230,9 +2238,14 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       };
 
       expect(extension.agents?.["alpha-chief"]?.adapter?.config?.env).toEqual({
-        PACKAGE_ONLY: "from-package"
+        ...existingEnv,
+        PACKAGE_ONLY: "from-package",
+        SHARED_VALUE: "from-package"
       });
-      expect(importBody?.adapterOverrides?.["alpha-chief"]?.adapterConfig?.env).toEqual(presetEnv);
+      expect(importBody?.adapterOverrides?.["alpha-chief"]?.adapterConfig?.env).toEqual({
+        ...existingEnv,
+        ...presetEnv
+      });
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {

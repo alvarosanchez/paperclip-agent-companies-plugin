@@ -1876,7 +1876,7 @@ function getPaperclipAgentEnvBySlug(
   return envBySlug;
 }
 
-function hasPortableAgentAdapterMissingEnv(
+function hasPortableAgentAdapterEnvToPreserve(
   source: CatalogPreparedCompanyImport["source"]
 ): boolean {
   const extensionPath = findPortablePaperclipExtensionPath(source.files);
@@ -1904,8 +1904,7 @@ function hasPortableAgentAdapterMissingEnv(
       return true;
     }
 
-    const adapterConfig = rawAgent.adapter.config;
-    if (isRecord(adapterConfig) && !hasOwnRecordKey(adapterConfig, "env")) {
+    if (isRecord(rawAgent.adapter.config)) {
       return true;
     }
   }
@@ -1913,13 +1912,13 @@ function hasPortableAgentAdapterMissingEnv(
   return false;
 }
 
-function hasAdapterOverrideMissingEnv(adapterOverrides: PaperclipAdapterOverrides | undefined): boolean {
+function hasAdapterOverrideEnvToPreserve(adapterOverrides: PaperclipAdapterOverrides | undefined): boolean {
   if (!adapterOverrides) {
     return false;
   }
 
   return Object.values(adapterOverrides).some((override) =>
-    !override.adapterConfig || !hasOwnRecordKey(override.adapterConfig, "env")
+    !override.adapterConfig || !hasOwnRecordKey(override.adapterConfig, "env") || isRecord(override.adapterConfig.env)
   );
 }
 
@@ -1963,11 +1962,19 @@ function preservePortableAgentAdapterEnv(
     }
 
     const adapterConfig = isRecord(adapter.config) ? { ...adapter.config } : {};
-    if (hasOwnRecordKey(adapterConfig, "env")) {
+    const importedEnv = isRecord(adapterConfig.env) ? adapterConfig.env : null;
+    if (hasOwnRecordKey(adapterConfig, "env") && !importedEnv) {
       continue;
     }
 
-    adapterConfig.env = existingEnv;
+    const nextEnv = importedEnv
+      ? { ...existingEnv, ...importedEnv }
+      : existingEnv;
+    if (importedEnv && Object.keys(existingEnv).every((key) => hasOwnRecordKey(importedEnv, key))) {
+      continue;
+    }
+
+    adapterConfig.env = nextEnv;
     adapter.config = adapterConfig;
     nextAgents[rawSlug] = {
       ...rawAgent,
@@ -2013,7 +2020,16 @@ function preserveAdapterOverrideEnv(
     }
 
     const adapterConfig = override.adapterConfig ? { ...override.adapterConfig } : {};
-    if (hasOwnRecordKey(adapterConfig, "env")) {
+    const importedEnv = isRecord(adapterConfig.env) ? adapterConfig.env : null;
+    if (hasOwnRecordKey(adapterConfig, "env") && !importedEnv) {
+      nextOverrides[agentSlug] = override;
+      continue;
+    }
+
+    const nextEnv = importedEnv
+      ? { ...existingEnv, ...importedEnv }
+      : existingEnv;
+    if (importedEnv && Object.keys(existingEnv).every((key) => hasOwnRecordKey(importedEnv, key))) {
       nextOverrides[agentSlug] = override;
       continue;
     }
@@ -2022,7 +2038,7 @@ function preserveAdapterOverrideEnv(
       ...override,
       adapterConfig: {
         ...adapterConfig,
-        env: existingEnv
+        env: nextEnv
       }
     };
     didChange = true;
@@ -3382,8 +3398,8 @@ async function executeDefaultSyncImport(
     preIssueImportInclude.agents
     && selectedAgentSlugs.size > 0
     && (
-      hasPortableAgentAdapterMissingEnv(preIssueImportSource)
-      || hasAdapterOverrideMissingEnv(adapterOverrides)
+      hasPortableAgentAdapterEnvToPreserve(preIssueImportSource)
+      || hasAdapterOverrideEnvToPreserve(adapterOverrides)
     );
 
   if (shouldPreserveAgentEnv) {
