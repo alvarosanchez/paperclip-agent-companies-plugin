@@ -722,6 +722,7 @@ async function main() {
   const consoleMessages = [];
   const pageErrors = [];
   const pluginUiRequests = [];
+  const pluginUiRequestTasks = [];
 
   page.on('console', (message) => {
     consoleMessages.push({
@@ -756,7 +757,7 @@ async function main() {
       url.includes('/bridge/') ||
       /\/api\/plugins\/[^/]+\/(?:data|actions)\//u.test(url)
     ) {
-      void (async () => {
+      const responseTask = (async () => {
         const entry = {
           method: response.request().method(),
           status: response.status(),
@@ -773,6 +774,7 @@ async function main() {
 
         pluginUiRequests.push(entry);
       })();
+      pluginUiRequestTasks.push(responseTask);
     }
   });
 
@@ -1218,6 +1220,7 @@ async function main() {
     await mkdir(join(pluginRoot, 'tests/e2e/results'), { recursive: true });
     await page.screenshot({ path: join(pluginRoot, 'tests/e2e/results/last-run.png'), fullPage: true });
     const bodyText = await page.locator('body').textContent();
+    await Promise.allSettled(pluginUiRequestTasks);
     await writeFile(
       join(pluginRoot, 'tests/e2e/results/last-run.json'),
       JSON.stringify(

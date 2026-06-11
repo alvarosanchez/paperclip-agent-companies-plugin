@@ -2442,7 +2442,9 @@ async function ensureSeedRepositoriesScanned(
       mergedState = updateRepository(mergedState, scannedRepository.id, () => scannedRepository);
     }
 
-    return persistCatalogState(ctx, mergedState, now);
+    const latestUpdatedAt = latestState.state.updatedAt;
+    const mergedTimestamp = latestUpdatedAt && latestUpdatedAt > now ? latestUpdatedAt : now;
+    return persistCatalogState(ctx, mergedState, mergedTimestamp);
   }
 
   return persistCatalogState(ctx, nextState, now);
