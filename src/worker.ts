@@ -2423,10 +2423,26 @@ async function ensureSeedRepositoriesScanned(
   }
 
   let nextState = state;
+  const scannedRepositories: RepositorySource[] = [];
 
   for (const repository of repositoriesToScan) {
     const scannedRepository = await scanRepositoryEntry(repository, scanRepository, now, ctx.logger);
+    scannedRepositories.push(scannedRepository);
     nextState = updateRepository(nextState, repository.id, () => scannedRepository);
+  }
+
+  const latestState = await loadCatalogStateRecord(ctx);
+  if (latestState.hasPersistedRepositories) {
+    let mergedState = latestState.state;
+    for (const scannedRepository of scannedRepositories) {
+      if (!mergedState.repositories.some((repository) => repository.id === scannedRepository.id)) {
+        continue;
+      }
+
+      mergedState = updateRepository(mergedState, scannedRepository.id, () => scannedRepository);
+    }
+
+    return persistCatalogState(ctx, mergedState, now);
   }
 
   return persistCatalogState(ctx, nextState, now);

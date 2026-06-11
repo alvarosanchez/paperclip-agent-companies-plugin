@@ -27,7 +27,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 ## Requirements
 
 - Node.js 20 or newer
-- A Paperclip instance with plugin support, version `2026.529.0` or newer
+- A Paperclip instance with plugin support, version `2026.609.0` or newer
 - `git` available in the plugin worker environment for remote repositories
 - Access to any private repositories you want to scan
 
@@ -127,6 +127,7 @@ The selected preset mapping is saved with the tracked import, so later re-import
 - Paperclip `2026.512.0` added new plugin host surfaces for managed resources, local folders, scoped APIs, and plugin database namespaces. This plugin keeps its manifest on the existing catalog/import/sync capabilities until it owns one of those behaviors directly.
 - Paperclip `2026.525.0` added company-scoped plugin settings pages. This plugin declares both the global installed-plugin settings slot and the company settings slot at `/:companyPrefix/company/settings/agent-companies`, reusing the same company-aware settings UI so Board access and company-specific import adoption are available where operators already manage a company.
 - Paperclip `2026.529.0` made skills first-class in the host catalog and CLI. The plugin continues to inventory `skills/` packages and sends selected skills through Paperclip's portability import flow, so no extra manifest capability is needed unless the plugin later manages host-owned skills directly.
+- Paperclip `2026.609.0` fixed host dispatch for plugin-provided agent tools. This plugin does not expose agent tools today, so the compatibility update is limited to the SDK/runtime baseline and disposable verification harnesses.
 - When a synced package or adapter preset updates an agent adapter but omits `adapterConfig.env`, the worker preserves the target agent's existing environment bindings. A package or preset must include an explicit `env` value to replace those bindings.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
@@ -167,7 +168,7 @@ pnpm build
 
 Additional verification commands:
 
-- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups, recurring routine in-place sync, and the company settings route against a disposable Paperclip `paperclipai@2026.529.0` instance
+- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups, recurring routine in-place sync, and the company settings route against a disposable Paperclip `paperclipai@2026.609.0` instance
 - `pnpm verify:manual` for an interactive local verification run against the same disposable Paperclip release target
 
 Set `PAPERCLIP_E2E_PAPERCLIP_VERSION=<version>` to test a different `paperclipai` npm release in either disposable harness.
@@ -177,7 +178,7 @@ Manual verification highlights:
 - In **Imported Companies**, confirm the auto-sync cadence input defaults to `24` hours and updates the next-run messaging when you save a different value.
 - Toggle **Auto-sync** off and back on for a tracked import to verify the per-company setting still applies immediately.
 - Open **Company Settings** > **Agent Companies** for a seeded or imported company and confirm the same repository catalog settings page mounts with the company-scoped Board access controls.
-- On Paperclip `2026.529.0`, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
+- On Paperclip `2026.609.0`, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
 
 ## Release Versioning
 

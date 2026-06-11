@@ -30,7 +30,8 @@ import {
   normalizeRepositoryCloneRef,
   normalizeRepositoryReference,
   resolveCompanyImportSelection,
-  type CatalogSnapshot
+  type CatalogSnapshot,
+  type DiscoveredAgentCompany
 } from "../src/catalog.js";
 import {
   buildGitProcessEnvironment,
@@ -58,7 +59,7 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
-const TARGET_PAPERCLIP_RELEASE = "2026.529.0";
+const TARGET_PAPERCLIP_RELEASE = "2026.609.0";
 const { buildAdapterPresetPayload } = adapterPresetTestUtils;
 
 function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
@@ -591,6 +592,82 @@ describe("agent companies plugin", () => {
     expect(data.companies[0]?.contents.skills).toEqual([]);
     expect(data.autoSyncCadenceHours).toBe(DEFAULT_AUTO_SYNC_CADENCE_HOURS);
     expect(data.summary.companyCount).toBe(1);
+  });
+
+  it("does not overwrite user-added repositories when the initial seed scan resolves late", async () => {
+    const repositoryPath = "/tmp/race-added-agent-company-repo";
+    let resolveDefaultScan: (companies: DiscoveredAgentCompany[]) => void = () => {};
+    let markDefaultScanStarted: () => void = () => {};
+    const defaultScanStarted = new Promise<void>((resolvePromise) => {
+      markDefaultScanStarted = resolvePromise;
+    });
+    const defaultScan = new Promise<DiscoveredAgentCompany[]>((resolvePromise) => {
+      resolveDefaultScan = resolvePromise;
+    });
+    const plugin = createAgentCompaniesPlugin({
+      scanRepository: async (repository) => {
+        if (repository.url === DEFAULT_REPOSITORY_URL) {
+          markDefaultScanStarted();
+          return defaultScan;
+        }
+
+        return [
+          {
+            id: `${repository.id}:local-company/COMPANY.md`,
+            name: "Late Added Company",
+            slug: "late-added-company",
+            description: "Repository added while the default scan was running",
+            schema: AGENT_COMPANIES_SCHEMA,
+            version: "0.2.0",
+            relativePath: "local-company",
+            manifestPath: "local-company/COMPANY.md",
+            contents: createEmptyCompanyContents()
+          }
+        ];
+      },
+      now: () => "2026-04-14T08:30:00.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await plugin.definition.setup(harness.ctx);
+
+    const initialCatalogPromise = harness.getData<CatalogSnapshot>("catalog.read");
+    await defaultScanStarted;
+
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    resolveDefaultScan([
+      {
+        id: "repo-9bffb087:agency-agents/COMPANY.md",
+        name: "Agency Agents",
+        slug: "agency-agents",
+        description: "Preloaded catalog fixture",
+        schema: AGENT_COMPANIES_SCHEMA,
+        version: "1.0.0",
+        relativePath: "agency-agents",
+        manifestPath: "agency-agents/COMPANY.md",
+        contents: createEmptyCompanyContents()
+      }
+    ]);
+
+    await initialCatalogPromise;
+
+    const finalCatalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    expect(finalCatalog.repositories.map((repository) => repository.url)).toEqual([
+      DEFAULT_REPOSITORY_URL,
+      repositoryPath
+    ]);
+    expect(finalCatalog.repositories[0]?.status).toBe("ready");
+    expect(finalCatalog.repositories[1]?.status).toBe("ready");
+    expect(finalCatalog.companies.map((company) => company.slug)).toEqual([
+      "agency-agents",
+      "late-added-company"
+    ]);
   });
 
   it("lets users remove the predefined source and add their own repositories", async () => {
