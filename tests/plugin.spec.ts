@@ -59,7 +59,7 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
-const TARGET_PAPERCLIP_RELEASE = "2026.609.0";
+const TARGET_PAPERCLIP_RELEASE = "2026.618.0";
 const { buildAdapterPresetPayload } = adapterPresetTestUtils;
 
 function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
@@ -501,6 +501,7 @@ describe("agent companies plugin", () => {
     for (const scriptName of ["run-paperclip-smoke.mjs", "manual-paperclip-verify.mjs"]) {
       const script = await readFile(join(process.cwd(), "scripts", "e2e", scriptName), "utf8");
       expect(script).toContain(`const defaultPaperclipPackageVersion = '${TARGET_PAPERCLIP_RELEASE}';`);
+      expect(script).toContain("node@24");
       expect(script).toContain("const companySettingsPath = '/company/settings/agent-companies';");
       expect(script).toContain("`paperclipai@${paperclipPackageVersion}`");
       expect(script).toContain("'--api-base'");

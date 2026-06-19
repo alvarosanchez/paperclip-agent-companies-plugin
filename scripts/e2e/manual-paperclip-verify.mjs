@@ -31,7 +31,7 @@ const seedCompanyNames = [
 ];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.609.0';
+const defaultPaperclipPackageVersion = '2026.618.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const env = {
   ...process.env,
@@ -61,7 +61,7 @@ function log(message) {
 }
 
 function getPaperclipCommandArgs(args) {
-  return ['-p', 'node@20', '-p', `paperclipai@${paperclipPackageVersion}`, 'paperclipai', ...args];
+  return ['-p', 'node@24', '-p', `paperclipai@${paperclipPackageVersion}`, 'paperclipai', ...args];
 }
 
 function runCommand(command, args, options = {}) {
