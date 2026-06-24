@@ -391,6 +391,27 @@ Lead Alpha Labs and coordinate the delivery pipeline.
   );
 }
 
+async function addCatalogSkillReferenceFixture(repositoryRoot: string): Promise<void> {
+  await writeFile(
+    join(repositoryRoot, "alpha", "agents", "ceo", "AGENTS.md"),
+    `---
+name: Alpha CEO
+slug: alpha-chief
+title: Chief Executive Officer
+skills:
+  - paperclipai/bundled/paperclip-operations/issue-triage
+  - key: paperclipai/optional/browser/agent-browser
+  - alpha-missing-skill
+metadata:
+  paperclip:
+    agentIcon: crown
+---
+
+Lead Alpha Labs and coordinate the delivery pipeline with catalog skills.
+`
+  );
+}
+
 async function addRecurringTaskFixture(repositoryRoot: string): Promise<void> {
   await mkdir(join(repositoryRoot, "alpha", "tasks", "monday-review"), { recursive: true });
   await writeFile(
@@ -1934,6 +1955,219 @@ Lead Alpha Labs and coordinate the delivery pipeline.
             decisionNote: "Approved automatically during Agent Company sync so imported tasks can wake Alpha CEO immediately."
           }
         }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("installs referenced Paperclip catalog skills before syncing imported agents", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await addCatalogSkillReferenceFixture(repositoryPath);
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const fetchRequests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-board-token";
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const headers = new Headers(init?.headers);
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      fetchRequests.push({
+        url,
+        authorization: headers.get("authorization"),
+        body: bodyText ? JSON.parse(bodyText) : null
+      });
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/skills/catalog") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "paperclipai:bundled:paperclip-operations:issue-triage",
+              key: "paperclipai/bundled/paperclip-operations/issue-triage",
+              slug: "issue-triage",
+              name: "issue-triage"
+            },
+            {
+              id: "paperclipai:optional:browser:agent-browser",
+              key: "paperclipai/optional/browser/agent-browser",
+              slug: "agent-browser",
+              name: "agent-browser"
+            }
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/skills/install-catalog") {
+        const catalogSkillId = (bodyText ? JSON.parse(bodyText) : null)?.catalogSkillId;
+        const catalogSkill = catalogSkillId === "paperclipai:optional:browser:agent-browser"
+          ? {
+              id: "paperclipai:optional:browser:agent-browser",
+              key: "paperclipai/optional/browser/agent-browser",
+              slug: "agent-browser",
+              name: "agent-browser"
+            }
+          : {
+              id: "paperclipai:bundled:paperclip-operations:issue-triage",
+              key: "paperclipai/bundled/paperclip-operations/issue-triage",
+              slug: "issue-triage",
+              name: "issue-triage"
+            };
+
+        return new Response(
+          JSON.stringify({
+            action: catalogSkill.slug === "agent-browser" ? "unchanged" : "created",
+            skill: {
+              id: `company-skill-${catalogSkill.slug}`,
+              name: catalogSkill.name,
+              slug: catalogSkill.slug,
+              key: catalogSkill.key
+            },
+            catalogSkill,
+            warnings: []
+          }),
+          {
+            status: catalogSkill.slug === "agent-browser" ? 200 : 201,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        const parsedBody = bodyText ? JSON.parse(bodyText) : null;
+        const issuesIncluded = parsedBody?.include?.issues === true;
+
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            agents: issuesIncluded ? [] : [{ action: "updated" }],
+            projects: issuesIncluded ? [] : [{ action: "updated" }],
+            issues: issuesIncluded ? [{ action: "updated" }] : [],
+            skills: issuesIncluded ? [] : [{ action: "updated", slug: "repo-audit" }],
+            warnings: issuesIncluded
+              ? []
+              : ["Agent alpha-chief references skill alpha-missing-skill, but that skill is not present in the package."]
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/agents") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "agent-123",
+              name: "Alpha CEO",
+              urlKey: "alpha-chief",
+              status: "active",
+              role: "ceo",
+              title: "Chief Executive Officer"
+            }
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-14T09:23:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", {
+        url: repositoryPath
+      });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+
+      await harness.performAction("catalog.record-company-import", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      });
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+
+      const syncResult = await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      const catalogListIndex = fetchRequests.findIndex(
+        (request) => request.url === "http://127.0.0.1:3210/api/skills/catalog"
+      );
+      const installRequests = fetchRequests.filter(
+        (request) => request.url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/skills/install-catalog"
+      );
+      const importIndex = fetchRequests.findIndex(
+        (request) => request.url === "http://127.0.0.1:3210/api/companies/import"
+      );
+
+      expect(catalogListIndex).toBeGreaterThan(-1);
+      expect(installRequests).toHaveLength(2);
+      expect(importIndex).toBeGreaterThan(installRequests.length);
+      expect(fetchRequests.indexOf(installRequests[0]!)).toBeLessThan(importIndex);
+      expect(fetchRequests.indexOf(installRequests[1]!)).toBeLessThan(importIndex);
+      expect(installRequests.map((request) => request.body)).toEqual([
+        { catalogSkillId: "paperclipai:bundled:paperclip-operations:issue-triage" },
+        { catalogSkillId: "paperclipai:optional:browser:agent-browser" }
+      ]);
+      expect(syncResult.skills?.map((skill) => skill.slug)).toEqual([
+        "issue-triage",
+        "agent-browser",
+        "repo-audit"
+      ]);
+      expect(syncResult.warnings).toEqual([
+        "Agent alpha-chief references skill alpha-missing-skill, but that skill is not present in the package."
       ]);
     } finally {
       globalThis.fetch = originalFetch;

@@ -75,6 +75,7 @@ import {
   MIN_AUTO_SYNC_CADENCE_HOURS,
   type PaperclipCompanyImportResult,
   buildStagedPaperclipImportSource,
+  collectReferencedPaperclipCatalogSkillRefs,
   createDefaultCompanyImportSelection,
   getCompanyContentItemRequirementLookup,
   getCompanyContentSectionForKey,
@@ -2172,6 +2173,25 @@ interface PaperclipAgentSnapshot {
   title?: string | null;
 }
 
+interface PaperclipCatalogSkillSnapshot {
+  id?: string;
+  key?: string;
+  slug?: string | null;
+  name?: string | null;
+}
+
+interface PaperclipCatalogSkillInstallResult {
+  action?: string;
+  skill?: {
+    id?: string | null;
+    name?: string | null;
+    slug?: string | null;
+    key?: string | null;
+  } | null;
+  catalogSkill?: PaperclipCatalogSkillSnapshot | null;
+  warnings?: unknown;
+}
+
 interface PaperclipApprovalRecord {
   id?: string;
   type?: string | null;
@@ -2512,6 +2532,134 @@ function normalizePaperclipAgentSnapshots(value: unknown): Array<{
   }
 
   return normalizedAgents;
+}
+
+function normalizePaperclipCatalogSkillSnapshots(value: unknown): PaperclipCatalogSkillSnapshot[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((candidate): candidate is PaperclipCatalogSkillSnapshot => (
+    isRecord(candidate)
+    && typeof candidate.id === "string"
+    && candidate.id.trim().length > 0
+    && typeof candidate.key === "string"
+    && candidate.key.trim().length > 0
+  )).map((candidate) => ({
+    id: candidate.id?.trim(),
+    key: candidate.key?.trim(),
+    slug: typeof candidate.slug === "string" && candidate.slug.trim() ? candidate.slug.trim() : null,
+    name: typeof candidate.name === "string" && candidate.name.trim() ? candidate.name.trim() : null
+  }));
+}
+
+function normalizePaperclipCatalogSkillInstallResult(
+  value: unknown
+): PaperclipCatalogSkillInstallResult | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return {
+    action: typeof value.action === "string" && value.action.trim() ? value.action.trim() : undefined,
+    skill: isRecord(value.skill)
+      ? {
+          id: typeof value.skill.id === "string" && value.skill.id.trim() ? value.skill.id.trim() : null,
+          name: typeof value.skill.name === "string" && value.skill.name.trim() ? value.skill.name.trim() : null,
+          slug: typeof value.skill.slug === "string" && value.skill.slug.trim() ? value.skill.slug.trim() : null,
+          key: typeof value.skill.key === "string" && value.skill.key.trim() ? value.skill.key.trim() : null
+        }
+      : null,
+    catalogSkill: isRecord(value.catalogSkill)
+      ? {
+          id: typeof value.catalogSkill.id === "string" && value.catalogSkill.id.trim() ? value.catalogSkill.id.trim() : undefined,
+          key: typeof value.catalogSkill.key === "string" && value.catalogSkill.key.trim() ? value.catalogSkill.key.trim() : undefined,
+          slug: typeof value.catalogSkill.slug === "string" && value.catalogSkill.slug.trim() ? value.catalogSkill.slug.trim() : null,
+          name: typeof value.catalogSkill.name === "string" && value.catalogSkill.name.trim() ? value.catalogSkill.name.trim() : null
+        }
+      : null,
+    warnings: value.warnings
+  };
+}
+
+function catalogSkillInstallResultToImportEntity(
+  result: PaperclipCatalogSkillInstallResult,
+  fallbackCatalogSkill: PaperclipCatalogSkillSnapshot
+): NonNullable<PaperclipCompanyImportResult["skills"]>[number] {
+  return {
+    action: result.action,
+    id: result.skill?.id ?? null,
+    name: result.skill?.name ?? result.catalogSkill?.name ?? fallbackCatalogSkill.name ?? fallbackCatalogSkill.key,
+    slug: result.skill?.slug ?? result.catalogSkill?.slug ?? fallbackCatalogSkill.slug ?? undefined,
+    reason: `Installed referenced Paperclip catalog skill ${result.catalogSkill?.key ?? fallbackCatalogSkill.key}.`
+  };
+}
+
+async function installReferencedCatalogSkillsForImport(
+  companyId: string,
+  files: CatalogPreparedCompanyImport["source"]["files"]
+): Promise<{ skills: NonNullable<PaperclipCompanyImportResult["skills"]>; warnings: string[] }> {
+  const referencedCatalogSkillRefs = collectReferencedPaperclipCatalogSkillRefs(files);
+  if (referencedCatalogSkillRefs.length === 0) {
+    return { skills: [], warnings: [] };
+  }
+
+  let catalogSkills: PaperclipCatalogSkillSnapshot[];
+  try {
+    catalogSkills = normalizePaperclipCatalogSkillSnapshots(
+      await fetchHostJson<unknown>("/api/skills/catalog")
+    );
+  } catch (error) {
+    return {
+      skills: [],
+      warnings: [
+        `Referenced Paperclip catalog skills could not be resolved before import: ${getErrorMessage(error)}`
+      ]
+    };
+  }
+
+  const catalogByRef = new Map<string, PaperclipCatalogSkillSnapshot>();
+  for (const skill of catalogSkills) {
+    if (skill.id) {
+      catalogByRef.set(skill.id, skill);
+    }
+    if (skill.key) {
+      catalogByRef.set(skill.key, skill);
+    }
+  }
+
+  const skills: NonNullable<PaperclipCompanyImportResult["skills"]> = [];
+  const warnings: string[] = [];
+  for (const reference of referencedCatalogSkillRefs) {
+    const catalogSkill = catalogByRef.get(reference);
+    if (!catalogSkill?.id) {
+      continue;
+    }
+
+    try {
+      const result = normalizePaperclipCatalogSkillInstallResult(
+        await fetchHostJson<unknown>(
+          `/api/companies/${encodeURIComponent(companyId)}/skills/install-catalog`,
+          {
+            method: "POST",
+            body: JSON.stringify({ catalogSkillId: catalogSkill.id })
+          }
+        )
+      );
+      if (!result) {
+        throw new Error("Paperclip returned an unexpected catalog skill install response.");
+      }
+
+      skills.push(catalogSkillInstallResultToImportEntity(result, catalogSkill));
+      warnings.push(...getStructuredMessageLines(result.warnings, 4));
+    } catch (error) {
+      warnings.push(
+        `Referenced Paperclip catalog skill ${reference} could not be installed before import: ${getErrorMessage(error)}`
+      );
+    }
+  }
+
+  return { skills, warnings };
 }
 
 function normalizePaperclipApprovalSnapshots(value: unknown): PaperclipApprovalRecord[] {
@@ -7293,6 +7441,9 @@ export function AgentCompaniesSettingsPage({
         "issues",
         { includeCompanyMetadata: issueOnlyImportInclude.company }
       );
+      const referencedCatalogSkillRefs = collectReferencedPaperclipCatalogSkillRefs(
+        preIssueImportSource.files
+      );
       let issuesBeforeImport: PaperclipIssueSnapshot[] | null =
         importDialog.targetMode === "new_company" ? [] : null;
 
@@ -7324,15 +7475,66 @@ export function AgentCompaniesSettingsPage({
               mode: "existing_company" as const,
               companyId: importDialog.targetCompanyId
             };
+      let effectivePreIssueImportInclude = preIssueImportInclude;
+      let effectivePreIssueImportTarget = target;
+      let createdCompanyOnlyResult: PaperclipCompanyImportResult | null = null;
+      let catalogSkillInstallResult: {
+        skills: NonNullable<PaperclipCompanyImportResult["skills"]>;
+        warnings: string[];
+      } = { skills: [], warnings: [] };
+
+      if (referencedCatalogSkillRefs.length > 0 && importDialog.targetMode === "new_company") {
+        createdCompanyOnlyResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
+          method: "POST",
+          body: JSON.stringify({
+            source: preIssueImportSource,
+            include: {
+              company: true,
+              agents: false,
+              projects: false,
+              issues: false,
+              skills: false
+            },
+            target,
+            collisionStrategy: importDialog.collisionStrategy
+          })
+        });
+        const createdCompanyId = createdCompanyOnlyResult.company?.id?.trim();
+        if (!createdCompanyId) {
+          throw new Error("Paperclip did not return a company id for catalog skill installation.");
+        }
+
+        catalogSkillInstallResult = await installReferencedCatalogSkillsForImport(
+          createdCompanyId,
+          preIssueImportSource.files
+        );
+        effectivePreIssueImportInclude = {
+          ...preIssueImportInclude,
+          company: false
+        };
+        effectivePreIssueImportTarget = {
+          mode: "existing_company" as const,
+          companyId: createdCompanyId
+        };
+      } else if (
+        referencedCatalogSkillRefs.length > 0
+        && importDialog.targetMode !== "new_company"
+        && importDialog.targetCompanyId
+      ) {
+        catalogSkillInstallResult = await installReferencedCatalogSkillsForImport(
+          importDialog.targetCompanyId,
+          preIssueImportSource.files
+        );
+      }
 
       let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
-      if (hasEnabledPaperclipImportStage(preIssueImportInclude)) {
+      if (hasEnabledPaperclipImportStage(effectivePreIssueImportInclude)) {
         importedPhaseOneResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
           method: "POST",
           body: JSON.stringify({
             source: preIssueImportSource,
-            include: preIssueImportInclude,
-            target,
+            include: effectivePreIssueImportInclude,
+            target: effectivePreIssueImportTarget,
             collisionStrategy: importDialog.collisionStrategy,
             ...(adapterOverrides ? { adapterOverrides } : {})
           })
@@ -7340,13 +7542,17 @@ export function AgentCompaniesSettingsPage({
       }
       const importedCompanyName =
         importDialog.targetMode === "new_company"
-          ? importedPhaseOneResult?.company?.name?.trim() || nextCompanyName || "selected company"
+          ? importedPhaseOneResult?.company?.name?.trim()
+            || createdCompanyOnlyResult?.company?.name?.trim()
+            || nextCompanyName
+            || "selected company"
           : importDialog.targetCompanyName
             || importTargetCompany?.importedCompany.name
             || importedPhaseOneResult?.company?.name?.trim()
             || "selected company";
       const importedCompanyId =
         importedPhaseOneResult?.company?.id?.trim()
+        || createdCompanyOnlyResult?.company?.id?.trim()
         || importDialog.targetCompanyId
         || null;
       let importedCompanyIssuePrefix: string | null =
@@ -7443,7 +7649,7 @@ export function AgentCompaniesSettingsPage({
           });
         }
         const importedCompany: PaperclipCompanyImportResult = {
-          company: importedPhaseTwoResult?.company ?? importedPhaseOneResult?.company ?? null,
+          company: importedPhaseTwoResult?.company ?? importedPhaseOneResult?.company ?? createdCompanyOnlyResult?.company ?? null,
           agents: [
             ...(importedPhaseOneResult?.agents ?? []),
             ...(importedPhaseTwoResult?.agents ?? [])
@@ -7457,12 +7663,15 @@ export function AgentCompaniesSettingsPage({
             ...(importedPhaseTwoResult?.issues ?? [])
           ],
           skills: [
+            ...catalogSkillInstallResult.skills,
             ...(importedPhaseOneResult?.skills ?? []),
             ...(importedPhaseTwoResult?.skills ?? [])
           ],
           warnings: mergePaperclipImportWarnings(
+            createdCompanyOnlyResult?.warnings,
             importedPhaseOneResult?.warnings,
-            importedPhaseTwoResult?.warnings
+            importedPhaseTwoResult?.warnings,
+            catalogSkillInstallResult.warnings
           )
         };
 
