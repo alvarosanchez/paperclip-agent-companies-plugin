@@ -287,6 +287,9 @@ const PORTABLE_PAPERCLIP_EXTENSION_PATHS = [".paperclip.yaml", ".paperclip.yml"]
 
 export type PaperclipImportStage = "pre_issues" | "issues";
 
+const MARKDOWN_FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
+const PAPERCLIP_CATALOG_SKILL_REFERENCE_PATTERN = /^paperclipai(?:\/|:)(?:bundled|optional)(?:\/|:).+/iu;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -376,6 +379,124 @@ function asNonEmptyString(value: unknown): string | null {
 function asIsoTimestamp(value: unknown): string | null {
   const text = asNonEmptyString(value);
   return text ?? null;
+}
+
+function readPortableTextEntry(entry: PortableCatalogFileEntry): string | null {
+  return typeof entry === "string" ? entry : null;
+}
+
+function parseMarkdownFrontmatterObject(markdown: string): Record<string, unknown> | null {
+  const match = MARKDOWN_FRONTMATTER_PATTERN.exec(markdown);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  try {
+    const parsed = parseYaml(match[1]);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCatalogSkillReference(value: unknown): string | null {
+  const reference = asNonEmptyString(value);
+  if (!reference || !PAPERCLIP_CATALOG_SKILL_REFERENCE_PATTERN.test(reference)) {
+    return null;
+  }
+
+  return reference;
+}
+
+function collectSkillReferences(value: unknown, out: Set<string>): void {
+  if (typeof value === "string") {
+    const reference = normalizeCatalogSkillReference(value);
+    if (reference) {
+      out.add(reference);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectSkillReferences(item, out);
+    }
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  for (const key of ["key", "id", "ref", "skill", "name"]) {
+    const reference = normalizeCatalogSkillReference(value[key]);
+    if (reference) {
+      out.add(reference);
+    }
+  }
+}
+
+function collectPackagedSkillCatalogReferences(
+  files: Record<string, PortableCatalogFileEntry>
+): Set<string> {
+  const packagedReferences = new Set<string>();
+
+  for (const [filePath, entry] of Object.entries(files)) {
+    const normalizedPath = normalizeCompanyContentPath(filePath);
+    const segments = normalizedPath?.split("/").filter(Boolean) ?? [];
+    if (segments[0] !== "skills" || segments.at(-1) !== "SKILL.md") {
+      continue;
+    }
+
+    const text = readPortableTextEntry(entry);
+    if (!text) {
+      continue;
+    }
+
+    const frontmatter = parseMarkdownFrontmatterObject(text);
+    if (!frontmatter) {
+      continue;
+    }
+
+    collectSkillReferences(frontmatter.key, packagedReferences);
+    collectSkillReferences(frontmatter.id, packagedReferences);
+    collectSkillReferences(frontmatter.slug, packagedReferences);
+    const metadata = isRecord(frontmatter.metadata) ? frontmatter.metadata : null;
+    const paperclip = isRecord(metadata?.paperclip) ? metadata.paperclip : null;
+    const catalog = isRecord(paperclip?.catalog) ? paperclip.catalog : null;
+    collectSkillReferences(catalog?.key, packagedReferences);
+    collectSkillReferences(catalog?.id, packagedReferences);
+    collectSkillReferences(catalog?.catalogSkillId, packagedReferences);
+  }
+
+  return packagedReferences;
+}
+
+export function collectReferencedPaperclipCatalogSkillRefs(
+  files: Record<string, PortableCatalogFileEntry>
+): string[] {
+  const packagedReferences = collectPackagedSkillCatalogReferences(files);
+  const references = new Set<string>();
+
+  for (const [filePath, entry] of Object.entries(files)) {
+    const normalizedPath = normalizeCompanyContentPath(filePath);
+    const segments = normalizedPath?.split("/").filter(Boolean) ?? [];
+    if (segments[0] !== "agents" || segments.at(-1) !== "AGENTS.md") {
+      continue;
+    }
+
+    const text = readPortableTextEntry(entry);
+    if (!text) {
+      continue;
+    }
+
+    const frontmatter = parseMarkdownFrontmatterObject(text);
+    collectSkillReferences(frontmatter?.skills, references);
+  }
+
+  return [...references]
+    .filter((reference) => !packagedReferences.has(reference))
+    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
 }
 
 function asNonNegativeInteger(value: unknown): number | null {

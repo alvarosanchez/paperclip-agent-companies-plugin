@@ -11,9 +11,11 @@ import {
   buildCatalogSnapshot,
   buildStagedPaperclipImportSource,
   CATALOG_STATE_KEY,
+  collectReferencedPaperclipCatalogSkillRefs,
   type AdapterPreset,
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
+  type CatalogImportEntityResult,
   type CompanyImportPartSelection,
   type CompanyImportSelection,
   type ImportAdapterPresetSelection,
@@ -284,6 +286,25 @@ type PaperclipAdapterOverrides = Record<string, {
 interface PaperclipApiConnection {
   apiBase: string;
   apiKey: string | null;
+}
+
+interface PaperclipCatalogSkillRecord {
+  id: string;
+  key: string;
+  slug: string | null;
+  name: string | null;
+}
+
+interface PaperclipCatalogSkillInstallResult {
+  action?: string;
+  skill?: {
+    id?: string | null;
+    name?: string | null;
+    slug?: string | null;
+    key?: string | null;
+  } | null;
+  catalogSkill?: PaperclipCatalogSkillRecord | null;
+  warnings?: unknown;
 }
 
 interface PaperclipIssueRecord {
@@ -3435,6 +3456,14 @@ async function executeDefaultSyncImport(
     adapterOverrides = preserveAdapterOverrideEnv(adapterOverrides, envBySlug);
   }
 
+  const catalogSkillInstallResult = preIssueImportInclude.agents
+    ? await installReferencedPaperclipCatalogSkills(
+        connection,
+        input.importedCompanyId,
+        preIssueImportSource.files
+      )
+    : { skills: [], warnings: [] };
+
   let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
   if (hasEnabledPaperclipImportStage(preIssueImportInclude)) {
     importedPhaseOneResult = await postPaperclipCompanyImport(connection, {
@@ -3530,12 +3559,14 @@ async function executeDefaultSyncImport(
       ...(importedPhaseTwoResult?.issues ?? [])
     ],
     skills: [
+      ...catalogSkillInstallResult.skills,
       ...(importedPhaseOneResult?.skills ?? []),
       ...(importedPhaseTwoResult?.skills ?? [])
     ],
     warnings: mergePaperclipImportWarnings(
       importedPhaseOneResult?.warnings,
       importedPhaseTwoResult?.warnings,
+      catalogSkillInstallResult.warnings,
       routineDedupeWarnings,
       additionalWarnings
     )
@@ -3612,6 +3643,154 @@ async function postPaperclipCompanyImport(
   }
 
   return payload as PaperclipCompanyImportResult;
+}
+
+function normalizePaperclipCatalogSkill(value: unknown): PaperclipCatalogSkillRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asNonEmptyString(value.id);
+  const key = asNonEmptyString(value.key);
+  if (!id || !key) {
+    return null;
+  }
+
+  return {
+    id,
+    key,
+    slug: asNonEmptyString(value.slug),
+    name: asNonEmptyString(value.name)
+  };
+}
+
+function normalizePaperclipCatalogSkillList(value: unknown): PaperclipCatalogSkillRecord[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value
+    .map((skill) => normalizePaperclipCatalogSkill(skill))
+    .filter((skill): skill is PaperclipCatalogSkillRecord => skill !== null);
+}
+
+async function fetchPaperclipCatalogSkills(
+  connection: PaperclipApiConnection
+): Promise<PaperclipCatalogSkillRecord[]> {
+  const payload = await fetchPaperclipApiJson(connection, "/api/skills/catalog");
+  const skills = normalizePaperclipCatalogSkillList(payload);
+  if (!skills) {
+    throw new Error("Paperclip returned an unexpected catalog skills response.");
+  }
+
+  return skills;
+}
+
+function normalizePaperclipCatalogSkillInstallResult(
+  value: unknown
+): PaperclipCatalogSkillInstallResult | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const rawSkill = isRecord(value.skill) ? value.skill : null;
+  return {
+    action: asNonEmptyString(value.action) ?? undefined,
+    skill: rawSkill
+      ? {
+          id: asNonEmptyString(rawSkill.id),
+          name: asNonEmptyString(rawSkill.name),
+          slug: asNonEmptyString(rawSkill.slug),
+          key: asNonEmptyString(rawSkill.key)
+        }
+      : null,
+    catalogSkill: normalizePaperclipCatalogSkill(value.catalogSkill),
+    warnings: value.warnings
+  };
+}
+
+async function installPaperclipCatalogSkill(
+  connection: PaperclipApiConnection,
+  companyId: string,
+  catalogSkill: PaperclipCatalogSkillRecord
+): Promise<PaperclipCatalogSkillInstallResult> {
+  const payload = await fetchPaperclipApiJson(
+    connection,
+    `/api/companies/${encodeURIComponent(companyId)}/skills/install-catalog`,
+    {
+      method: "POST",
+      body: JSON.stringify({ catalogSkillId: catalogSkill.id })
+    }
+  );
+  const result = normalizePaperclipCatalogSkillInstallResult(payload);
+  if (!result) {
+    throw new Error("Paperclip returned an unexpected catalog skill install response.");
+  }
+
+  return result;
+}
+
+function catalogSkillInstallResultToImportEntity(
+  result: PaperclipCatalogSkillInstallResult,
+  fallbackCatalogSkill: PaperclipCatalogSkillRecord
+): CatalogImportEntityResult {
+  return {
+    action: result.action,
+    id: result.skill?.id ?? null,
+    name: result.skill?.name ?? result.catalogSkill?.name ?? fallbackCatalogSkill.name ?? fallbackCatalogSkill.key,
+    slug: result.skill?.slug ?? result.catalogSkill?.slug ?? fallbackCatalogSkill.slug ?? undefined,
+    reason: `Installed referenced Paperclip catalog skill ${result.catalogSkill?.key ?? fallbackCatalogSkill.key}.`
+  };
+}
+
+async function installReferencedPaperclipCatalogSkills(
+  connection: PaperclipApiConnection,
+  companyId: string,
+  files: Record<string, PortableCatalogFileEntry>
+): Promise<{ skills: CatalogImportEntityResult[]; warnings: string[] }> {
+  const referencedCatalogSkillRefs = collectReferencedPaperclipCatalogSkillRefs(files);
+  if (referencedCatalogSkillRefs.length === 0) {
+    return { skills: [], warnings: [] };
+  }
+
+  let catalogSkills: PaperclipCatalogSkillRecord[];
+  try {
+    catalogSkills = await fetchPaperclipCatalogSkills(connection);
+  } catch (error) {
+    return {
+      skills: [],
+      warnings: [
+        `Referenced Paperclip catalog skills could not be resolved before import: ${summarizeErrorMessage(error)}`
+      ]
+    };
+  }
+
+  const catalogByRef = new Map<string, PaperclipCatalogSkillRecord>();
+  for (const skill of catalogSkills) {
+    catalogByRef.set(skill.id, skill);
+    catalogByRef.set(skill.key, skill);
+  }
+
+  const installedSkills: CatalogImportEntityResult[] = [];
+  const warnings: string[] = [];
+  for (const reference of referencedCatalogSkillRefs) {
+    const catalogSkill = catalogByRef.get(reference);
+    if (!catalogSkill) {
+      continue;
+    }
+
+    try {
+      const result = await installPaperclipCatalogSkill(connection, companyId, catalogSkill);
+      installedSkills.push(catalogSkillInstallResultToImportEntity(result, catalogSkill));
+      warnings.push(...getStructuredMessageLines(result.warnings, 4));
+    } catch (error) {
+      warnings.push(
+        `Referenced Paperclip catalog skill ${reference} could not be installed before import: ${summarizeErrorMessage(error)}`
+      );
+    }
+  }
+
+  return { skills: installedSkills, warnings };
 }
 
 function normalizePaperclipIssue(value: unknown): PaperclipIssueRecord | null {
