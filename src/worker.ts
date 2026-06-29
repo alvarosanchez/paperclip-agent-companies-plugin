@@ -1175,6 +1175,23 @@ function shouldSkipPortableCompanyFilePath(filePath: string): boolean {
     return true;
   }
 
+  // Root-level guidance files such as AGENTS.md are repository/company instructions,
+  // not portable Paperclip content items. Paperclip's package importer discovers any
+  // AGENTS.md in the inline file map as an agent markdown file; including a root
+  // AGENTS.md therefore creates a bogus generic `agent` row. Only structured
+  // content files under agents/, skills/, projects/, tasks/, or issues/ should be
+  // passed through as portable items.
+  if (
+    segments.length === 1
+    && (fileName === "agents.md"
+      || fileName === "project.md"
+      || fileName === "task.md"
+      || fileName === "issue.md"
+      || fileName === "skill.md")
+  ) {
+    return true;
+  }
+
   if (IGNORED_PORTABLE_FILE_NAMES.has(fileName) || SENSITIVE_PORTABLE_FILE_NAMES.has(fileName)) {
     return true;
   }

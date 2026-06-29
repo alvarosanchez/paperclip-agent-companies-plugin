@@ -1463,6 +1463,45 @@ routines:
     expect(filePaths).not.toContain(".ssh/id_ed25519");
   });
 
+  it("does not package root AGENTS.md as a portable file", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    await writeFile(
+      join(repositoryPath, "alpha", "AGENTS.md"),
+      "# Repository instructions\n\nThese are for coding agents, not a Paperclip company agent.\n"
+    );
+
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-14T09:22:11.000Z"
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", {
+      url: repositoryPath
+    });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+    const prepared = await harness.performAction<CatalogPreparedCompanyImport>(
+      "catalog.prepare-company-import",
+      {
+        companyId: company?.id
+      }
+    );
+
+    const filePaths = Object.keys(prepared.source.files).sort();
+    expect(filePaths).toContain("agents/ceo/AGENTS.md");
+    expect(filePaths).not.toContain("AGENTS.md");
+  });
+
   it("keeps non-item files when the default selection covers every available item", async () => {
     const repositoryPath = await createRepositoryFixture();
     await mkdir(join(repositoryPath, "nested", "beta", "docs"), { recursive: true });
