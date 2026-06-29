@@ -504,8 +504,8 @@ describe("agent companies plugin", () => {
         exportName: "AgentCompaniesSettingsPage"
       },
       {
-        type: "companySettingsPage",
-        id: "agent-companies-company-settings",
+        type: "page",
+        id: "agent-companies-company-page",
         displayName: "Agent Companies",
         exportName: "AgentCompaniesSettingsPage",
         routePath: "agent-companies"
@@ -532,7 +532,7 @@ describe("agent companies plugin", () => {
       const script = await readFile(join(process.cwd(), "scripts", "e2e", scriptName), "utf8");
       expect(script).toContain(`const defaultPaperclipPackageVersion = '${TARGET_PAPERCLIP_RELEASE}';`);
       expect(script).toContain("node@24");
-      expect(script).toContain("const companySettingsPath = '/company/settings/agent-companies';");
+      expect(script).toContain("const companyScopedPluginPagePath = '/agent-companies';");
       expect(script).toContain("`paperclipai@${paperclipPackageVersion}`");
       expect(script).toContain("'--api-base'");
       expect(script).toContain("baseUrl");
