@@ -26,7 +26,7 @@ const seedCompanyNames = [
 ];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.618.0';
+const defaultPaperclipPackageVersion = '2026.626.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const defaultTimeoutMs = 30000;
 const env = {

@@ -59,7 +59,7 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
-const TARGET_PAPERCLIP_RELEASE = "2026.618.0";
+const TARGET_PAPERCLIP_RELEASE = "2026.626.0";
 const { buildAdapterPresetPayload } = adapterPresetTestUtils;
 
 function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
@@ -511,6 +511,15 @@ describe("agent companies plugin", () => {
         routePath: "agent-companies"
       }
     ]);
+  });
+
+
+  it("documents the Paperclip 2026.626 adoption boundary", async () => {
+    const readme = await readFile(join(process.cwd(), "README.md"), "utf8");
+
+    expect(readme).toContain("Paperclip `2026.626.0` adds built-in Hermes adapters");
+    expect(readme).toContain("task watchdogs, ask-mode issue creation, Teams Catalog installation");
+    expect(readme).toContain("instance-scoped environment defaults remain live Paperclip/company-package decisions");
   });
 
   it("pins the SDK and disposable Paperclip harnesses to the target release", async () => {
