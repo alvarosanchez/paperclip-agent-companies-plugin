@@ -27,7 +27,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 ## Requirements
 
 - Node.js 20 or newer
-- A Paperclip instance with plugin support, version `2026.618.0` or newer
+- A Paperclip instance with plugin support, version `2026.626.0` or newer
 - `git` available in the plugin worker environment for remote repositories
 - Access to any private repositories you want to scan
 
@@ -125,10 +125,12 @@ The selected preset mapping is saved with the tracked import, so later re-import
 - On Paperclip `2026.428.0` and newer, newly created/imported companies do not require new-agent approval unless that company explicitly enables the policy. The plugin still stages agent import before task import and auto-approves matching `pending_approval` agents for older hosts or opt-in approval policies.
 - Paperclip `2026.428.0` added per-company attachment limits. The plugin preserves `.paperclip.yaml` `company.attachmentMaxBytes` metadata during new-company imports; tracked existing-company syncs deliberately leave host-owned company settings such as name, approval policy, and attachment cap under Paperclip/operator control.
 - Paperclip `2026.512.0` added new plugin host surfaces for managed resources, local folders, scoped APIs, and plugin database namespaces. This plugin keeps its manifest on the existing catalog/import/sync capabilities until it owns one of those behaviors directly.
-- Paperclip `2026.525.0` added company-scoped plugin settings pages. This plugin declares both the global installed-plugin settings slot and the company settings slot at `/:companyPrefix/company/settings/agent-companies`, reusing the same company-aware settings UI so Board access and company-specific import adoption are available where operators already manage a company.
+- Paperclip `2026.525.0` added company-scoped plugin settings pages. On the current `2026.626.0` host, the company settings slot can remain stuck in the host-level `Loading...` state before mounting plugin UI, so this plugin exposes the same company-aware settings UI through a company-scoped plugin page at `/:companyPrefix/agent-companies` while keeping the installed-plugin settings slot available under instance settings.
 - Paperclip `2026.529.0` made skills first-class in the host catalog and CLI. The plugin continues to inventory `skills/` packages and sends selected skills through Paperclip's portability import flow, so no extra manifest capability is needed unless the plugin later manages host-owned skills directly.
 - Paperclip `2026.609.0` fixed host dispatch for plugin-provided agent tools. This plugin does not expose agent tools today, so the compatibility update is limited to the SDK/runtime baseline and disposable verification harnesses.
-- Paperclip `2026.618.0` adds the Skills Store and per-company plugin tenant-isolation columns. This plugin imports package skills through the company portability flow and also installs selected agents' referenced first-party Skills Store catalog keys before agent import/sync, so packages can grant catalog skills without vendoring catalog skill bodies. The plugin keeps its persistent catalog in company-scoped plugin state.
+- Paperclip `2026.626.0` adds the Skills Store and per-company plugin tenant-isolation columns. This plugin imports package skills through the company portability flow and also installs selected agents' referenced first-party Skills Store catalog keys before agent import/sync, so packages can grant catalog skills without vendoring catalog skill bodies. The plugin keeps its persistent catalog in company-scoped plugin state.
+
+- Paperclip `2026.626.0` adds built-in Hermes adapters, task watchdogs, ask work mode, routine date variables, Teams Catalog, workspace downloads, and external object references. This plugin's release-adoption scope is compatibility rather than new runtime ownership: imported company packages may continue to declare `acpx_local`/custom Hermes adapter presets or adopt built-in `hermes_local`/`hermes_gateway` adapter presets, routine schedules, Skills Store grants, and package-owned guidance; task watchdogs, ask-mode issue creation, Teams Catalog installation, and instance-scoped environment defaults remain live Paperclip/company-package decisions unless a future product PR gives this plugin an explicit import or sync contract for them.
 - When a synced package or adapter preset updates an agent adapter but omits `adapterConfig.env`, the worker preserves the target agent's existing environment bindings. A package or preset must include an explicit `env` value to replace those bindings.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
@@ -169,10 +171,10 @@ pnpm build
 
 Additional verification commands:
 
-- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups, recurring routine in-place sync, and the company settings route against a disposable Paperclip `paperclipai@2026.618.0` instance
-- `pnpm verify:manual` for an interactive local verification run against the same disposable Paperclip 2026.618 release target
+- `pnpm test:e2e` for the hosted Paperclip smoke flow, including assigned-task wakeups, recurring routine in-place sync, and the company-scoped Agent Companies plugin page against a disposable Paperclip `paperclipai@2026.626.0` instance
+- `pnpm verify:manual` for an interactive local verification run against the same disposable Paperclip 2026.626 release target
 
-The disposable Paperclip harnesses run `paperclipai@2026.618.0` under `node@24`, matching the release's Docker baseline and avoiding Node 20's missing `node:sqlite` runtime module.
+The disposable Paperclip harnesses run `paperclipai@2026.626.0` under `node@24`, matching the release's Docker baseline and avoiding Node 20's missing `node:sqlite` runtime module.
 
 Set `PAPERCLIP_E2E_PAPERCLIP_VERSION=<version>` to test a different `paperclipai` npm release in either disposable harness.
 

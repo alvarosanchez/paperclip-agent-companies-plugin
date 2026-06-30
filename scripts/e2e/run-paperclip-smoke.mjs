@@ -15,7 +15,7 @@ const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-agent-companies-plugin-e2e';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
-const companySettingsPath = '/company/settings/agent-companies';
+const companyScopedPluginPagePath = '/agent-companies';
 const settingsPageHeading = 'Repository Sources';
 const seedCompanyNames = [
   'Alpha Seed Company',
@@ -26,7 +26,7 @@ const seedCompanyNames = [
 ];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.618.0';
+const defaultPaperclipPackageVersion = '2026.626.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const defaultTimeoutMs = 30000;
 const env = {
@@ -1035,12 +1035,12 @@ async function main() {
     if (!importedCompany.issuePrefix) {
       throw new Error(`Expected imported company "${importTargetCompany.name}" to include an issue prefix for company settings routing.`);
     }
-    const companySettingsUrl = new URL(`/${importedCompany.issuePrefix}${companySettingsPath}`, baseUrl).toString();
+    const companySettingsUrl = new URL(`/${importedCompany.issuePrefix}${companyScopedPluginPagePath}`, baseUrl).toString();
     await page.evaluate((path) => {
       window.history.pushState({}, '', path);
       window.dispatchEvent(new PopStateEvent('popstate'));
-    }, `/${importedCompany.issuePrefix}${companySettingsPath}`);
-    log(`Opened company settings page: ${companySettingsUrl}`);
+    }, `/${importedCompany.issuePrefix}${companyScopedPluginPagePath}`);
+    log(`Opened company-scoped Agent Companies page: ${companySettingsUrl}`);
     await page.waitForURL(companySettingsUrl, { timeout: 120000 });
     await page.getByText(settingsPageHeading, { exact: true }).first().waitFor({ timeout: 120000 });
     await page.locator('[data-testid="catalog-page"]').waitFor({ timeout: 120000 });

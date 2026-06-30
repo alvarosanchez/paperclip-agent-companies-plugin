@@ -18,7 +18,7 @@ const instanceId = 'paperclip-agent-companies-plugin-manual';
 const pluginId = 'paperclip-agent-companies-plugin';
 const pluginDisplayName = 'Agent Companies Plugin';
 const settingsIndexPath = '/instance/settings/plugins';
-const companySettingsPath = '/company/settings/agent-companies';
+const companyScopedPluginPagePath = '/agent-companies';
 const settingsPageHeading = 'Repository Sources';
 const defaultRepositoryUrl = 'https://github.com/paperclipai/companies';
 const manualVerificationRepositoryUrl = 'https://github.com/alvarosanchez/micronaut-agent-company';
@@ -31,7 +31,7 @@ const seedCompanyNames = [
 ];
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
-const defaultPaperclipPackageVersion = '2026.618.0';
+const defaultPaperclipPackageVersion = '2026.626.0';
 const paperclipPackageVersion = process.env.PAPERCLIP_E2E_PAPERCLIP_VERSION?.trim() || defaultPaperclipPackageVersion;
 const env = {
   ...process.env,
@@ -549,7 +549,7 @@ async function main() {
   const manualUrl = new URL(settingsIndexPath, baseUrl).toString();
   const firstCompanyPrefix = companies.find((company) => typeof company?.issuePrefix === 'string')?.issuePrefix ?? null;
   const companySettingsUrl = firstCompanyPrefix
-    ? new URL(`/${firstCompanyPrefix}${companySettingsPath}`, baseUrl).toString()
+    ? new URL(`/${firstCompanyPrefix}${companyScopedPluginPagePath}`, baseUrl).toString()
     : null;
   await runCommand('open', [manualUrl], { stdio: 'ignore' });
 
