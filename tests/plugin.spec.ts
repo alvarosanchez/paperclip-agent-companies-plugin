@@ -45,9 +45,14 @@ import {
 import { requiresPaperclipBoardAccess } from "../src/paperclip-health.js";
 import {
   extractPortableRecurringTaskDefinitions,
-  findArchivableImportedRoutineIds
+  findArchivableImportedRoutineIds,
+  findUpdatableImportedRoutinePlans
 } from "../src/portable-routines.js";
-import { adapterPresetTestUtils, type AdapterPresetDraft } from "../src/ui/index.js";
+import {
+  ROUTINE_SYNC_IDENTITY_NOTICE,
+  adapterPresetTestUtils,
+  type AdapterPresetDraft
+} from "../src/ui/index.js";
 import { getImportedCompanyVersionInfo } from "../src/ui/version-status.js";
 
 const tempDirectories: string[] = [];
@@ -1140,6 +1145,40 @@ routines:
         ]
       )
     ).toEqual(["routine-old"]);
+  });
+
+  it("documents and preserves renamed recurring tasks as new routine identities", () => {
+    expect(ROUTINE_SYNC_IDENTITY_NOTICE).toMatch(/Renaming a recurring task creates a new routine/i);
+    expect(ROUTINE_SYNC_IDENTITY_NOTICE).toMatch(/leaves the unmatched old routine unchanged/i);
+
+    const renamedTask = {
+      slug: "monthly-review",
+      title: "Monthly Review",
+      description: "Check the queue.",
+      filePath: "tasks/monthly-review/TASK.md",
+      rootPath: "tasks/monthly-review",
+      routineStatus: "active",
+      routineTriggers: [{
+        kind: "schedule" as const,
+        label: "Monthly Review",
+        enabled: true,
+        cronExpression: "0 1 1 * *",
+        timezone: "UTC",
+        signingMode: null,
+        replayWindowSec: null
+      }]
+    };
+    const existingRoutine = {
+      id: "routine-weekly-review",
+      title: "Weekly Review",
+      description: "Check the queue.",
+      status: "active",
+      createdAt: "2026-04-22T05:16:26.000Z",
+      updatedAt: "2026-04-22T05:16:26.000Z"
+    };
+
+    expect(findUpdatableImportedRoutinePlans([renamedTask], [existingRoutine])).toEqual([]);
+    expect(findArchivableImportedRoutineIds([renamedTask], [existingRoutine])).toEqual([]);
   });
 
   it("packages a discovered company as an inline import source", async () => {
