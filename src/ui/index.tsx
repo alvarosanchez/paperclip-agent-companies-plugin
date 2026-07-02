@@ -4510,6 +4510,8 @@ function formatRoutineTriggerCount(count: number): string {
   return `${count} ${count === 1 ? "routine trigger" : "routine triggers"}`;
 }
 
+export const ROUTINE_SYNC_IDENTITY_NOTICE = "Tracked overwrite syncs preserve routine identity across source title and path renames when Git rename evidence or a stable metadata.agentCompanies.sourceId/id identifies the item. Ambiguous matches stop the sync; destination collisions, missing targets, or failed routine metadata/trigger reconciliation also stop before the portability issue import.";
+
 function getRecurringTaskImportHint(contents: CompanyContents): string | null {
   const recurringTaskCount = getRecurringTaskCount(contents);
   if (recurringTaskCount === 0) {
@@ -4533,8 +4535,8 @@ function getRecurringTaskImportHint(contents: CompanyContents): string | null {
   );
 
   return hasPaperclipRoutineMetadata
-    ? `${recurringTaskLabel} will import as Paperclip ${routineLabel}; .paperclip.yaml routine metadata is preserved.`
-    : `${recurringTaskLabel} will import as Paperclip ${routineLabel}.`;
+    ? `${recurringTaskLabel} will import as Paperclip ${routineLabel}; .paperclip.yaml routine metadata is preserved. ${ROUTINE_SYNC_IDENTITY_NOTICE}`
+    : `${recurringTaskLabel} will import as Paperclip ${routineLabel}. ${ROUTINE_SYNC_IDENTITY_NOTICE}`;
 }
 
 function getCompanyContentStatNote(

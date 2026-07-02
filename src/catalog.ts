@@ -159,12 +159,34 @@ export interface PaperclipCompanyImportResult {
   warnings?: unknown;
 }
 
+export type CatalogItemIdentityKind = "agent" | "project" | "issue" | "routine" | "skill";
+
+export interface CatalogItemIdentityBinding {
+  sourceKind: CatalogItemIdentityKind;
+  sourceId: string | null;
+  sourcePath: string;
+  sourceName: string;
+  sourceSlug: string | null;
+  targetId: string;
+  /** Legacy import-path alias. Retained only to normalize previously persisted records. */
+  importPath: string;
+  /** Paperclip's authoritative key for a bound skill. Null for non-skills. */
+  canonicalSkillKey: string | null;
+}
+
 export interface ImportedCatalogCompanyRecord {
   sourceCompanyId: string;
   importedCompanyId: string;
   importedCompanyName: string;
   importedCompanyIssuePrefix: string | null;
   importedSourceVersion: string | null;
+  importedSourceRevision: string | null;
+  sourcePathAliases: Array<{
+    kind: "skill";
+    sourcePath: string;
+    importPath: string;
+  }>;
+  itemIdentityBindings: CatalogItemIdentityBinding[];
   importedAt: string | null;
   selection: CompanyImportSelection;
   adapterPresetSelection: ImportAdapterPresetSelection;
@@ -1478,6 +1500,13 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
   const syncRunningSince =
     asIsoTimestamp(value.syncRunningSince) ??
     (initialSyncStatus === "running" ? lastSyncAttemptAt : null);
+  const importedSourceRevision =
+    asNonEmptyString(value.importedSourceRevision) ??
+    asNonEmptyString(value.sourceRevision) ??
+    asNonEmptyString(value.commitSha);
+  if (importedSourceRevision !== null && !/^[0-9a-f]{40}$/u.test(importedSourceRevision)) {
+    throw new Error("Persisted imported source revision must be a lowercase 40-character Git commit hash.");
+  }
 
   return {
     sourceCompanyId,
@@ -1494,6 +1523,36 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
       asNonEmptyString(value.importedSourceVersion) ??
       asNonEmptyString(value.sourceVersion) ??
       asNonEmptyString(value.version),
+    importedSourceRevision,
+    sourcePathAliases: Array.isArray(value.sourcePathAliases)
+      ? value.sourcePathAliases.flatMap((entry) => {
+          if (!isRecord(entry) || entry.kind !== "skill") return [];
+          const sourcePath = asNonEmptyString(entry.sourcePath);
+          const importPath = asNonEmptyString(entry.importPath);
+          return sourcePath && importPath ? [{ kind: "skill" as const, sourcePath, importPath }] : [];
+        })
+      : [],
+    itemIdentityBindings: Array.isArray(value.itemIdentityBindings)
+      ? value.itemIdentityBindings.flatMap((entry) => {
+          if (!isRecord(entry)) return [];
+          const sourceKind = asNonEmptyString(entry.sourceKind);
+          const sourcePath = asNonEmptyString(entry.sourcePath);
+          const sourceName = asNonEmptyString(entry.sourceName);
+          const targetId = asNonEmptyString(entry.targetId);
+          const importPath = asNonEmptyString(entry.importPath) ?? sourcePath;
+          if (!sourcePath || !sourceName || !targetId || !importPath || !["agent", "project", "issue", "routine", "skill"].includes(sourceKind ?? "")) return [];
+          return [{
+            sourceKind: sourceKind as CatalogItemIdentityKind,
+            sourceId: asNonEmptyString(entry.sourceId),
+            sourcePath,
+            sourceName,
+            sourceSlug: asNonEmptyString(entry.sourceSlug),
+            targetId,
+            importPath,
+            canonicalSkillKey: asNonEmptyString(entry.canonicalSkillKey)
+          }];
+        })
+      : [],
     importedAt,
     selection: normalizeCompanyImportSelection(value.selection),
     adapterPresetSelection: normalizeImportAdapterPresetSelection(value.adapterPresetSelection),

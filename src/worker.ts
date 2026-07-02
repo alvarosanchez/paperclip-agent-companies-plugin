@@ -49,9 +49,15 @@ import {
   type DiscoveredAgentCompany,
   type PortableCatalogFileEntry,
   type RepositorySource,
-  type CatalogState
+  type CatalogState,
+  type CatalogItemIdentityBinding
 } from "./catalog.js";
 import { requiresPaperclipBoardAccess } from "./paperclip-health.js";
+import {
+  parseGitChangedPaths,
+  parsePortableItemIdentity,
+  type PortableItemIdentity
+} from "./source-renames.js";
 import {
   extractPortableRecurringTaskDefinitions,
   extractPortableRecurringTaskFileDefinitions,
@@ -59,6 +65,7 @@ import {
   findUpdatableImportedRoutinePlans,
   removePortableRecurringTaskImports,
   type ImportedRecurringTaskFileDefinition,
+  type ImportedRoutineUpdatePlan,
   type ImportedRoutineTriggerDefinition,
   type ImportedRoutineTriggerSnapshot,
   type ImportedRoutineSnapshot
@@ -268,6 +275,11 @@ interface PaperclipRoutineMetadata {
   triggerCount: number;
 }
 
+export interface SourceItemRename {
+  oldItem: PortableItemIdentity;
+  newItem: PortableItemIdentity;
+}
+
 interface SyncImportRequest {
   sourceCompanyId: string;
   sourceCompanyName: string;
@@ -276,6 +288,19 @@ interface SyncImportRequest {
   preparedImport: CatalogPreparedCompanyImport;
   existingIssues?: PaperclipIssueRecord[] | null;
   adapterPresetSelection: ImportAdapterPresetSelection;
+  renameBindings?: Array<{
+    oldItem: PortableItemIdentity;
+    newItem: PortableItemIdentity;
+    binding: CatalogItemIdentityBinding;
+  }>;
+}
+
+interface BoundRoutineUpdatePlan extends ImportedRoutineUpdatePlan {
+  existingTriggers: ImportedRoutineTriggerSnapshot[];
+  patch: ImportedRoutineUpdatePlan["patch"] & {
+    projectId?: string | null;
+    assigneeAgentId?: string | null;
+  };
 }
 
 type PaperclipAdapterOverrides = Record<string, {
@@ -313,6 +338,9 @@ interface PaperclipIssueRecord {
   title: string | null;
   status: string | null;
   assigneeAgentId: string | null;
+  projectId: string | null;
+  description: string | null;
+  priority: string | null;
 }
 
 interface PaperclipAgentRecord {
@@ -323,6 +351,19 @@ interface PaperclipAgentRecord {
   role: string | null;
   title: string | null;
   adapterConfig: Record<string, unknown> | null;
+}
+
+interface PaperclipProjectRecord {
+  id: string;
+  name: string;
+  urlKey: string | null;
+}
+
+interface PaperclipSkillRecord {
+  id: string;
+  name: string;
+  slug: string | null;
+  key: string | null;
 }
 
 interface PaperclipApprovalRecord {
@@ -3153,6 +3194,203 @@ export async function resolveRepositoryContentRoot(
   return nextEntry.checkoutDirectory;
 }
 
+async function resolveRepositoryRevision(repository: RepositorySource): Promise<string> {
+  const repositoryRoot = await resolveRepositoryContentRoot(repository);
+  const result = await runProcess("git", ["-C", repositoryRoot, "rev-parse", "HEAD"]);
+  const revision = result.stdout.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/u.test(revision)) {
+    throw new Error("Source repository did not return a full Git commit revision.");
+  }
+  return revision;
+}
+
+async function ensureRepositoryRevisionAvailable(repositoryRoot: string, revision: string): Promise<void> {
+  if (!/^[0-9a-f]{40}$/u.test(revision)) {
+    throw new Error("Persisted imported source revision must be a lowercase 40-character Git commit hash.");
+  }
+  try {
+    await runProcess("git", ["-C", repositoryRoot, "cat-file", "-e", `${revision}^{commit}`]);
+    return;
+  } catch {
+    // Remote catalog checkouts are shallow; deepen the current branch before failing closed.
+  }
+  await runProcess("git", ["-C", repositoryRoot, "fetch", "--quiet", "--deepen=200", "origin"]);
+  await runProcess("git", ["-C", repositoryRoot, "cat-file", "-e", `${revision}^{commit}`]);
+}
+
+function stripCompanyRootPath(path: string, companyRelativePath: string): string | null {
+  const normalizedRoot = companyRelativePath.replace(/^\/+|\/+$/gu, "");
+  if (!normalizedRoot) return normalizeCompanyContentPath(path);
+  const prefix = `${normalizedRoot}/`;
+  return path.startsWith(prefix) ? normalizeCompanyContentPath(path.slice(prefix.length)) : null;
+}
+
+async function resolveSourceItemRenames(
+  repository: RepositorySource,
+  company: DiscoveredAgentCompany,
+  previousRevision: string,
+  currentRevision: string,
+  selection?: CompanyImportSelection
+): Promise<SourceItemRename[]> {
+  if (previousRevision === currentRevision) return [];
+  const repositoryRoot = await resolveRepositoryContentRoot(repository);
+  await ensureRepositoryRevisionAvailable(repositoryRoot, previousRevision);
+  const args = [
+    "-C", repositoryRoot,
+    "diff", "--name-status", "-z", "--find-renames=50%",
+    previousRevision, currentRevision, "--"
+  ];
+  if (company.relativePath) args.push(company.relativePath);
+  const changed = parseGitChangedPaths((await runProcess("git", args)).stdout);
+  const renames: SourceItemRename[] = [];
+  const deleted: PortableItemIdentity[] = [];
+  const added: PortableItemIdentity[] = [];
+  for (const change of changed) {
+    const oldPath = stripCompanyRootPath(change.oldPath, company.relativePath);
+    const newPath = stripCompanyRootPath(change.newPath, company.relativePath);
+    if (!oldPath || !newPath) continue;
+    let oldItem: PortableItemIdentity | null = null;
+    let newItem: PortableItemIdentity | null = null;
+    if (change.status !== "added") {
+      try {
+        const oldContent = (await runProcess("git", ["-C", repositoryRoot, "show", `${previousRevision}:${change.oldPath}`])).stdout;
+        oldItem = parsePortableItemIdentity(oldPath, oldContent);
+      } catch { /* A removed non-portable file is irrelevant. */ }
+    }
+    if (change.status !== "deleted") {
+      try {
+        const newContent = await readFile(resolve(repositoryRoot, change.newPath), "utf8");
+        newItem = parsePortableItemIdentity(newPath, newContent);
+      } catch { /* A new non-portable file is irrelevant. */ }
+    }
+    if (change.status === "deleted") {
+      if (oldItem) deleted.push(oldItem);
+      continue;
+    }
+    if (change.status === "added") {
+      if (newItem) added.push(newItem);
+      continue;
+    }
+    if (!oldItem || !newItem || oldItem.kind !== newItem.kind) continue;
+    if (oldItem.path === newItem.path && oldItem.name === newItem.name && oldItem.slug === newItem.slug) continue;
+    renames.push({ oldItem, newItem });
+  }
+  // Git may not recognize a heavily edited move. An explicit stable source id is authoritative.
+  for (const oldItem of deleted) {
+    if (selection && !isIdentitySelected(oldItem, selection)) continue;
+    if (!oldItem.sourceId) continue;
+    const matches = added.filter((item) => item.kind === oldItem.kind && item.sourceId === oldItem.sourceId);
+    if (matches.length !== 1) {
+      if (matches.length > 1) throw new Error(`Ambiguous source id "${oldItem.sourceId}" in renamed catalog items.`);
+      continue;
+    }
+    renames.push({ oldItem, newItem: matches[0]! });
+  }
+  return renames;
+}
+
+function isIdentitySelected(item: PortableItemIdentity, selection: CompanyImportSelection): boolean {
+  const key: CompanyContentKey = item.kind === "agent" ? "agents"
+    : item.kind === "project" ? "projects"
+      : item.kind === "skill" ? "skills"
+        : item.path.endsWith("/ISSUE.md") ? "issues" : "tasks";
+  const part = selection[key];
+  return part.mode === "all" || (part.mode === "selected" && (part.itemPaths ?? []).includes(item.path));
+}
+
+function filterSelectedSourceRenames(
+  renames: SourceItemRename[],
+  selection: CompanyImportSelection
+): SourceItemRename[] {
+  // Saved selected paths refer to the old revision. Excluded source changes must
+  // never participate in identity lookup, selection migration, or mutation.
+  return renames.filter(({ oldItem }) => isIdentitySelected(oldItem, selection));
+}
+
+async function readSelectedSourceIdentitiesAtRevision(
+  repository: RepositorySource,
+  company: DiscoveredAgentCompany,
+  revision: string,
+  selection: CompanyImportSelection
+): Promise<Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }>> {
+  const repositoryRoot = await resolveRepositoryContentRoot(repository);
+  await ensureRepositoryRevisionAvailable(repositoryRoot, revision);
+  const args = ["-C", repositoryRoot, "ls-tree", "-r", "-z", "--name-only", revision, "--"];
+  if (company.relativePath) args.push(company.relativePath);
+  const paths = (await runProcess("git", args)).stdout.split("\0").filter(Boolean);
+  const identities: Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }> = [];
+  for (const repositoryPath of paths) {
+    const path = stripCompanyRootPath(repositoryPath, company.relativePath);
+    if (!path) continue;
+    let content: string;
+    try {
+      content = (await runProcess("git", ["-C", repositoryRoot, "show", `${revision}:${repositoryPath}`])).stdout;
+    } catch {
+      continue;
+    }
+    const item = parsePortableItemIdentity(path, content);
+    if (!item || !isIdentitySelected(item, selection)) continue;
+    let explicitSkillKey: string | null = null;
+    if (item.kind === "skill") {
+      const match = content.match(FRONTMATTER_PATTERN);
+      const frontmatter = match ? parseYamlObject(match[1] ?? "") : null;
+      const keys = frontmatter ? [...new Set(getDeclaredSkillCanonicalKeys(frontmatter))] : [];
+      if (keys.length > 1) throw new Error(`Cannot recover identity for "${path}": conflicting explicit skill keys.`);
+      explicitSkillKey = keys[0] ?? null;
+    }
+    identities.push({ item, explicitSkillKey });
+  }
+  return identities;
+}
+
+export function migrateSelectionForSourceRenames(
+  selection: CompanyImportSelection,
+  renames: SourceItemRename[]
+): CompanyImportSelection {
+  const pathMaps: Record<CompanyContentKey, Map<string, string>> = {
+    agents: new Map(),
+    projects: new Map(),
+    tasks: new Map(),
+    issues: new Map(),
+    skills: new Map()
+  };
+  for (const rename of renames) {
+    const key: CompanyContentKey = rename.oldItem.kind === "agent"
+      ? "agents"
+      : rename.oldItem.kind === "project"
+        ? "projects"
+        : rename.oldItem.kind === "skill"
+          ? "skills"
+          : rename.oldItem.path.endsWith("/ISSUE.md")
+            ? "issues"
+            : "tasks";
+    pathMaps[key].set(rename.oldItem.path, rename.newItem.path);
+  }
+  return Object.fromEntries(COMPANY_CONTENT_KEYS.map((key) => {
+    const part = selection[key];
+    if (part.mode !== "selected") return [key, part];
+    return [key, {
+      ...part,
+      itemPaths: [...new Set((part.itemPaths ?? []).map((path) => pathMaps[key].get(path) ?? path))]
+    }];
+  })) as unknown as CompanyImportSelection;
+}
+
+export function migrateAdapterPresetSelectionForSourceRenames(
+  selection: ImportAdapterPresetSelection,
+  renames: SourceItemRename[]
+): ImportAdapterPresetSelection {
+  const agentPresetIds = { ...selection.agentPresetIds };
+  for (const rename of renames) {
+    if (rename.oldItem.kind !== "agent" || !rename.oldItem.slug || !rename.newItem.slug) continue;
+    if (Object.prototype.hasOwnProperty.call(agentPresetIds, rename.oldItem.slug)) {
+      agentPresetIds[rename.newItem.slug] = agentPresetIds[rename.oldItem.slug] ?? null;
+      delete agentPresetIds[rename.oldItem.slug];
+    }
+  }
+  return { ...selection, agentPresetIds };
+}
+
 async function readCatalogCompanyContentDetail(
   ctx: PluginContext,
   companyId: string,
@@ -3422,6 +3660,30 @@ async function executeDefaultSyncImport(
     }
   }
 
+  const boundRoutinePlans = await prevalidateBoundRoutineUpdatePlans(
+    connection,
+    input.importedCompanyId,
+    input.preparedImport.source,
+    input.renameBindings ?? []
+  );
+  const preparedSource = await applyRenameBindingsBeforeImport(
+    connection,
+    input.preparedImport.source,
+    input.renameBindings ?? [],
+    input.importedCompanyId
+  );
+  for (const plan of boundRoutinePlans) {
+    await executeBoundRoutineUpdatePlan(connection, plan);
+    ctx.logger.info("Updated renamed Paperclip routine by bound UUID before portability sync", {
+      companyId: input.importedCompanyId,
+      routineId: plan.routine.id,
+      routineTitle: plan.task.title
+    });
+  }
+  const sourceWithoutBoundRoutines = removePortableRecurringTaskImports(
+    preparedSource,
+    boundRoutinePlans.map((plan) => plan.task)
+  );
   const preIssueImportInclude = buildSyncPaperclipImportInclude(
     input.preparedImport.selection,
     false
@@ -3431,13 +3693,13 @@ async function executeDefaultSyncImport(
     true
   );
   let preIssueImportSource = buildStagedPaperclipImportSource(
-    input.preparedImport.source,
+    sourceWithoutBoundRoutines,
     "pre_issues",
     { includeCompanyMetadata: preIssueImportInclude.company }
   );
   let issueOnlyImportSource = filterPortableIssueFilesForExistingPaperclipIssues(
     buildStagedPaperclipImportSource(
-      input.preparedImport.source,
+      sourceWithoutBoundRoutines,
       "issues",
       { includeCompanyMetadata: issueOnlyImportInclude.company }
     ),
@@ -3527,7 +3789,7 @@ async function executeDefaultSyncImport(
       ctx,
       connection,
       input.importedCompanyId,
-      input.preparedImport.source.files
+      sourceWithoutBoundRoutines.files
     );
     additionalWarnings.push(...routineUpdateResult.warnings);
     issueOnlyImportSource = removePortableRecurringTaskImports(
@@ -3557,9 +3819,14 @@ async function executeDefaultSyncImport(
           ctx,
           connection,
           input.importedCompanyId,
-          input.preparedImport.source.files
+          sourceWithoutBoundRoutines.files
         )
       : [];
+  await verifyRenameTargetIds(
+    connection,
+    input.importedCompanyId,
+    input.renameBindings ?? []
+  );
 
   return {
     company: importedPhaseTwoResult?.company ?? importedPhaseOneResult?.company ?? null,
@@ -3825,7 +4092,10 @@ function normalizePaperclipIssue(value: unknown): PaperclipIssueRecord | null {
     identifier: asNonEmptyString(value.identifier),
     title: asNonEmptyString(value.title),
     status: asNonEmptyString(value.status),
-    assigneeAgentId: asNonEmptyString(value.assigneeAgentId)
+    assigneeAgentId: asNonEmptyString(value.assigneeAgentId),
+    projectId: asNonEmptyString(value.projectId),
+    description: asNonEmptyString(value.description) ?? asNonEmptyString(value.body),
+    priority: asNonEmptyString(value.priority)
   };
 }
 
@@ -3949,9 +4219,10 @@ function normalizePaperclipRoutineTriggerList(value: unknown): ImportedRoutineTr
     return null;
   }
 
-  return value
-    .map((trigger) => normalizePaperclipRoutineTrigger(trigger))
-    .filter((trigger): trigger is ImportedRoutineTriggerSnapshot => trigger !== null);
+  const normalized = value.map((trigger) => normalizePaperclipRoutineTrigger(trigger));
+  return normalized.every((trigger): trigger is ImportedRoutineTriggerSnapshot => trigger !== null)
+    ? normalized
+    : null;
 }
 
 function normalizePaperclipRoutine(value: unknown): PaperclipRoutineRecord | null {
@@ -4024,6 +4295,8 @@ async function updatePaperclipRoutine(
     title: string;
     description: string | null;
     status?: string;
+    projectId?: string | null;
+    assigneeAgentId?: string | null;
   }
 ): Promise<void> {
   await fetchPaperclipApiJson(connection, `/api/routines/${encodeURIComponent(routineId)}`, {
@@ -4200,6 +4473,41 @@ async function reconcilePaperclipRoutineTriggers(
   }
 }
 
+async function reconcilePaperclipRoutineTriggersFromSnapshot(
+  connection: PaperclipApiConnection,
+  routineId: string,
+  sourceTriggers: ImportedRoutineTriggerDefinition[],
+  existingTriggers: ImportedRoutineTriggerSnapshot[]
+): Promise<void> {
+  if (
+    existingTriggers.length === sourceTriggers.length
+    && sourceTriggers.every((trigger, index) => {
+      const existing = existingTriggers[index];
+      return existing ? routineTriggersMatch(trigger, existing) : false;
+    })
+  ) return;
+
+  const canPatchInPlace = sourceTriggers.every((trigger, index) => {
+    const existing = existingTriggers[index];
+    return existing === undefined || existing.kind === trigger.kind;
+  });
+  if (canPatchInPlace) {
+    for (const [index, trigger] of sourceTriggers.entries()) {
+      const existing = existingTriggers[index];
+      if (!existing) await createPaperclipRoutineTrigger(connection, routineId, trigger);
+      else if (!routineTriggersMatch(trigger, existing)) {
+        await updatePaperclipRoutineTrigger(connection, existing.id, trigger);
+      }
+    }
+    for (const trigger of existingTriggers.slice(sourceTriggers.length)) {
+      await deletePaperclipRoutineTrigger(connection, trigger.id);
+    }
+    return;
+  }
+  for (const trigger of existingTriggers) await deletePaperclipRoutineTrigger(connection, trigger.id);
+  for (const trigger of sourceTriggers) await createPaperclipRoutineTrigger(connection, routineId, trigger);
+}
+
 async function archivePaperclipRoutine(
   connection: PaperclipApiConnection,
   routineId: string
@@ -4229,17 +4537,7 @@ async function updateExistingImportedRoutinesBeforeReplaceImport(
     };
   }
 
-  let routines: PaperclipRoutineRecord[];
-  try {
-    routines = await fetchPaperclipCompanyRoutines(connection, companyId);
-  } catch (error) {
-    return {
-      updatedTasks: [],
-      warnings: [
-        `Imported routines could not be checked for in-place updates: ${summarizeErrorMessage(error)}`
-      ]
-    };
-  }
+  const routines = await fetchPaperclipCompanyRoutines(connection, companyId);
 
   const plans = findUpdatableImportedRoutinePlans(recurringTasks, routines);
   if (plans.length === 0) {
@@ -4250,36 +4548,29 @@ async function updateExistingImportedRoutinesBeforeReplaceImport(
   }
 
   const updatedTasks: ImportedRecurringTaskFileDefinition[] = [];
-  const warnings: string[] = [];
 
   for (const plan of plans) {
-    try {
-      await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
+    await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
 
-      if (plan.task.routineTriggers !== null) {
-        await reconcilePaperclipRoutineTriggers(
-          connection,
-          plan.routine.id,
-          plan.task.routineTriggers
-        );
-      }
-
-      updatedTasks.push(plan.task);
-      ctx.logger.info("Updated imported Paperclip routine in place before replace-mode sync", {
-        companyId,
-        routineId: plan.routine.id,
-        routineTitle: plan.task.title
-      });
-    } catch (error) {
-      warnings.push(
-        `Imported routine "${plan.task.title}" could not be updated in place: ${summarizeErrorMessage(error)}`
+    if (plan.task.routineTriggers !== null) {
+      await reconcilePaperclipRoutineTriggers(
+        connection,
+        plan.routine.id,
+        plan.task.routineTriggers
       );
     }
+
+    updatedTasks.push(plan.task);
+    ctx.logger.info("Updated imported Paperclip routine in place before replace-mode sync", {
+      companyId,
+      routineId: plan.routine.id,
+      routineTitle: plan.task.title
+    });
   }
 
   return {
     updatedTasks,
-    warnings
+    warnings: []
   };
 }
 
@@ -4634,6 +4925,655 @@ async function fetchPaperclipCompanyAgents(
   }
 
   return agents;
+}
+
+function normalizeNamedPaperclipRecords(
+  payload: unknown,
+  collectionKey: "projects" | "skills"
+): Array<Record<string, unknown>> {
+  const rows = Array.isArray(payload)
+    ? payload
+    : isRecord(payload) && Array.isArray(payload[collectionKey])
+      ? payload[collectionKey]
+      : isRecord(payload) && Array.isArray(payload.items)
+        ? payload.items
+        : [];
+  return rows.filter((row): row is Record<string, unknown> => isRecord(row));
+}
+
+async function fetchPaperclipCompanyProjects(
+  connection: PaperclipApiConnection,
+  companyId: string
+): Promise<PaperclipProjectRecord[]> {
+  const rows = normalizeNamedPaperclipRecords(
+    await fetchPaperclipApiJson(connection, `/api/companies/${encodeURIComponent(companyId)}/projects`),
+    "projects"
+  );
+  return rows.flatMap((row) => {
+    const id = asNonEmptyString(row.id);
+    const name = asNonEmptyString(row.name);
+    if (!id || !name) return [];
+    return [{ id, name, urlKey: asNonEmptyString(row.urlKey) }];
+  });
+}
+
+async function fetchPaperclipCompanySkills(
+  connection: PaperclipApiConnection,
+  companyId: string
+): Promise<PaperclipSkillRecord[]> {
+  const rows = normalizeNamedPaperclipRecords(
+    await fetchPaperclipApiJson(connection, `/api/companies/${encodeURIComponent(companyId)}/skills`),
+    "skills"
+  );
+  return rows.flatMap((row) => {
+    const id = asNonEmptyString(row.id);
+    const name = asNonEmptyString(row.name);
+    if (!id || !name) return [];
+    return [{ id, name, slug: asNonEmptyString(row.slug), key: asNonEmptyString(row.key) }];
+  });
+}
+
+function normalizedIdentity(value: string | null | undefined): string {
+  return (normalizePaperclipSlug(value ?? "") ?? "").toLowerCase();
+}
+
+function getDeclaredSkillCanonicalKeys(frontmatter: Record<string, unknown>): string[] {
+  const metadata = isRecord(frontmatter.metadata) ? frontmatter.metadata : null;
+  const paperclip = metadata && isRecord(metadata.paperclip) ? metadata.paperclip : null;
+  const catalog = paperclip && isRecord(paperclip.catalog) ? paperclip.catalog : null;
+  return [
+    frontmatter.key,
+    frontmatter.skillKey,
+    metadata?.skillKey,
+    metadata?.canonicalKey,
+    metadata?.paperclipSkillKey,
+    paperclip?.skillKey,
+    catalog?.key,
+    catalog?.id,
+    catalog?.catalogSkillId
+  ].flatMap((value) => asNonEmptyString(value) ?? []);
+}
+
+function injectCanonicalSkillKey(content: string, canonicalKey: string, path: string): string {
+  const match = content.match(FRONTMATTER_PATTERN);
+  if (!match) throw new Error(`Cannot safely rename skill "${path}": SKILL.md has no YAML frontmatter.`);
+  const frontmatter = parseYamlObject(match[1] ?? "");
+  if (!frontmatter) throw new Error(`Cannot safely rename skill "${path}": SKILL.md frontmatter is invalid.`);
+  const declaredKeys = getDeclaredSkillCanonicalKeys(frontmatter);
+  if (declaredKeys.some((key) => key !== canonicalKey)) {
+    throw new Error(`Cannot safely rename skill "${path}": its explicit/catalog key conflicts with the bound Paperclip key.`);
+  }
+  const metadata = isRecord(frontmatter.metadata) ? { ...frontmatter.metadata } : {};
+  metadata.skillKey = canonicalKey;
+  const nextFrontmatter = { ...frontmatter, metadata };
+  return `---\n${stringifyYaml(nextFrontmatter).trimEnd()}\n---\n${content.slice(match[0].length)}`;
+}
+
+interface IdentityCandidateCollections {
+  agents: PaperclipAgentRecord[];
+  projects: PaperclipProjectRecord[];
+  issues: PaperclipIssueRecord[];
+  routines: PaperclipRoutineRecord[];
+  skills: PaperclipSkillRecord[];
+}
+
+function matchIdentityCandidates(
+  item: PortableItemIdentity,
+  records: IdentityCandidateCollections,
+  explicitSkillKey: string | null = null
+): Array<{ id: string; key?: string | null }> {
+  const identity = normalizedIdentity(item.slug ?? item.name);
+  if (item.kind === "agent") return records.agents.filter((record) => normalizedIdentity(record.urlKey ?? record.name) === identity);
+  if (item.kind === "project") return records.projects.filter((record) => normalizedIdentity(record.urlKey ?? record.name) === identity);
+  if (item.kind === "skill") {
+    return records.skills.filter((record) =>
+      normalizedIdentity(record.slug) === identity
+      || Boolean(explicitSkillKey && record.key === explicitSkillKey)
+    );
+  }
+  if (item.kind === "routine") {
+    return records.routines.filter((record) =>
+      record.status !== "archived" && normalizedIdentity(record.title) === normalizedIdentity(item.name)
+    );
+  }
+  return records.issues.filter((record) => normalizedIdentity(record.title) === normalizedIdentity(item.name));
+}
+
+async function fetchIdentityCandidateCollections(
+  connection: PaperclipApiConnection,
+  companyId: string
+): Promise<IdentityCandidateCollections> {
+  const [agents, projects, issues, routines, skills] = await Promise.all([
+    fetchPaperclipCompanyAgents(connection, companyId),
+    fetchPaperclipCompanyProjects(connection, companyId),
+    fetchPaperclipCompanyIssues(connection, companyId),
+    fetchPaperclipCompanyRoutines(connection, companyId),
+    fetchPaperclipCompanySkills(connection, companyId)
+  ]);
+  return { agents, projects, issues, routines, skills };
+}
+
+function collectPreparedSourceIdentities(
+  files: Record<string, PortableCatalogFileEntry>
+): Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }> {
+  const identities: Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }> = [];
+  for (const [path, entry] of Object.entries(files)) {
+    if (typeof entry !== "string") continue;
+    const item = parsePortableItemIdentity(path, entry);
+    if (!item) continue;
+    let explicitSkillKey: string | null = null;
+    if (item.kind === "skill") {
+      const match = entry.match(FRONTMATTER_PATTERN);
+      const frontmatter = match ? parseYamlObject(match[1] ?? "") : null;
+      const keys = frontmatter ? [...new Set(getDeclaredSkillCanonicalKeys(frontmatter))] : [];
+      if (keys.length > 1) throw new Error(`Cannot bootstrap identity for "${path}": conflicting explicit skill keys.`);
+      explicitSkillKey = keys[0] ?? null;
+    }
+    identities.push({ item, explicitSkillKey });
+  }
+  return identities;
+}
+
+async function bootstrapIdentityBindingsForItems(
+  ctx: PluginContext,
+  companyId: string,
+  identities: Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }>,
+  existingRecords?: IdentityCandidateCollections
+): Promise<CatalogItemIdentityBinding[]> {
+  if (identities.length === 0) return [];
+  const records = existingRecords ?? await fetchIdentityCandidateCollections(
+    await resolvePaperclipApiConnection(ctx, companyId),
+    companyId
+  );
+  const claimedTargets = new Set<string>();
+  return identities.map(({ item, explicitSkillKey }) => {
+    const candidates = matchIdentityCandidates(item, records, explicitSkillKey);
+    if (candidates.length !== 1) {
+      throw new Error(`Cannot bootstrap identity ledger for "${item.path}": expected one existing ${item.kind}, found ${candidates.length}.`);
+    }
+    const targetId = candidates[0]!.id;
+    if (claimedTargets.has(targetId)) {
+      throw new Error(`Cannot bootstrap identity ledger: target ${targetId} matched more than one selected source item.`);
+    }
+    claimedTargets.add(targetId);
+    const canonicalSkillKey = item.kind === "skill"
+      ? records.skills.find((skill) => skill.id === targetId)?.key ?? null
+      : null;
+    if (item.kind === "skill" && !canonicalSkillKey) {
+      throw new Error(`Cannot bootstrap identity ledger for "${item.path}": matched skill has no canonical key.`);
+    }
+    return {
+      sourceKind: item.kind,
+      sourceId: item.sourceId,
+      sourcePath: item.path,
+      sourceName: item.name,
+      sourceSlug: item.slug,
+      targetId,
+      importPath: item.path,
+      canonicalSkillKey
+    };
+  });
+}
+
+async function bootstrapItemIdentityBindings(
+  ctx: PluginContext,
+  companyId: string,
+  source: CatalogPreparedCompanyImport["source"]
+): Promise<CatalogItemIdentityBinding[]> {
+  return bootstrapIdentityBindingsForItems(ctx, companyId, collectPreparedSourceIdentities(source.files));
+}
+
+function isIdentityLedgerComplete(
+  bindings: CatalogItemIdentityBinding[],
+  identities: Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }>
+): boolean {
+  if (bindings.length !== identities.length) return false;
+  const targets = new Set<string>();
+  for (const { item, explicitSkillKey } of identities) {
+    const matches = bindings.filter((binding) =>
+      binding.sourceKind === item.kind
+      && binding.sourceId === item.sourceId
+      && binding.sourcePath === item.path
+      && binding.sourceName === item.name
+      && binding.sourceSlug === item.slug
+      && binding.importPath === item.path
+      && (item.kind !== "skill" || (
+        Boolean(binding.canonicalSkillKey)
+        && (!explicitSkillKey || binding.canonicalSkillKey === explicitSkillKey)
+      ))
+    );
+    if (matches.length !== 1 || targets.has(matches[0]!.targetId)) return false;
+    targets.add(matches[0]!.targetId);
+  }
+  return true;
+}
+
+function projectCurrentIdentityBindings(
+  previousBindings: CatalogItemIdentityBinding[],
+  renameBindings: NonNullable<SyncImportRequest["renameBindings"]>,
+  identities: Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }>
+): CatalogItemIdentityBinding[] {
+  return identities.flatMap(({ item }) => {
+    const renamed = renameBindings.find(({ newItem }) =>
+      newItem.kind === item.kind && newItem.path === item.path && newItem.sourceId === item.sourceId
+    )?.binding;
+    if (renamed) return [renamed];
+    const existing = previousBindings.find((binding) =>
+      binding.sourceKind === item.kind
+      && binding.sourceId === item.sourceId
+      && binding.sourcePath === item.path
+      && binding.sourceName === item.name
+      && binding.sourceSlug === item.slug
+    );
+    return existing ? [{ ...existing, importPath: item.path }] : [];
+  });
+}
+
+function identityTargetExists(
+  item: PortableItemIdentity,
+  targetId: string,
+  records: IdentityCandidateCollections
+): boolean {
+  if (item.kind === "agent") return records.agents.some(({ id }) => id === targetId);
+  if (item.kind === "project") return records.projects.some(({ id }) => id === targetId);
+  if (item.kind === "skill") return records.skills.some(({ id }) => id === targetId);
+  if (item.kind === "routine") {
+    return records.routines.some(({ id, status }) => id === targetId && status !== "archived");
+  }
+  return records.issues.some(({ id }) => id === targetId);
+}
+
+async function preflightCurrentIdentityBindings(
+  ctx: PluginContext,
+  companyId: string,
+  identities: Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }>,
+  projectedBindings: CatalogItemIdentityBinding[],
+  existingRecords?: IdentityCandidateCollections
+): Promise<void> {
+  if (identities.length === 0) return;
+  const records = existingRecords ?? await fetchIdentityCandidateCollections(
+    await resolvePaperclipApiConnection(ctx, companyId),
+    companyId
+  );
+  const claimedTargetIds = new Set<string>();
+  const sourceKeys = new Set<string>();
+  for (const { item, explicitSkillKey } of identities) {
+    const sourceKey = `${item.kind}\u0000${normalizedIdentity(item.slug ?? item.name)}`;
+    if (sourceKeys.has(sourceKey)) {
+      throw new Error(`Selected source identity "${item.slug ?? item.name}" is declared more than once.`);
+    }
+    sourceKeys.add(sourceKey);
+    const bindings = projectedBindings.filter((binding) =>
+      binding.sourceKind === item.kind
+      && binding.sourcePath === item.path
+      && binding.sourceName === item.name
+      && binding.sourceSlug === item.slug
+    );
+    if (bindings.length > 1) {
+      throw new Error(`Projected identity ledger for "${item.path}" is ambiguous.`);
+    }
+    const binding = bindings[0];
+    if (!binding) {
+      const candidates = matchIdentityCandidates(item, records, explicitSkillKey);
+      if (candidates.length !== 0) {
+        throw new Error(`Cannot add "${item.path}": its ${item.kind} identity already matches ${candidates.length} live object(s).`);
+      }
+      continue;
+    }
+    if (
+      item.kind === "skill"
+      && explicitSkillKey
+      && binding.canonicalSkillKey !== explicitSkillKey
+    ) {
+      throw new Error(
+        `Cannot sync "${item.path}": its explicit skill key conflicts with the bound canonical key.`
+      );
+    }
+    if (!identityTargetExists(item, binding.targetId, records)) {
+      throw new Error(`Cannot sync "${item.path}": bound ${item.kind} ${binding.targetId} no longer exists.`);
+    }
+    if (claimedTargetIds.has(binding.targetId)) {
+      throw new Error(`Projected identity ledger target ${binding.targetId} is bound more than once.`);
+    }
+    claimedTargetIds.add(binding.targetId);
+  }
+}
+
+async function resolveRenameIdentityBindings(
+  ctx: PluginContext,
+  companyId: string,
+  renames: SourceItemRename[],
+  existingBindings: CatalogItemIdentityBinding[],
+  existingRecords?: IdentityCandidateCollections
+): Promise<Array<{ oldItem: PortableItemIdentity; newItem: PortableItemIdentity; binding: CatalogItemIdentityBinding }>> {
+  if (renames.length === 0) return [];
+  const records = existingRecords ?? await fetchIdentityCandidateCollections(
+    await resolvePaperclipApiConnection(ctx, companyId),
+    companyId
+  );
+  const claimedTargets = new Set<string>();
+  return renames.map(({ oldItem, newItem }) => {
+    const stored = existingBindings.filter((binding) =>
+      binding.sourceKind === oldItem.kind
+      && ((oldItem.sourceId && binding.sourceId === oldItem.sourceId) || binding.sourcePath === oldItem.path)
+    );
+    if (stored.length > 1) throw new Error(`Ambiguous identity ledger entry for "${oldItem.path}".`);
+    let targetId = stored[0]?.targetId ?? null;
+    if (!targetId) {
+      const candidates = matchIdentityCandidates(oldItem, records);
+      if (candidates.length !== 1) {
+        throw new Error(`Cannot safely rename "${oldItem.path}": expected one existing ${oldItem.kind}, found ${candidates.length}.`);
+      }
+      targetId = candidates[0]!.id;
+    }
+    if (claimedTargets.has(targetId)) throw new Error(`Ambiguous rename: target ${targetId} was matched more than once.`);
+    claimedTargets.add(targetId);
+    const targetExists = oldItem.kind === "agent" ? records.agents.some((record) => record.id === targetId)
+      : oldItem.kind === "project" ? records.projects.some((record) => record.id === targetId)
+        : oldItem.kind === "issue" ? records.issues.some((record) => record.id === targetId)
+          : oldItem.kind === "routine" ? records.routines.some((record) => record.id === targetId && record.status !== "archived")
+            : records.skills.some((record) => record.id === targetId);
+    if (!targetExists) throw new Error(`Cannot safely rename "${oldItem.path}": bound ${oldItem.kind} ${targetId} no longer exists.`);
+    const destinationCollisions = matchIdentityCandidates(newItem, records)
+      .filter((candidate) => candidate.id !== targetId);
+    if (destinationCollisions.length > 0) {
+      throw new Error(`Cannot safely rename "${oldItem.path}": destination ${newItem.kind} identity "${newItem.slug ?? newItem.name}" is already in use.`);
+    }
+    const targetSkill = oldItem.kind === "skill" ? records.skills.find((skill) => skill.id === targetId) : null;
+    const canonicalSkillKey = oldItem.kind === "skill"
+      ? targetSkill?.key ?? stored[0]?.canonicalSkillKey ?? null
+      : null;
+    if (
+      oldItem.kind === "skill"
+      && stored[0]?.canonicalSkillKey
+      && targetSkill?.key
+      && stored[0].canonicalSkillKey !== targetSkill.key
+    ) {
+      throw new Error(`Cannot safely rename "${oldItem.path}": the bound skill canonical key changed.`);
+    }
+    if (oldItem.kind === "skill") {
+      if (!targetSkill) throw new Error(`Cannot safely rename "${oldItem.path}": bound skill ${targetId} no longer exists.`);
+      if (!canonicalSkillKey) throw new Error(`Cannot safely rename "${oldItem.path}": bound skill has no canonical key.`);
+      if (records.skills.some((skill) =>
+        skill.id !== targetId && normalizedIdentity(skill.slug) === normalizedIdentity(newItem.slug)
+      )) {
+        throw new Error(`Cannot safely rename "${oldItem.path}": skill slug "${newItem.slug}" is already in use.`);
+      }
+    }
+    return {
+      oldItem,
+      newItem,
+      binding: {
+        sourceKind: newItem.kind,
+        sourceId: newItem.sourceId ?? oldItem.sourceId,
+        sourcePath: newItem.path,
+        sourceName: newItem.name,
+        sourceSlug: newItem.slug,
+        targetId,
+        importPath: newItem.path,
+        canonicalSkillKey
+      }
+    };
+  });
+}
+
+function resolveUniquePortableReference(
+  slug: string | null,
+  kind: "agent" | "project",
+  records: IdentityCandidateCollections,
+  path: string,
+  renames: NonNullable<SyncImportRequest["renameBindings"]>
+): string | null {
+  if (!slug) return null;
+  const boundCandidates = renames.filter(({ newItem }) =>
+    newItem.kind === kind
+    && [newItem.slug, newItem.sourceId, newItem.name]
+      .some((identity) => Boolean(identity) && normalizedIdentity(identity) === normalizedIdentity(slug))
+  );
+  if (boundCandidates.length > 1) {
+    throw new Error(`Cannot safely update renamed issue "${path}": ${kind} reference "${slug}" matched ${boundCandidates.length} rename bindings.`);
+  }
+  if (boundCandidates.length === 1) return boundCandidates[0]!.binding.targetId;
+  const candidates = kind === "agent"
+    ? records.agents.filter((record) => normalizedIdentity(record.urlKey ?? record.name) === normalizedIdentity(slug))
+    : records.projects.filter((record) => normalizedIdentity(record.urlKey ?? record.name) === normalizedIdentity(slug));
+  if (candidates.length !== 1) {
+    throw new Error(`Cannot safely update renamed issue "${path}": ${kind} reference "${slug}" matched ${candidates.length} live objects.`);
+  }
+  return candidates[0]!.id;
+}
+
+function buildRenamedIssuePatch(
+  item: PortableItemIdentity,
+  entry: PortableCatalogFileEntry,
+  records: IdentityCandidateCollections,
+  renames: NonNullable<SyncImportRequest["renameBindings"]>
+): Record<string, unknown> {
+  if (typeof entry !== "string") throw new Error(`Cannot safely update renamed issue "${item.path}": source markdown is missing.`);
+  const match = entry.match(FRONTMATTER_PATTERN);
+  const frontmatter = match ? parseYamlObject(match[1] ?? "") : null;
+  if (!frontmatter) throw new Error(`Cannot safely update renamed issue "${item.path}": frontmatter is invalid.`);
+  const projectSlug = asNonEmptyString(frontmatter.project)
+    ?? (item.path.startsWith("projects/") ? item.path.split("/")[1] ?? null : null);
+  const assigneeSlug = asNonEmptyString(frontmatter.assignee)
+    ?? (Array.isArray(frontmatter.assignees) ? asNonEmptyString(frontmatter.assignees[0]) : null);
+  const patch: Record<string, unknown> = {
+    title: item.name,
+    description: normalizePortableIssueComparisonText(entry.replace(FRONTMATTER_PATTERN, "")),
+    projectId: resolveUniquePortableReference(projectSlug, "project", records, item.path, renames),
+    assigneeAgentId: resolveUniquePortableReference(assigneeSlug, "agent", records, item.path, renames)
+  };
+  const status = asNonEmptyString(frontmatter.status);
+  const priority = asNonEmptyString(frontmatter.priority);
+  if (status) patch.status = status;
+  if (priority) patch.priority = priority;
+  return patch;
+}
+
+function validateRenamedRoutineSourceContract(
+  files: Record<string, PortableCatalogFileEntry>,
+  task: ImportedRecurringTaskFileDefinition
+): void {
+  const extensionEntry = PAPERCLIP_EXTENSION_FILE_NAMES
+    .map((path) => files[path])
+    .find((entry) => entry !== undefined);
+  if (typeof extensionEntry !== "string") {
+    throw new Error(`Cannot safely rename routine "${task.filePath}": Paperclip routine metadata is missing.`);
+  }
+  const extension = parseYamlObject(extensionEntry);
+  const routines = extension && isRecord(extension.routines) ? extension.routines : null;
+  const metadata = task.slug && routines ? routines[task.slug] : null;
+  if (!isRecord(metadata)) {
+    throw new Error(`Cannot safely rename routine "${task.filePath}": its routine metadata contract is missing or malformed.`);
+  }
+  if (metadata.status !== undefined && !asNonEmptyString(metadata.status)) {
+    throw new Error(`Cannot safely rename routine "${task.filePath}": routine status is malformed.`);
+  }
+  if (metadata.triggers !== undefined) {
+    if (!Array.isArray(metadata.triggers) || task.routineTriggers === null
+      || task.routineTriggers.length !== metadata.triggers.length) {
+      throw new Error(`Cannot safely rename routine "${task.filePath}": trigger contract is malformed.`);
+    }
+    if (task.routineTriggers.some((trigger) => normalizeRoutineTriggerComparable(trigger) === null)) {
+      throw new Error(`Cannot safely rename routine "${task.filePath}": trigger contract is malformed.`);
+    }
+  }
+}
+
+async function prevalidateBoundRoutineUpdatePlans(
+  connection: PaperclipApiConnection,
+  companyId: string,
+  source: CatalogPreparedCompanyImport["source"],
+  renames: NonNullable<SyncImportRequest["renameBindings"]>
+): Promise<BoundRoutineUpdatePlan[]> {
+  const routineRenames = renames.filter(({ newItem }) => newItem.kind === "routine");
+  if (routineRenames.length === 0) return [];
+  const records = await fetchIdentityCandidateCollections(connection, companyId);
+  const tasks = extractPortableRecurringTaskFileDefinitions(source.files);
+  const plans: BoundRoutineUpdatePlan[] = [];
+  for (const { newItem, binding } of routineRenames) {
+    const matchingTasks = tasks.filter(({ filePath }) => filePath === newItem.path);
+    if (matchingTasks.length !== 1) {
+      throw new Error(`Cannot safely rename routine "${newItem.path}": exactly one recurring routine update contract is required.`);
+    }
+    const task = matchingTasks[0]!;
+    validateRenamedRoutineSourceContract(source.files, task);
+    if (!records.routines.some(({ id, status }) => id === binding.targetId && status !== "archived")) {
+      throw new Error(`Cannot safely rename routine "${newItem.path}": bound routine ${binding.targetId} is unavailable.`);
+    }
+    const routine = await fetchPaperclipRoutine(connection, binding.targetId);
+    if (routine.id !== binding.targetId || routine.status === "archived") {
+      throw new Error(`Cannot safely rename routine "${newItem.path}": bound routine detail does not match ${binding.targetId}.`);
+    }
+    if (!routine.triggers || routine.triggers.some((trigger) => normalizeRoutineTriggerComparable(trigger) === null)) {
+      throw new Error(`Cannot safely rename routine "${newItem.path}": Paperclip returned malformed trigger state.`);
+    }
+    const entry = source.files[newItem.path];
+    if (typeof entry !== "string") {
+      throw new Error(`Cannot safely rename routine "${newItem.path}": staged TASK.md is missing.`);
+    }
+    const match = entry.match(FRONTMATTER_PATTERN);
+    const frontmatter = match ? parseYamlObject(match[1] ?? "") : null;
+    if (!frontmatter) {
+      throw new Error(`Cannot safely rename routine "${newItem.path}": TASK.md frontmatter is malformed.`);
+    }
+    const projectSlug = asNonEmptyString(frontmatter.project)
+      ?? (newItem.path.startsWith("projects/") ? newItem.path.split("/")[1] ?? null : null);
+    const assigneeSlug = asNonEmptyString(frontmatter.assignee)
+      ?? (Array.isArray(frontmatter.assignees) ? asNonEmptyString(frontmatter.assignees[0]) : null);
+    plans.push({
+      task,
+      routine,
+      existingTriggers: routine.triggers,
+      patch: {
+        title: task.title,
+        description: task.description,
+        ...(task.routineStatus ? { status: task.routineStatus } : {}),
+        projectId: resolveUniquePortableReference(projectSlug, "project", records, newItem.path, renames),
+        assigneeAgentId: resolveUniquePortableReference(assigneeSlug, "agent", records, newItem.path, renames)
+      }
+    });
+  }
+  return plans;
+}
+
+async function executeBoundRoutineUpdatePlan(
+  connection: PaperclipApiConnection,
+  plan: BoundRoutineUpdatePlan
+): Promise<void> {
+  await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
+  if (plan.task.routineTriggers !== null) {
+    await reconcilePaperclipRoutineTriggersFromSnapshot(
+      connection,
+      plan.routine.id,
+      plan.task.routineTriggers,
+      plan.existingTriggers
+    );
+  }
+}
+
+export async function applyRenameBindingsBeforeImport(
+  connection: PaperclipApiConnection,
+  source: CatalogPreparedCompanyImport["source"],
+  renames: NonNullable<SyncImportRequest["renameBindings"]>,
+  companyIdOrLegacyAliases?: string | Array<{ kind: "skill"; sourcePath: string; importPath: string }>
+): Promise<CatalogPreparedCompanyImport["source"]> {
+  const files = { ...source.files };
+  const companyId = typeof companyIdOrLegacyAliases === "string" ? companyIdOrLegacyAliases : undefined;
+  const records = renames.length > 0 && companyId
+    ? await fetchIdentityCandidateCollections(connection, companyId)
+    : null;
+  if (records) {
+    for (const { newItem, binding } of renames) {
+      const collisions = matchIdentityCandidates(newItem, records, binding.canonicalSkillKey)
+        .filter((candidate) => candidate.id !== binding.targetId);
+      if (collisions.length > 0) {
+        throw new Error(`Cannot safely rename "${newItem.path}": destination identity is already in use.`);
+      }
+    }
+  }
+  // Build and validate the complete mutation plan before making any live PATCH request.
+  for (const { newItem, binding } of renames.filter(({ newItem }) => newItem.kind === "skill")) {
+    const entry = files[newItem.path];
+    if (typeof entry !== "string") throw new Error(`Cannot safely rename skill "${newItem.path}": staged SKILL.md is missing.`);
+    if (!binding.canonicalSkillKey) throw new Error(`Cannot safely rename skill "${newItem.path}": identity ledger has no canonical key.`);
+    files[newItem.path] = injectCanonicalSkillKey(entry, binding.canonicalSkillKey, newItem.path);
+  }
+  if (records) {
+    const recurringTasks = extractPortableRecurringTaskFileDefinitions(files);
+    for (const { newItem, binding } of renames.filter(({ newItem }) => newItem.kind === "routine")) {
+      if (!recurringTasks.some((task) => task.filePath === newItem.path)) {
+        throw new Error(`Cannot safely rename routine "${newItem.path}": a recurring routine update contract is required.`);
+      }
+      if (!records.routines.some((routine) => routine.id === binding.targetId && routine.status !== "archived")) {
+        throw new Error(`Cannot safely rename routine "${newItem.path}": bound routine ${binding.targetId} is unavailable for update.`);
+      }
+    }
+  }
+  const mutationPlan = renames
+    .filter(({ newItem }) => newItem.kind !== "skill" && newItem.kind !== "routine")
+    .map(({ newItem, binding }) => {
+    const endpoint = newItem.kind === "agent" ? "agents"
+      : newItem.kind === "project" ? "projects" : "issues";
+    const field = newItem.kind === "agent" || newItem.kind === "project" ? "name" : "title";
+    const patch = newItem.kind === "issue" && records
+      ? buildRenamedIssuePatch(newItem, files[newItem.path]!, records, renames)
+      : { [field]: newItem.name };
+    return { newItem, binding, endpoint, field, patch };
+  });
+  for (const { newItem, binding, endpoint, field, patch } of mutationPlan) {
+    const updated = await fetchPaperclipApiJson(connection, `/api/${endpoint}/${encodeURIComponent(binding.targetId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+    if (isRecord(updated)) {
+      const actual = asNonEmptyString(updated[field]);
+      if (actual && actual !== newItem.name) throw new Error(`Paperclip did not apply the requested ${newItem.kind} rename exactly.`);
+    }
+    // Paperclip always creates issues. Routines remain for complete title-based metadata reconciliation.
+    if (newItem.kind === "issue") delete files[newItem.path];
+  }
+  return { ...source, files };
+}
+
+async function verifyRenameTargetIds(
+  connection: PaperclipApiConnection,
+  companyId: string,
+  renames: NonNullable<SyncImportRequest["renameBindings"]>
+): Promise<void> {
+  if (renames.length === 0) return;
+  const records = await fetchIdentityCandidateCollections(connection, companyId);
+  for (const { newItem, binding } of renames) {
+    if (newItem.kind === "agent") {
+      const target = records.agents.find((record) => record.id === binding.targetId);
+      if (!target) throw new Error(`agent rename did not preserve target id ${binding.targetId}; identity ledger was not advanced.`);
+      if (target.name !== newItem.name || normalizedIdentity(target.urlKey) !== normalizedIdentity(newItem.slug)) {
+        throw new Error("agent rename did not apply the exact new name/slug; identity ledger was not advanced.");
+      }
+    } else if (newItem.kind === "project") {
+      const target = records.projects.find((record) => record.id === binding.targetId);
+      if (!target) throw new Error(`project rename did not preserve target id ${binding.targetId}; identity ledger was not advanced.`);
+      if (target.name !== newItem.name || normalizedIdentity(target.urlKey) !== normalizedIdentity(newItem.slug)) {
+        throw new Error("project rename did not apply the exact new name/slug; identity ledger was not advanced.");
+      }
+    } else if (newItem.kind === "skill") {
+      const target = records.skills.find((record) => record.id === binding.targetId);
+      if (!target) throw new Error(`skill rename did not preserve target id ${binding.targetId}; identity ledger was not advanced.`);
+      if (target.name !== newItem.name || normalizedIdentity(target.slug) !== normalizedIdentity(newItem.slug) || target.key !== binding.canonicalSkillKey) {
+        throw new Error("Skill rename changed its name, slug, or canonical key; identity ledger was not advanced.");
+      }
+    } else {
+      const target = (newItem.kind === "routine" ? records.routines : records.issues)
+        .find((record) => record.id === binding.targetId);
+      if (!target) throw new Error(`${newItem.kind} rename did not preserve target id ${binding.targetId}; identity ledger was not advanced.`);
+      if (target.title !== newItem.name) throw new Error(`${newItem.kind} rename did not apply the exact new title; identity ledger was not advanced.`);
+    }
+    const duplicates = (newItem.kind === "routine"
+      ? records.routines.filter((record) => record.status !== "archived" && normalizedIdentity(record.title) === normalizedIdentity(newItem.name))
+      : matchIdentityCandidates(newItem, records, binding.canonicalSkillKey))
+      .filter((candidate) => candidate.id !== binding.targetId);
+    if (duplicates.length > 0) throw new Error(`${newItem.kind} rename created a second object for the new identity; identity ledger was not advanced.`);
+  }
 }
 
 async function fetchPaperclipCompanyApprovals(
@@ -5209,12 +6149,57 @@ async function runCatalogCompanySync(
       }
 
       const latestSourceVersion = refreshedMatch.company.version;
-      const syncAvailable = isCatalogCompanySyncAvailable(
+      const latestSourceRevision = await resolveRepositoryRevision(refreshedMatch.repository);
+      const discoveredSourceRenames = importedCompany.importedSourceRevision
+        ? await resolveSourceItemRenames(
+            refreshedMatch.repository,
+            refreshedMatch.company,
+            importedCompany.importedSourceRevision,
+            latestSourceRevision,
+            importedCompany.selection
+          )
+        : [];
+      const sourceRenames = filterSelectedSourceRenames(
+        discoveredSourceRenames,
+        importedCompany.selection
+      );
+      const versionSyncAvailable = isCatalogCompanySyncAvailable(
         importedCompany.importedSourceVersion,
         latestSourceVersion
       );
+      const syncAvailable = versionSyncAvailable || sourceRenames.length > 0;
 
       if (!syncAvailable) {
+        let bootstrappedBindings = importedCompany.itemIdentityBindings;
+        const preparedBaseline = await buildCatalogCompanyImportSource(
+          ctx,
+          sourceCompanyId,
+          importedCompany.selection
+        );
+        const selectedIdentities = collectPreparedSourceIdentities(preparedBaseline.source.files);
+        const baselineConnection = await resolvePaperclipApiConnection(
+          ctx,
+          importedCompany.importedCompanyId
+        );
+        const baselineInventory = await fetchIdentityCandidateCollections(
+          baselineConnection,
+          importedCompany.importedCompanyId
+        );
+        if (!isIdentityLedgerComplete(bootstrappedBindings, selectedIdentities)) {
+          bootstrappedBindings = await bootstrapIdentityBindingsForItems(
+            ctx,
+            importedCompany.importedCompanyId,
+            selectedIdentities,
+            baselineInventory
+          );
+        }
+        await preflightCurrentIdentityBindings(
+          ctx,
+          importedCompany.importedCompanyId,
+          selectedIdentities,
+          bootstrappedBindings,
+          baselineInventory
+        );
         const syncedAt = options.now();
         const latestState = await loadCatalogState(ctx);
 
@@ -5223,6 +6208,8 @@ async function runCatalogCompanySync(
           updateImportedCatalogCompany(latestState, sourceCompanyId, importedCompanyId, (company) => ({
             ...company,
             importedSourceVersion: latestSourceVersion,
+            importedSourceRevision: latestSourceRevision,
+            itemIdentityBindings: bootstrappedBindings,
             lastSyncStatus: "succeeded",
             syncRunningSince: null,
             lastSyncedAt: syncedAt,
@@ -5258,11 +6245,77 @@ async function runCatalogCompanySync(
         };
       }
 
+      let previousBindings = importedCompany.itemIdentityBindings;
+      let recoveredPreviousBindings = false;
+      const identityConnection = await resolvePaperclipApiConnection(
+        ctx,
+        importedCompany.importedCompanyId
+      );
+      const preMutationInventory = await fetchIdentityCandidateCollections(
+        identityConnection,
+        importedCompany.importedCompanyId
+      );
+      if (importedCompany.importedSourceRevision) {
+        const previousIdentities = await readSelectedSourceIdentitiesAtRevision(
+          refreshedMatch.repository,
+          refreshedMatch.company,
+          importedCompany.importedSourceRevision,
+          importedCompany.selection
+        );
+        if (!isIdentityLedgerComplete(previousBindings, previousIdentities)) {
+          previousBindings = await bootstrapIdentityBindingsForItems(
+            ctx,
+            importedCompany.importedCompanyId,
+            previousIdentities,
+            preMutationInventory
+          );
+          recoveredPreviousBindings = true;
+        }
+      }
+      const migratedSelection = migrateSelectionForSourceRenames(importedCompany.selection, sourceRenames);
+      const migratedAdapterSelection = migrateAdapterPresetSelectionForSourceRenames(
+        importedCompany.adapterPresetSelection,
+        sourceRenames
+      );
+      const renameBindings = await resolveRenameIdentityBindings(
+        ctx,
+        importedCompany.importedCompanyId,
+        sourceRenames,
+        previousBindings,
+        preMutationInventory
+      );
       const preparedImport = await buildCatalogCompanyImportSource(
         ctx,
         sourceCompanyId,
-        importedCompany.selection
+        migratedSelection
       );
+      const preflightIdentities = collectPreparedSourceIdentities(preparedImport.source.files);
+      const projectedBindings = projectCurrentIdentityBindings(
+        previousBindings,
+        renameBindings,
+        preflightIdentities
+      );
+      await preflightCurrentIdentityBindings(
+        ctx,
+        importedCompany.importedCompanyId,
+        preflightIdentities,
+        projectedBindings,
+        preMutationInventory
+      );
+      if (recoveredPreviousBindings) {
+        // Paperclip has no cross-endpoint transaction. Persist the verified old-revision
+        // UUID map as a recovery journal before the first idempotent PATCH/import. A retry
+        // can address a partially renamed object by UUID after its old name is gone without
+        // advancing the source revision or version.
+        currentState = await persistCatalogState(
+          ctx,
+          updateImportedCatalogCompany(currentState, sourceCompanyId, importedCompanyId, (company) => ({
+            ...company,
+            itemIdentityBindings: previousBindings
+          })),
+          options.now()
+        );
+      }
       const issuesBeforeSync = await tryFetchPaperclipCompanyIssues(
         ctx,
         importedCompany.importedCompanyId
@@ -5274,7 +6327,8 @@ async function runCatalogCompanySync(
         collisionStrategy: importedCompany.syncCollisionStrategy,
         preparedImport,
         existingIssues: issuesBeforeSync,
-        adapterPresetSelection: importedCompany.adapterPresetSelection
+        adapterPresetSelection: migratedAdapterSelection,
+        renameBindings
       });
       const syncedAt = options.now();
       const latestState = await loadCatalogState(ctx);
@@ -5308,6 +6362,32 @@ async function runCatalogCompanySync(
         );
       }
 
+      const currentIdentities = collectPreparedSourceIdentities(preparedImport.source.files);
+      let completeCurrentBindings = projectCurrentIdentityBindings(previousBindings, renameBindings, currentIdentities);
+      const postImportConnection = await resolvePaperclipApiConnection(ctx, nextImportedCompanyId);
+      const postImportInventory = await fetchIdentityCandidateCollections(
+        postImportConnection,
+        nextImportedCompanyId
+      );
+      if (!isIdentityLedgerComplete(completeCurrentBindings, currentIdentities)) {
+        completeCurrentBindings = await bootstrapIdentityBindingsForItems(
+          ctx,
+          nextImportedCompanyId,
+          currentIdentities,
+          postImportInventory
+        );
+      }
+      if (!isIdentityLedgerComplete(completeCurrentBindings, currentIdentities)) {
+        throw new Error("Synced company identity ledger is incomplete; source revision and version were not advanced.");
+      }
+      await preflightCurrentIdentityBindings(
+        ctx,
+        nextImportedCompanyId,
+        currentIdentities,
+        completeCurrentBindings,
+        postImportInventory
+      );
+
       await persistCatalogState(
         ctx,
         updateImportedCatalogCompany(latestState, sourceCompanyId, importedCompanyId, (company) => ({
@@ -5315,6 +6395,11 @@ async function runCatalogCompanySync(
           importedCompanyId: nextImportedCompanyId,
           importedCompanyName: nextImportedCompanyName,
           importedSourceVersion: latestSourceVersion,
+          importedSourceRevision: latestSourceRevision,
+          selection: migratedSelection,
+          adapterPresetSelection: migratedAdapterSelection,
+          itemIdentityBindings: completeCurrentBindings,
+          sourcePathAliases: [],
           lastSyncStatus: "succeeded",
           syncRunningSince: null,
           lastSyncedAt: syncedAt,
@@ -5636,6 +6721,17 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const issuesBeforeImport = Array.isArray(params.issuesBeforeImport)
           ? normalizePaperclipIssueList(params.issuesBeforeImport) ?? []
           : null;
+        const importedSourceRevision = await resolveRepositoryRevision(match.repository);
+        const preparedTrackedImport = await buildCatalogCompanyImportSource(ctx, sourceCompanyId, selection);
+        const itemIdentityBindings = await bootstrapItemIdentityBindings(
+          ctx,
+          importedCompanyId,
+          preparedTrackedImport.source
+        );
+        const trackedIdentities = collectPreparedSourceIdentities(preparedTrackedImport.source.files);
+        if (!isIdentityLedgerComplete(itemIdentityBindings, trackedIdentities)) {
+          throw new Error("Imported company identity ledger is incomplete; import tracking was not saved.");
+        }
 
         const nextState = await persistCatalogState(
           ctx,
@@ -5655,6 +6751,9 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
                 importedCompanyName,
                 importedCompanyIssuePrefix,
                 importedSourceVersion: match.company.version,
+                importedSourceRevision,
+                sourcePathAliases: [],
+                itemIdentityBindings,
                 importedAt: timestamp,
                 selection,
                 adapterPresetSelection,

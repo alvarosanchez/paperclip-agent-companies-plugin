@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Issue } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { parse as parseYaml } from "yaml";
@@ -34,9 +34,12 @@ import {
   type DiscoveredAgentCompany
 } from "../src/catalog.js";
 import {
+  applyRenameBindingsBeforeImport,
   buildGitProcessEnvironment,
   clearRepositoryCheckoutCacheEntry,
   createAgentCompaniesPlugin,
+  migrateAdapterPresetSelectionForSourceRenames,
+  migrateSelectionForSourceRenames,
   resolvePaperclipApiConnection,
   resolveRepositoryContentRoot,
   scanRepositoryForAgentCompanies,
@@ -45,10 +48,17 @@ import {
 import { requiresPaperclipBoardAccess } from "../src/paperclip-health.js";
 import {
   extractPortableRecurringTaskDefinitions,
-  findArchivableImportedRoutineIds
+  extractPortableRecurringTaskFileDefinitions,
+  findArchivableImportedRoutineIds,
+  findUpdatableImportedRoutinePlans
 } from "../src/portable-routines.js";
-import { adapterPresetTestUtils, type AdapterPresetDraft } from "../src/ui/index.js";
+import {
+  ROUTINE_SYNC_IDENTITY_NOTICE,
+  adapterPresetTestUtils,
+  type AdapterPresetDraft
+} from "../src/ui/index.js";
 import { getImportedCompanyVersionInfo } from "../src/ui/version-status.js";
+import { parseGitChangedPaths, parsePortableItemIdentity } from "../src/source-renames.js";
 
 const tempDirectories: string[] = [];
 const CATALOG_SCOPE = {
@@ -61,6 +71,141 @@ const BOARD_ACCESS_SCOPE = {
 };
 const TARGET_PAPERCLIP_RELEASE = "2026.626.0";
 const { buildAdapterPresetPayload } = adapterPresetTestUtils;
+
+const DEFAULT_TRACKED_IMPORT_INVENTORY: Record<string, unknown[]> = {
+  agents: [
+    { id: "agent-1", name: "Alpha CEO", urlKey: "ceo" },
+    { id: "agent-2", name: "Reviewer", urlKey: "reviewer" },
+    { id: "agent-3", name: "Architect", urlKey: "architect" }
+  ],
+  projects: [{ id: "project-1", name: "Import Pipeline", urlKey: "import-pipeline" }],
+  issues: [
+    { id: "issue-1", title: "Seed Default Company" },
+    { id: "issue-2", title: "Follow Up Review" }
+  ],
+  routines: [],
+  skills: [{ id: "skill-1", name: "Repo Audit", slug: "repo-audit", key: "company/company-1/repo-audit" }]
+};
+
+// Every sync test exercises the production live-ledger preflight. Existing focused
+// fetch mocks can answer inventory themselves; otherwise this transport fixture
+// supplies the standard tracked-company inventory rather than bypassing validation.
+const nativeFetch = globalThis.fetch;
+let assignedTestFetch: typeof fetch = nativeFetch;
+let useExplicitTestInventory = false;
+let ledgerInventoryBatchRemaining = 0;
+function getTestInventoryCollection(input: RequestInfo | URL, init?: RequestInit): keyof typeof DEFAULT_TRACKED_IMPORT_INVENTORY | undefined {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  if ((init?.method ?? "GET") !== "GET") return undefined;
+  return (["agents", "projects", "issues", "routines", "skills"] as const)
+    .find((kind) => new RegExp(`/api/companies/[^/]+/${kind}$`, "u").test(url));
+}
+
+function testInventoryResponse(collection: keyof typeof DEFAULT_TRACKED_IMPORT_INVENTORY): Response {
+  return new Response(JSON.stringify(DEFAULT_TRACKED_IMPORT_INVENTORY[collection]), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+}
+
+function createInventoryAwareTestFetch(primaryFetch: typeof fetch): typeof fetch {
+  const wrappedFetch: typeof fetch = async (input, init) => {
+    const collection = getTestInventoryCollection(input, init);
+    if (collection === "agents") ledgerInventoryBatchRemaining = 5;
+    const isLedgerInventoryRead = collection !== undefined && ledgerInventoryBatchRemaining > 0;
+    if (isLedgerInventoryRead) ledgerInventoryBatchRemaining -= 1;
+    try {
+      const response = await primaryFetch(input, init);
+      if (!collection || !isLedgerInventoryRead || useExplicitTestInventory) return response;
+      if (!response.ok) return testInventoryResponse(collection);
+      const payload = await response.clone().json().catch(() => null) as unknown;
+      if (!Array.isArray(payload)) return response;
+      const merged = [...payload];
+      const knownIds = new Set(merged.flatMap((entry) =>
+        entry && typeof entry === "object" && "id" in entry && typeof entry.id === "string" ? [entry.id] : []
+      ));
+      for (const entry of DEFAULT_TRACKED_IMPORT_INVENTORY[collection]) {
+        if (entry && typeof entry === "object" && "id" in entry && typeof entry.id === "string" && !knownIds.has(entry.id)) {
+          merged.push(entry);
+        }
+      }
+      return new Response(JSON.stringify(merged), {
+        status: response.status,
+        headers: { "content-type": "application/json" }
+      });
+    } catch (error) {
+      if (!collection || !isLedgerInventoryRead || useExplicitTestInventory) throw error;
+      return testInventoryResponse(collection);
+    }
+  };
+  (wrappedFetch as typeof fetch & { primaryTestFetch?: typeof fetch }).primaryTestFetch = primaryFetch;
+  return wrappedFetch;
+}
+
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  get: () => createInventoryAwareTestFetch(assignedTestFetch),
+  set: (value: typeof fetch) => {
+    assignedTestFetch = (value as typeof fetch & { primaryTestFetch?: typeof fetch }).primaryTestFetch ?? value;
+  }
+});
+
+beforeEach(() => {
+  assignedTestFetch = nativeFetch;
+  useExplicitTestInventory = false;
+  ledgerInventoryBatchRemaining = 0;
+});
+
+function withoutIdentityLedgerInventoryReads<T>(requests: T[]): T[] {
+  const kinds = ["agents", "projects", "issues", "routines", "skills"];
+  const requestUrl = (request: T): string => typeof request === "string"
+    ? request
+    : request && typeof request === "object" && "url" in request && typeof request.url === "string"
+      ? request.url
+      : "";
+  const result: T[] = [];
+  for (let index = 0; index < requests.length;) {
+    const candidate = requests.slice(index, index + kinds.length);
+    const isInventoryBatch = candidate.length === kinds.length && candidate.every((request, offset) =>
+      requestUrl(request).endsWith(`/${kinds[offset]}`)
+    );
+    if (isInventoryBatch) {
+      index += kinds.length;
+    } else {
+      result.push(requests[index]!);
+      index += 1;
+    }
+  }
+  return result;
+}
+
+async function recordTrackedCompanyImport<T = unknown>(
+  harness: { performAction(action: string, params?: unknown): Promise<unknown> },
+  params: Record<string, unknown>,
+  inventoryOverrides: Partial<typeof DEFAULT_TRACKED_IMPORT_INVENTORY> = {}
+): Promise<T> {
+  const previousFetch = globalThis.fetch;
+  const inventory = { ...DEFAULT_TRACKED_IMPORT_INVENTORY, ...inventoryOverrides };
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const collection = Object.keys(inventory)
+      .find((key) => url.endsWith(`/agents`) && key === "agents"
+        || url.endsWith(`/projects`) && key === "projects"
+        || url.endsWith(`/issues`) && key === "issues"
+        || url.endsWith(`/routines`) && key === "routines"
+        || url.endsWith(`/skills`) && key === "skills");
+    if (!collection || init?.method) return previousFetch(input, init);
+    return new Response(JSON.stringify(inventory[collection]), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    return await harness.performAction("catalog.record-company-import", params) as T;
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
 
 function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
   const timestamp = new Date("2026-04-14T09:23:00.000Z");
@@ -762,6 +907,27 @@ describe("agent companies plugin", () => {
     expect(normalizeRepositoryCloneRef("../fixtures/agent-company")).toBe("../fixtures/agent-company");
   });
 
+  it("rejects every invalid persisted Git revision alias before it can reach Git", () => {
+    const baseRecord = {
+      sourceCompanyId: "repo:alpha/COMPANY.md",
+      importedCompanyId: "company-1"
+    };
+    for (const [field, revision] of [
+      ["importedSourceRevision", "--help"],
+      ["sourceRevision", "A".repeat(40)],
+      ["commitSha", "abc123"]
+    ] as const) {
+      expect(() => normalizeCatalogState({
+        repositories: [],
+        importedCompanies: [{ ...baseRecord, [field]: revision }]
+      })).toThrow(/lowercase 40-character Git commit hash/i);
+    }
+    expect(normalizeCatalogState({
+      repositories: [],
+      importedCompanies: [{ ...baseRecord, importedSourceRevision: "a".repeat(40) }]
+    }).importedCompanies[0]?.importedSourceRevision).toBe("a".repeat(40));
+  });
+
   it("drops unsafe persisted company content paths during catalog normalization", () => {
     const repository = createRepositorySource("/tmp/agent-company-repo");
     const state = normalizeCatalogState({
@@ -1140,6 +1306,292 @@ routines:
         ]
       )
     ).toEqual(["routine-old"]);
+  });
+
+  it("documents rename-in-place routine identity and fail-closed matching", () => {
+    expect(ROUTINE_SYNC_IDENTITY_NOTICE).toMatch(/preserve routine identity/i);
+    expect(ROUTINE_SYNC_IDENTITY_NOTICE).toMatch(/Ambiguous matches stop/i);
+  });
+
+  it("parses Git path renames and portable item identities for sync migrations", () => {
+    expect(parseGitChangedPaths(
+      "R099\0tasks/weekly-review/TASK.md\0tasks/monthly-review/TASK.md\0M\0agents/ceo/AGENTS.md\0"
+    )).toEqual([
+      {
+        status: "renamed",
+        oldPath: "tasks/weekly-review/TASK.md",
+        newPath: "tasks/monthly-review/TASK.md"
+      },
+      {
+        status: "modified",
+        oldPath: "agents/ceo/AGENTS.md",
+        newPath: "agents/ceo/AGENTS.md"
+      }
+    ]);
+    expect(parsePortableItemIdentity(
+      "tasks/monthly-review/TASK.md",
+      "---\nname: Monthly Review\nrecurring: true\n---\n\nReview the queue.\n"
+    )).toEqual({
+      kind: "routine",
+      path: "tasks/monthly-review/TASK.md",
+      name: "Monthly Review",
+      slug: "monthly-review",
+      sourceId: null
+    });
+  });
+
+  it("migrates selected paths and agent preset keys with proven source renames", () => {
+    const rename = {
+      oldItem: { kind: "agent" as const, path: "agents/old/AGENTS.md", name: "Old", slug: "old", sourceId: "ceo" },
+      newItem: { kind: "agent" as const, path: "agents/new/AGENTS.md", name: "New", slug: "new", sourceId: "ceo" }
+    };
+    const selection = migrateSelectionForSourceRenames({
+      agents: { mode: "selected", itemPaths: ["agents/old/AGENTS.md"] },
+      projects: { mode: "none" },
+      tasks: { mode: "none" },
+      issues: { mode: "none" },
+      skills: { mode: "none" }
+    }, [rename]);
+    expect(selection.agents.itemPaths).toEqual(["agents/new/AGENTS.md"]);
+    expect(migrateAdapterPresetSelectionForSourceRenames({
+      defaultPresetId: null,
+      agentPresetIds: { old: "preset-1" }
+    }, [rename]).agentPresetIds).toEqual({ new: "preset-1" });
+  });
+
+  it("reads explicit stable ids and deleted/added Git paths", () => {
+    expect(parsePortableItemIdentity(
+      "skills/new/SKILL.md",
+      "---\nname: New skill\nmetadata:\n  agentCompanies:\n    id: stable-skill\n---\n"
+    )?.sourceId).toBe("stable-skill");
+    expect(parsePortableItemIdentity(
+      "agents/new/AGENTS.md",
+      "---\nname: New agent\nmetadata:\n  agentCompanies:\n    sourceId: stable-agent\n---\n"
+    )?.sourceId).toBe("stable-agent");
+    expect(parseGitChangedPaths("D\0skills/old/SKILL.md\0A\0skills/new/SKILL.md\0")).toEqual([
+      { status: "deleted", oldPath: "skills/old/SKILL.md", newPath: "skills/old/SKILL.md" },
+      { status: "added", oldPath: "skills/new/SKILL.md", newPath: "skills/new/SKILL.md" }
+    ]);
+  });
+
+  it("keeps a renamed routine staged for same-UUID metadata and cron reconciliation", async () => {
+    const originalFetch = globalThis.fetch;
+    const patches: unknown[] = [];
+    globalThis.fetch = async (_input, init) => {
+      patches.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ id: "routine-1", title: "Weekly Review" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    };
+    try {
+      const source = {
+        type: "inline" as const,
+        files: {
+          "tasks/weekly-review/TASK.md": "---\nname: Weekly Review\nrecurring: true\n---\n\nReview weekly.\n",
+          ".paperclip.yaml": "schema: paperclip/v1\nroutines:\n  weekly-review:\n    triggers:\n      - kind: schedule\n        cronExpression: '0 11 * * 1'\n        timezone: UTC\n"
+        }
+      };
+      const staged = await applyRenameBindingsBeforeImport(
+        { apiBase: "http://paperclip.test", apiKey: null },
+        source,
+        [{
+          oldItem: { kind: "routine", path: "tasks/monday-review/TASK.md", name: "Monday Review", slug: "monday-review", sourceId: null },
+          newItem: { kind: "routine", path: "tasks/weekly-review/TASK.md", name: "Weekly Review", slug: "weekly-review", sourceId: null },
+          binding: {
+            sourceKind: "routine", sourceId: null, sourcePath: "tasks/weekly-review/TASK.md",
+            sourceName: "Weekly Review", sourceSlug: "weekly-review", targetId: "routine-1",
+            importPath: "tasks/weekly-review/TASK.md", canonicalSkillKey: null
+          }
+        }],
+        []
+      );
+      expect(patches).toEqual([]);
+      expect(staged.files["tasks/weekly-review/TASK.md"]).toBe(source.files["tasks/weekly-review/TASK.md"]);
+      const tasks = extractPortableRecurringTaskFileDefinitions(staged.files);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]?.routineTriggers?.[0]?.cronExpression).toBe("0 11 * * 1");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("patches every safely resolved portable field on a renamed issue UUID and excludes creation", async () => {
+    useExplicitTestInventory = true;
+    const originalFetch = globalThis.fetch;
+    let issuePatch: Record<string, unknown> | null = null;
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (init?.method === "PATCH" && url.endsWith("/api/issues/issue-1")) {
+        issuePatch = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ id: "issue-1", title: "New Work" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      const payload = url.endsWith("/agents") ? [{ id: "agent-1", name: "Reviewer", urlKey: "reviewer" }]
+        : url.endsWith("/projects") ? [{ id: "project-1", name: "Platform", urlKey: "platform" }]
+          : url.endsWith("/issues") ? [{ id: "issue-1", title: "Old Work" }]
+            : [];
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    try {
+      const path = "issues/new-work/ISSUE.md";
+      const source = { type: "inline" as const, files: {
+        [path]: "---\ntitle: New Work\nstatus: todo\npriority: high\nproject: platform\nassignee: reviewer\n---\n\nNew body.\n"
+      } };
+      const staged = await applyRenameBindingsBeforeImport(
+        { apiBase: "http://paperclip.test", apiKey: null },
+        source,
+        [{
+          oldItem: { kind: "issue", path: "issues/old-work/ISSUE.md", name: "Old Work", slug: "old-work", sourceId: null },
+          newItem: { kind: "issue", path, name: "New Work", slug: "new-work", sourceId: null },
+          binding: {
+            sourceKind: "issue", sourceId: null, sourcePath: path, sourceName: "New Work",
+            sourceSlug: "new-work", targetId: "issue-1", importPath: path, canonicalSkillKey: null
+          }
+        }],
+        "company-1"
+      );
+      expect(issuePatch).toEqual({
+        title: "New Work", description: "New body.", status: "todo", priority: "high",
+        projectId: "project-1", assigneeAgentId: "agent-1"
+      });
+      expect(staged.files[path]).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("prevalidates all issue references and uses simultaneous rename bindings before any patch", async () => {
+    const originalFetch = globalThis.fetch;
+    const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        patches.push({ url, body });
+        return new Response(JSON.stringify({ name: body.name, title: body.title }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      const payload = url.endsWith("/agents") ? [{ id: "agent-1", name: "Old Agent", urlKey: "old-agent" }]
+        : url.endsWith("/projects") ? [{ id: "project-1", name: "Old Project", urlKey: "old-project" }]
+          : url.endsWith("/issues") ? [{ id: "issue-1", title: "Old Issue" }, { id: "issue-2", title: "Other Issue" }]
+            : [];
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const binding = (kind: "agent" | "project" | "issue", path: string, name: string, slug: string, targetId: string) => ({
+      sourceKind: kind, sourceId: null, sourcePath: path, sourceName: name, sourceSlug: slug,
+      targetId, importPath: path, canonicalSkillKey: null
+    });
+    try {
+      const renames = [
+        { oldItem: { kind: "agent" as const, path: "agents/old/AGENTS.md", name: "Old Agent", slug: "old-agent", sourceId: null }, newItem: { kind: "agent" as const, path: "agents/new/AGENTS.md", name: "New Agent", slug: "new-agent", sourceId: null }, binding: binding("agent", "agents/new/AGENTS.md", "New Agent", "new-agent", "agent-1") },
+        { oldItem: { kind: "project" as const, path: "projects/old/PROJECT.md", name: "Old Project", slug: "old-project", sourceId: null }, newItem: { kind: "project" as const, path: "projects/new/PROJECT.md", name: "New Project", slug: "new-project", sourceId: null }, binding: binding("project", "projects/new/PROJECT.md", "New Project", "new-project", "project-1") },
+        { oldItem: { kind: "issue" as const, path: "issues/old/ISSUE.md", name: "Old Issue", slug: "old-issue", sourceId: null }, newItem: { kind: "issue" as const, path: "issues/new/ISSUE.md", name: "New Issue", slug: "new-issue", sourceId: null }, binding: binding("issue", "issues/new/ISSUE.md", "New Issue", "new-issue", "issue-1") }
+      ];
+      const source = { type: "inline" as const, files: {
+        "agents/new/AGENTS.md": "---\nname: New Agent\n---\n",
+        "projects/new/PROJECT.md": "---\nname: New Project\n---\n",
+        "issues/new/ISSUE.md": "---\ntitle: New Issue\nproject: new-project\nassignee: new-agent\n---\nBody\n"
+      } };
+      await applyRenameBindingsBeforeImport({ apiBase: "http://paperclip.test", apiKey: "test-key" }, source, renames, "company-1");
+      expect(patches.at(-1)?.body).toMatchObject({ projectId: "project-1", assigneeAgentId: "agent-1" });
+
+      patches.length = 0;
+      const invalidIssue = { ...renames[2]!, newItem: { ...renames[2]!.newItem, path: "issues/bad/ISSUE.md", name: "Bad Issue", slug: "bad-issue" }, binding: binding("issue", "issues/bad/ISSUE.md", "Bad Issue", "bad-issue", "issue-2") };
+      await expect(applyRenameBindingsBeforeImport(
+        { apiBase: "http://paperclip.test", apiKey: "test-key" },
+        { ...source, files: { ...source.files, "issues/bad/ISSUE.md": "---\ntitle: Bad Issue\nproject: missing\n---\n" } },
+        [renames[0]!, invalidIssue],
+        "company-1"
+      )).rejects.toThrow(/missing.*matched 0 live objects/i);
+      expect(patches).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("retries a partially applied multi-PATCH rename deterministically by stored target UUID", async () => {
+    useExplicitTestInventory = true;
+    const originalFetch = globalThis.fetch;
+    const patchUrls: string[] = [];
+    let failSecondPatch = true;
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (init?.method !== "PATCH") throw new Error(`Unexpected fetch to ${url}`);
+      patchUrls.push(url);
+      if (failSecondPatch && url.endsWith("/agent-2")) {
+        return new Response(JSON.stringify({ message: "second patch failed" }), {
+          status: 500,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      const body = JSON.parse(String(init.body)) as { name: string };
+      return new Response(JSON.stringify({ name: body.name }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    };
+    const source = { type: "inline" as const, files: {
+      "agents/new-one/AGENTS.md": "---\nname: New One\n---\n",
+      "agents/new-two/AGENTS.md": "---\nname: New Two\n---\n"
+    } };
+    const rename = (targetId: string, oldSlug: string, newSlug: string, name: string) => ({
+      oldItem: { kind: "agent" as const, path: `agents/${oldSlug}/AGENTS.md`, name: `Old ${name.slice(4)}`, slug: oldSlug, sourceId: null },
+      newItem: { kind: "agent" as const, path: `agents/${newSlug}/AGENTS.md`, name, slug: newSlug, sourceId: null },
+      binding: {
+        sourceKind: "agent" as const, sourceId: null, sourcePath: `agents/${newSlug}/AGENTS.md`,
+        sourceName: name, sourceSlug: newSlug, targetId, importPath: `agents/${newSlug}/AGENTS.md`,
+        canonicalSkillKey: null
+      }
+    });
+    const renames = [
+      rename("agent-1", "old-one", "new-one", "New One"),
+      rename("agent-2", "old-two", "new-two", "New Two")
+    ];
+    try {
+      await expect(applyRenameBindingsBeforeImport(
+        { apiBase: "http://paperclip.test", apiKey: null }, source, renames, []
+      )).rejects.toThrow(/second patch failed/i);
+      failSecondPatch = false;
+      await applyRenameBindingsBeforeImport(
+        { apiBase: "http://paperclip.test", apiKey: null }, source, renames, []
+      );
+      expect(patchUrls).toEqual([
+        "http://paperclip.test/api/agents/agent-1",
+        "http://paperclip.test/api/agents/agent-2",
+        "http://paperclip.test/api/agents/agent-1",
+        "http://paperclip.test/api/agents/agent-2"
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("injects a bound canonical skill key only into the staged renamed SKILL.md", async () => {
+    const skill = "---\nname: New Audit\nslug: new-audit\nmetadata:\n  nested:\n    keep: true\n---\n\nBody stays.\n";
+    const source = { type: "inline" as const, files: {
+      "skills/new-audit/SKILL.md": skill,
+      "skills/new-audit/assets/icon.svg": "<svg />"
+    } };
+    const staged = await applyRenameBindingsBeforeImport(
+      { apiBase: "http://paperclip.test", apiKey: null },
+      source,
+      [{
+        oldItem: { kind: "skill", path: "skills/old-audit/SKILL.md", name: "Old Audit", slug: "old-audit", sourceId: null },
+        newItem: { kind: "skill", path: "skills/new-audit/SKILL.md", name: "New Audit", slug: "new-audit", sourceId: null },
+        binding: {
+          sourceKind: "skill", sourceId: null, sourcePath: "skills/new-audit/SKILL.md",
+          sourceName: "New Audit", sourceSlug: "new-audit", targetId: "skill-1",
+          importPath: "skills/new-audit/SKILL.md", canonicalSkillKey: "company/company-1/old-audit"
+        }
+      }],
+      []
+    );
+    expect(source.files["skills/new-audit/SKILL.md"]).toBe(skill);
+    expect(staged.files["skills/old-audit/SKILL.md"]).toBeUndefined();
+    expect(staged.files["skills/new-audit/assets/icon.svg"]).toBe("<svg />");
+    const stagedSkill = String(staged.files["skills/new-audit/SKILL.md"]);
+    expect(stagedSkill).toContain("skillKey: company/company-1/old-audit");
+    expect(stagedSkill).toContain("keep: true");
+    expect(stagedSkill).toContain("Body stays.");
   });
 
   it("packages a discovered company as an inline import source", async () => {
@@ -1742,6 +2194,8 @@ title: Chief Executive Officer
 Lead Alpha Labs and coordinate the delivery pipeline.
 `
     );
+    await runCommand("git", ["add", "."], repositoryPath);
+    await runCommand("git", ["commit", "-m", "Customize CEO slug"], repositoryPath);
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
@@ -1909,7 +2363,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           }
         ]
       });
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -1927,6 +2381,8 @@ Lead Alpha Labs and coordinate the delivery pipeline.
             "alpha-chief": "hermes-paco-studio"
           }
         }
+      }, {
+        agents: [{ id: "agent-123", name: "Alpha CEO", urlKey: "alpha-chief" }]
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       await harness.performAction("board-access.update", {
@@ -1945,7 +2401,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         importedCompanyId: "paperclip-company-123"
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           authorization: "Bearer paperclip-board-token",
@@ -2023,6 +2479,8 @@ Lead Alpha Labs and coordinate the delivery pipeline.
   it("installs referenced Paperclip catalog skills before syncing imported agents", async () => {
     const repositoryPath = await createRepositoryFixture();
     await addCatalogSkillReferenceFixture(repositoryPath);
+    await runCommand("git", ["add", "."], repositoryPath);
+    await runCommand("git", ["commit", "-m", "Add catalog skill references"], repositoryPath);
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
@@ -2177,11 +2635,13 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
         importedCompanyIssuePrefix: "ALP"
+      }, {
+        agents: [{ id: "agent-123", name: "Alpha CEO", urlKey: "alpha-chief" }]
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
 
@@ -2236,6 +2696,8 @@ Lead Alpha Labs and coordinate the delivery pipeline.
   it("preserves existing agent env when sync adapter updates omit env", async () => {
     const repositoryPath = await createRepositoryFixture();
     await addCustomSlugAgentAdapterFixture(repositoryPath);
+    await runCommand("git", ["add", "."], repositoryPath);
+    await runCommand("git", ["commit", "-m", "Customize CEO adapter"], repositoryPath);
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
@@ -2358,7 +2820,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           }
         ]
       });
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -2376,6 +2838,8 @@ Lead Alpha Labs and coordinate the delivery pipeline.
             "alpha-chief": "codex-ceo"
           }
         }
+      }, {
+        agents: [{ id: "agent-123", name: "Alpha CEO", urlKey: "alpha-chief" }]
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
 
@@ -2429,6 +2893,8 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           SHARED_VALUE: from-package
 `
     );
+    await runCommand("git", ["add", "."], repositoryPath);
+    await runCommand("git", ["commit", "-m", "Customize CEO adapter env"], repositoryPath);
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
@@ -2557,7 +3023,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           }
         ]
       });
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -2575,6 +3041,8 @@ Lead Alpha Labs and coordinate the delivery pipeline.
             "alpha-chief": "codex-ceo"
           }
         }
+      }, {
+        agents: [{ id: "agent-123", name: "Alpha CEO", urlKey: "alpha-chief" }]
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
 
@@ -2756,7 +3224,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
 
       expect(company?.id).toBeTruthy();
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -2789,7 +3257,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
 
       expect(authStore.credentials?.["http://127.0.0.1:3210"]?.token).toBe("paperclip-board-token");
       expect(secretResolveCallCount).toBe(0);
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           authorization: "Bearer paperclip-board-token",
@@ -3173,7 +3641,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -3190,7 +3658,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         /Board access required\. Open Agent Companies Plugin settings inside the imported company, connect board access, and retry sync\./u
       );
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
         "http://127.0.0.1:3210/api/health"
       ]);
@@ -3297,7 +3765,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
         const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-        await harness.performAction("catalog.record-company-import", {
+        await recordTrackedCompanyImport(harness, {
           sourceCompanyId: company?.id,
           importedCompanyId: "paperclip-company-123",
           importedCompanyName: "Alpha Labs Imported",
@@ -3314,7 +3782,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           /Board access required\. Open Agent Companies Plugin settings inside the imported company, connect board access, and retry sync\./u
         );
 
-        expect(fetchRequests).toEqual([
+        expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
           "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           "http://127.0.0.1:3210/api/health",
           "http://127.0.0.1:3210/api/companies/import"
@@ -3417,7 +3885,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         }
       ]
     });
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
@@ -3437,7 +3905,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       },
       syncCollisionStrategy: "skip"
     });
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-456",
       importedCompanyName: "Alpha Labs Sandbox",
@@ -3643,14 +4111,14 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
     });
 
-    const afterReimport = await harness.performAction<CatalogSnapshot>("catalog.record-company-import", {
+    const afterReimport = await recordTrackedCompanyImport<CatalogSnapshot>(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
@@ -3711,13 +4179,13 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
     });
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-456",
       importedCompanyName: "Alpha Labs Sandbox",
@@ -3767,7 +4235,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
@@ -3855,13 +4323,13 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
     });
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-456",
       importedCompanyName: "Alpha Labs Sandbox",
@@ -3966,7 +4434,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
@@ -4027,7 +4495,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const alphaCompany = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
     const betaCompany = catalog.companies.find((candidate) => candidate.slug === "beta-works");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: alphaCompany?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Existing Alpha",
@@ -4042,7 +4510,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     });
 
     await expect(
-      harness.performAction("catalog.record-company-import", {
+      recordTrackedCompanyImport(harness, {
         sourceCompanyId: betaCompany?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Existing Alpha",
@@ -4054,6 +4522,8 @@ Lead Alpha Labs and coordinate the delivery pipeline.
   it("applies metadata.paperclip.agentIcon when preparing sync imports", async () => {
     const repositoryPath = await createRepositoryFixture();
     await addPaperclipAgentIconFixture(repositoryPath);
+    await runCommand("git", ["add", "."], repositoryPath);
+    await runCommand("git", ["commit", "-m", "Add agent icons"], repositoryPath);
 
     let currentTime = "2026-04-14T09:23:00.000Z";
     let syncedExtension: {
@@ -4097,11 +4567,17 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
+    }, {
+      agents: [
+        { id: "agent-1", name: "Alpha CEO", urlKey: "ceo" },
+        { id: "agent-2", name: "Alpha Reviewer", urlKey: "reviewer" },
+        { id: "agent-3", name: "Alpha Architect", urlKey: "architect" }
+      ]
     });
 
     await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
@@ -4118,70 +4594,152 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     expect(syncedExtension?.agents?.architect?.icon).toBeUndefined();
   });
 
-  it("returns an up-to-date sync result without re-importing current companies", async () => {
+  it("bootstraps a complete identity ledger on an up-to-date sync without importing", async () => {
     const repositoryPath = await createRepositoryFixture();
+    await mkdir(join(repositoryPath, "alpha", "tasks", "weekly-review"), { recursive: true });
+    await writeFile(join(repositoryPath, "alpha", "tasks", "weekly-review", "TASK.md"), `---
+name: Weekly Review
+recurring: true
+---
+
+Review the week.
+`);
+    await runCommand("git", ["add", "."], repositoryPath);
+    await runCommand("git", ["commit", "-m", "Add routine"], repositoryPath);
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
     let currentTime = "2026-04-14T09:23:00.000Z";
     let syncCount = 0;
-    const plugin = createAgentCompaniesPlugin({
-      now: () => currentTime,
-      startupAutoSyncDelayMs: null,
-      syncImport: async (_ctx, input) => {
-        syncCount += 1;
-        return {
-          company: {
-            id: input.importedCompanyId,
-            name: "Alpha Labs Imported",
-            action: "updated"
-          },
-          warnings: []
-        };
-      }
-    });
-    const harness = createTestHarness({
-      manifest,
-      capabilities: [...manifest.capabilities]
-    });
+    let skillAvailable = true;
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    delete process.env.PAPERCLIP_API_KEY;
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const payload = url.endsWith("/agents")
+        ? [{ id: "agent-1", name: "Alpha CEO", urlKey: "ceo" }]
+        : url.endsWith("/projects")
+          ? [{ id: "project-1", name: "Import Pipeline", urlKey: "import-pipeline" }]
+          : url.endsWith("/issues")
+            ? [
+                { id: "issue-1", title: "Seed Default Company" },
+                { id: "issue-2", title: "Follow Up Review" }
+              ]
+            : url.endsWith("/routines")
+              ? [{ id: "routine-1", title: "Weekly Review", status: "paused" }]
+              : url.endsWith("/skills")
+                ? skillAvailable
+                  ? [{ id: "skill-1", name: "Repo Audit", slug: "repo-audit", key: "company/company-1/repo-audit" }]
+                  : []
+                : null;
+      if (!payload) throw new Error(`Unexpected fetch to ${url}`);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => currentTime,
+        startupAutoSyncDelayMs: null,
+        syncImport: async (_ctx, input) => {
+          syncCount += 1;
+          return { company: { id: input.importedCompanyId, name: "Alpha Labs Imported", action: "updated" } };
+        }
+      });
+      const harness = createTestHarness({ manifest, capabilities: [...manifest.capabilities] });
+      await harness.ctx.state.set(CATALOG_SCOPE, { repositories: [], updatedAt: "2026-04-14T09:00:00.000Z" });
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", { url: repositoryPath });
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+      await recordTrackedCompanyImport(harness, {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP"
+      }, {
+        routines: [{ id: "routine-1", title: "Weekly Review", status: "paused" }]
+      });
+      const legacyState = await harness.ctx.state.get(CATALOG_SCOPE) as {
+        importedCompanies?: Array<{ itemIdentityBindings?: unknown[] }>;
+      };
+      legacyState.importedCompanies![0]!.itemIdentityBindings = [];
+      await harness.ctx.state.set(CATALOG_SCOPE, legacyState);
+      currentTime = "2026-04-15T10:00:00.000Z";
+      const syncResult = await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+      expect(syncCount).toBe(0);
+      expect(syncResult.company?.action).toBe("unchanged");
+      expect(syncResult.upToDate).toBe(true);
+      const stored = await harness.ctx.state.get(CATALOG_SCOPE) as { importedCompanies?: Array<{ itemIdentityBindings?: Array<{ sourceKind: string; canonicalSkillKey?: string | null }> }> };
+      const bindings = stored.importedCompanies?.[0]?.itemIdentityBindings ?? [];
+      expect(bindings.map((binding) => binding.sourceKind).sort()).toEqual(["agent", "issue", "issue", "project", "routine", "skill"]);
+      expect(bindings.find((binding) => binding.sourceKind === "skill")?.canonicalSkillKey).toBe("company/company-1/repo-audit");
+      skillAvailable = false;
+      useExplicitTestInventory = true;
+      await expect(harness.performAction("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      })).rejects.toThrow(/bound skill skill-1 no longer exists/i);
+      expect(syncCount).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
+      else process.env.PAPERCLIP_API_URL = previousApiUrl;
+      if (previousApiKey === undefined) delete process.env.PAPERCLIP_API_KEY;
+      else process.env.PAPERCLIP_API_KEY = previousApiKey;
+    }
+  });
 
-    await harness.ctx.state.set(CATALOG_SCOPE, {
-      repositories: [],
-      updatedAt: "2026-04-14T09:00:00.000Z"
-    });
-
-    await plugin.definition.setup(harness.ctx);
-    await harness.performAction("catalog.add-repository", {
-      url: repositoryPath
-    });
-
-    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
-    const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
-
-    await harness.performAction("catalog.record-company-import", {
-      sourceCompanyId: company?.id,
-      importedCompanyId: "paperclip-company-123",
-      importedCompanyName: "Alpha Labs Imported",
-      importedCompanyIssuePrefix: "ALP"
-    });
-
-    currentTime = "2026-04-15T10:00:00.000Z";
-    const syncResult = await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
-      sourceCompanyId: company?.id,
-      importedCompanyId: "paperclip-company-123"
-    });
-
-    expect(syncCount).toBe(0);
-    expect(syncResult.company?.action).toBe("unchanged");
-    expect(syncResult.importedSourceVersion).toBe("1.0.0");
-    expect(syncResult.latestSourceVersion).toBe("1.0.0");
-    expect(syncResult.upToDate).toBe(true);
-
-    const afterSync = await harness.getData<CatalogSnapshot>("catalog.read");
-    const importedCompany = afterSync.importedCompanies.find(
-      (candidate) => candidate.importedCompany.id === "paperclip-company-123"
-    );
-
-    expect(importedCompany?.importedCompany.lastSyncedAt).toBe("2026-04-15T10:00:00.000Z");
-    expect(importedCompany?.importedCompany.isSyncAvailable).toBe(false);
-    expect(importedCompany?.importedCompany.isUpToDate).toBe(true);
+  it("fails identity bootstrap on an ambiguous title without advancing the baseline", async () => {
+    useExplicitTestInventory = true;
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const originalFetch = globalThis.fetch;
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const payload = url.endsWith("/issues")
+        ? [{ id: "issue-a", title: "Follow Up Review" }, { id: "issue-b", title: "Follow Up Review" }]
+        : [];
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    try {
+      const plugin = createAgentCompaniesPlugin({ startupAutoSyncDelayMs: null });
+      const harness = createTestHarness({ manifest, capabilities: [...manifest.capabilities] });
+      await harness.ctx.state.set(CATALOG_SCOPE, { repositories: [], updatedAt: "2026-04-14T09:00:00.000Z" });
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", { url: repositoryPath });
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+      await recordTrackedCompanyImport(harness, {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        selection: {
+          agents: { mode: "none" }, projects: { mode: "none" }, tasks: { mode: "none" },
+          issues: { mode: "selected", itemPaths: ["issues/follow-up/ISSUE.md"] }, skills: { mode: "none" }
+        }
+      });
+      const legacyState = await harness.ctx.state.get(CATALOG_SCOPE) as {
+        importedCompanies?: Array<{ itemIdentityBindings?: unknown[] }>;
+      };
+      legacyState.importedCompanies![0]!.itemIdentityBindings = [];
+      await harness.ctx.state.set(CATALOG_SCOPE, legacyState);
+      const before = await harness.ctx.state.get(CATALOG_SCOPE) as { importedCompanies?: Array<{ importedSourceRevision?: string; itemIdentityBindings?: unknown[] }> };
+      await expect(harness.performAction("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      })).rejects.toThrow(/expected one existing issue, found 2/i);
+      const after = await harness.ctx.state.get(CATALOG_SCOPE) as { importedCompanies?: Array<{ importedSourceRevision?: string; itemIdentityBindings?: unknown[]; lastSyncStatus?: string }> };
+      expect(after.importedCompanies?.[0]?.importedSourceRevision).toBe(before.importedCompanies?.[0]?.importedSourceRevision);
+      expect(after.importedCompanies?.[0]?.itemIdentityBindings).toEqual([]);
+      expect(after.importedCompanies?.[0]?.lastSyncStatus).toBe("failed");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
+      else process.env.PAPERCLIP_API_URL = previousApiUrl;
+    }
   });
 
   it("queues wake requests for newly assigned issues created by sync", async () => {
@@ -4210,7 +4768,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         issueReadCount += 1;
         return new Response(
           JSON.stringify(
-            issueReadCount === 1
+            issueReadCount <= 2
               ? [
                   {
                     id: "issue-1",
@@ -4293,7 +4851,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -4320,7 +4878,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         importedCompanyId: "paperclip-company-123"
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           method: "GET",
@@ -4413,7 +4971,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       ]
     });
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: sourceCompanyId!,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
@@ -4457,6 +5015,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
     const originalFetch = globalThis.fetch;
     const fetchRequests: Array<{ url: string; method: string; body: unknown }> = [];
+    let issueReadCount = 0;
 
     process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
     delete process.env.PAPERCLIP_API_KEY;
@@ -4472,16 +5031,17 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       });
 
       if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        issueReadCount += 1;
         return new Response(
-          JSON.stringify([
-            {
-              id: "issue-1",
-              identifier: "ALP-1",
-              title: "Seed Default Company",
-              status: "todo",
-              assigneeAgentId: "agent-123"
-            }
-          ]),
+          JSON.stringify(issueReadCount === 1
+            ? DEFAULT_TRACKED_IMPORT_INVENTORY.issues
+            : [{
+                id: "issue-1",
+                identifier: "ALP-1",
+                title: "Seed Default Company",
+                status: "todo",
+                assigneeAgentId: "agent-123"
+              }]),
           {
             status: 200,
             headers: {
@@ -4489,6 +5049,15 @@ Lead Alpha Labs and coordinate the delivery pipeline.
             }
           }
         );
+      }
+
+      const inventoryKind = (["agents", "projects", "routines", "skills"] as const)
+        .find((kind) => url === `http://127.0.0.1:3210/api/companies/paperclip-company-123/${kind}`);
+      if (inventoryKind) {
+        return new Response(JSON.stringify(DEFAULT_TRACKED_IMPORT_INVENTORY[inventoryKind]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
       }
 
       if (url === "http://127.0.0.1:3210/api/agents/agent-123/wakeup") {
@@ -4558,12 +5127,15 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           importedCompanyIssuePrefix: "ALP",
           issuesBeforeImport: []
         },
-        {
-          companyId: "paperclip-company-other"
-        }
+        { companyId: "paperclip-company-other" }
       );
 
       expect(fetchRequests).toEqual([
+        ...(["agents", "projects", "issues", "routines", "skills"] as const).map((kind) => ({
+          url: `http://127.0.0.1:3210/api/companies/paperclip-company-123/${kind}`,
+          method: "GET",
+          body: null
+        })),
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           method: "GET",
@@ -4694,7 +5266,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         ]
       });
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -4702,7 +5274,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         issuesBeforeImport: []
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
           method: "POST",
@@ -4858,7 +5430,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         ]
       });
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -4866,7 +5438,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         issuesBeforeImport: []
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/agents/agent-123/wakeup",
           method: "POST",
@@ -5086,11 +5658,13 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
         importedCompanyIssuePrefix: "ALP"
+      }, {
+        routines: [{ id: "routine-new", title: "Monday Review", status: "active" }]
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       await harness.performAction("board-access.update", {
@@ -5109,7 +5683,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         importedCompanyId: "paperclip-company-123"
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           authorization: "Bearer paperclip-board-token",
@@ -5431,11 +6005,13 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
         importedCompanyIssuePrefix: "ALP"
+      }, {
+        routines: [{ id: "routine-existing", title: "Monday Review", status: "active" }]
       });
       await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
       await harness.performAction("board-access.update", {
@@ -5454,7 +6030,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         importedCompanyId: "paperclip-company-123"
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           authorization: "Bearer paperclip-board-token",
@@ -5668,7 +6244,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
 
       expect(sourceCompanyId).toBeTruthy();
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: sourceCompanyId!,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -5698,7 +6274,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         importedCompanyId: "paperclip-company-123"
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           authorization: "Bearer paperclip-board-token",
@@ -5859,7 +6435,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -5972,7 +6548,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -5986,7 +6562,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         importedCompanyId: "paperclip-company-123"
       });
 
-      expect(fetchRequests).toEqual([
+      expect(withoutIdentityLedgerInventoryReads(fetchRequests)).toEqual([
         {
           url: "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues",
           method: "GET"
@@ -6071,7 +6647,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -6183,7 +6759,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
       const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
       const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-      await harness.performAction("catalog.record-company-import", {
+      await recordTrackedCompanyImport(harness, {
         sourceCompanyId: company?.id,
         importedCompanyId: "paperclip-company-123",
         importedCompanyName: "Alpha Labs Imported",
@@ -6288,7 +6864,7 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
@@ -6363,6 +6939,15 @@ Lead Alpha Labs and coordinate the delivery pipeline.
           importedCompanyName: "Alpha Labs Imported",
           importedCompanyIssuePrefix: "ALP",
           importedSourceVersion: "0.9.0",
+          importedSourceRevision: null,
+          sourcePathAliases: [],
+          itemIdentityBindings: [
+            { sourceKind: "agent", sourceId: null, sourcePath: "agents/ceo/AGENTS.md", sourceName: "Alpha CEO", sourceSlug: "ceo", targetId: "agent-1", importPath: "agents/ceo/AGENTS.md", canonicalSkillKey: null },
+            { sourceKind: "project", sourceId: null, sourcePath: "projects/import-pipeline/PROJECT.md", sourceName: "Import Pipeline", sourceSlug: "import-pipeline", targetId: "project-1", importPath: "projects/import-pipeline/PROJECT.md", canonicalSkillKey: null },
+            { sourceKind: "issue", sourceId: null, sourcePath: "projects/import-pipeline/tasks/seed-default/TASK.md", sourceName: "Seed Default Company", sourceSlug: "seed-default", targetId: "issue-1", importPath: "projects/import-pipeline/tasks/seed-default/TASK.md", canonicalSkillKey: null },
+            { sourceKind: "issue", sourceId: null, sourcePath: "issues/follow-up/ISSUE.md", sourceName: "Follow Up Review", sourceSlug: "follow-up", targetId: "issue-2", importPath: "issues/follow-up/ISSUE.md", canonicalSkillKey: null },
+            { sourceKind: "skill", sourceId: null, sourcePath: "skills/repo-audit/SKILL.md", sourceName: "Repo Audit", sourceSlug: "repo-audit", targetId: "skill-1", importPath: "skills/repo-audit/SKILL.md", canonicalSkillKey: "company/company-1/repo-audit" }
+          ],
           importedAt: "2026-04-13T09:23:00.000Z",
           autoSyncEnabled: true,
           syncCollisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
@@ -6379,11 +6964,19 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     await plugin.definition.setup(harness.ctx);
 
     const waitDeadline = Date.now() + 1000;
-    while (syncCount === 0 && Date.now() < waitDeadline) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    let startupSyncCompleted = false;
+    while (!startupSyncCompleted && Date.now() < waitDeadline) {
+      const state = await harness.ctx.state.get(CATALOG_SCOPE) as {
+        importedCompanies?: Array<{ lastSyncedAt?: string | null }>;
+      };
+      startupSyncCompleted = state.importedCompanies?.[0]?.lastSyncedAt === currentTime;
+      if (!startupSyncCompleted) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      }
     }
 
     expect(syncCount).toBe(1);
+    expect(startupSyncCompleted).toBe(true);
 
     const afterStartupSync = await harness.getData<CatalogSnapshot>("catalog.read");
     const importedCompany = afterStartupSync.importedCompanies.find(
@@ -6438,13 +7031,13 @@ Lead Alpha Labs and coordinate the delivery pipeline.
     const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
     const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
 
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-123",
       importedCompanyName: "Alpha Labs Imported",
       importedCompanyIssuePrefix: "ALP"
     });
-    await harness.performAction("catalog.record-company-import", {
+    await recordTrackedCompanyImport(harness, {
       sourceCompanyId: company?.id,
       importedCompanyId: "paperclip-company-456",
       importedCompanyName: "Alpha Labs Sandbox",
