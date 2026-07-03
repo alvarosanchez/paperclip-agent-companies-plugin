@@ -40,6 +40,7 @@ import {
   createAgentCompaniesPlugin,
   migrateAdapterPresetSelectionForSourceRenames,
   migrateSelectionForSourceRenames,
+  recoverPreviousIdentityBindingsForSync,
   resolvePaperclipApiConnection,
   resolveRepositoryContentRoot,
   scanRepositoryForAgentCompanies,
@@ -1357,6 +1358,113 @@ routines:
       defaultPresetId: null,
       agentPresetIds: { old: "preset-1" }
     }, [rename]).agentPresetIds).toEqual({ new: "preset-1" });
+  });
+
+  it("keeps newly selected items unbound until sync creates them", () => {
+    const existing = {
+      sourceKind: "routine" as const,
+      sourceId: null,
+      sourcePath: "tasks/monthly-review/TASK.md",
+      sourceName: "Monthly Review",
+      sourceSlug: "monthly-review",
+      targetId: "routine-existing",
+      importPath: "tasks/monthly-review/TASK.md",
+      canonicalSkillKey: null
+    };
+    const identities = [
+      {
+        item: {
+          kind: "routine" as const,
+          path: "tasks/monthly-review/TASK.md",
+          name: "Monthly Review",
+          slug: "monthly-review",
+          sourceId: null
+        },
+        explicitSkillKey: null
+      },
+      {
+        item: {
+          kind: "routine" as const,
+          path: "tasks/frequent-containment/TASK.md",
+          name: "Frequent Containment",
+          slug: "frequent-containment",
+          sourceId: null
+        },
+        explicitSkillKey: null
+      }
+    ];
+
+    const recovered = recoverPreviousIdentityBindingsForSync(
+      [existing],
+      identities,
+      {
+        agents: [],
+        projects: [],
+        issues: [],
+        routines: [{
+          id: "routine-existing",
+          title: "Monthly Review",
+          description: null,
+          status: "paused",
+          createdAt: "2026-07-01T00:00:00.000Z",
+          updatedAt: "2026-07-01T00:00:00.000Z"
+        }],
+        skills: []
+      }
+    );
+
+    expect(recovered).toEqual({
+      bindings: [existing],
+      recoveredExistingBinding: false
+    });
+  });
+
+  it("recovers a unique live legacy identity while rejecting ambiguous expansion", () => {
+    const identity = [{
+      item: {
+        kind: "routine" as const,
+        path: "tasks/monthly-review/TASK.md",
+        name: "Monthly Review",
+        slug: "monthly-review",
+        sourceId: null
+      },
+      explicitSkillKey: null
+    }];
+    const inventory = {
+      agents: [],
+      projects: [],
+      issues: [],
+      routines: [{
+          id: "routine-existing",
+          title: "Monthly Review",
+          description: null,
+          status: "paused",
+          createdAt: "2026-07-01T00:00:00.000Z",
+          updatedAt: "2026-07-01T00:00:00.000Z"
+        }],
+      skills: []
+    };
+
+    const recovered = recoverPreviousIdentityBindingsForSync([], identity, inventory);
+    expect(recovered.recoveredExistingBinding).toBe(true);
+    expect(recovered.bindings).toEqual([
+      expect.objectContaining({ targetId: "routine-existing", sourcePath: "tasks/monthly-review/TASK.md" })
+    ]);
+
+    expect(() => recoverPreviousIdentityBindingsForSync([], identity, {
+      ...inventory,
+      routines: [
+        ...inventory.routines,
+        {
+          id: "routine-duplicate",
+          title: "Monthly Review",
+          description: null,
+          status: "active",
+          createdAt: "2026-07-01T00:00:00.000Z",
+          updatedAt: "2026-07-01T00:00:00.000Z"
+        }
+      ]
+    })).toThrow('expected at most one existing routine, found 2');
   });
 
   it("reads explicit stable ids and deleted/added Git paths", () => {
@@ -4682,6 +4790,131 @@ Review the week.
         importedCompanyId: "paperclip-company-123"
       })).rejects.toThrow(/bound skill skill-1 no longer exists/i);
       expect(syncCount).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
+      else process.env.PAPERCLIP_API_URL = previousApiUrl;
+      if (previousApiKey === undefined) delete process.env.PAPERCLIP_API_KEY;
+      else process.env.PAPERCLIP_API_KEY = previousApiKey;
+    }
+  });
+
+  it("syncs a newly selected routine even when source version and revision are unchanged", async () => {
+    useExplicitTestInventory = true;
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    let importCompleted = false;
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-board-token";
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const payload = url.endsWith("/agents")
+        ? [{ id: "agent-1", name: "Alpha CEO", urlKey: "ceo" }]
+        : url.endsWith("/projects")
+          ? [{ id: "project-1", name: "Import Pipeline", urlKey: "import-pipeline" }]
+          : url.endsWith("/issues")
+            ? []
+            : url.endsWith("/routines")
+              ? importCompleted
+                ? [{ id: "routine-new", title: "Monday Review", status: "paused" }]
+                : []
+              : url.endsWith("/skills")
+                ? []
+                : null;
+      if (payload === null) throw new Error(`Unexpected fetch to ${url}`);
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        startupAutoSyncDelayMs: null,
+        syncImport: async (_ctx, input) => {
+          expect(input.preparedImport.source.files["tasks/monday-review/TASK.md"]).toBeTruthy();
+          importCompleted = true;
+          return {
+            company: {
+              id: input.importedCompanyId,
+              name: "Alpha Labs Imported",
+              action: "updated"
+            }
+          };
+        }
+      });
+      const harness = createTestHarness({ manifest, capabilities: [...manifest.capabilities] });
+      await harness.ctx.state.set(CATALOG_SCOPE, { repositories: [], updatedAt: "2026-04-14T09:00:00.000Z" });
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", { url: repositoryPath });
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const company = catalog.companies.find((candidate) => candidate.slug === "alpha-labs");
+      await recordTrackedCompanyImport(harness, {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "selected", itemPaths: ["projects/import-pipeline/PROJECT.md"] },
+          tasks: { mode: "none" },
+          issues: { mode: "none" },
+          skills: { mode: "none" }
+        }
+      }, {
+        agents: [{ id: "agent-1", name: "Alpha CEO", urlKey: "ceo" }],
+        projects: [{ id: "project-1", name: "Import Pipeline", urlKey: "import-pipeline" }],
+        issues: [],
+        routines: [],
+        skills: []
+      });
+
+      await addRecurringTaskFixture(repositoryPath);
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+      const latestRevision = (await readFile(join(repositoryPath, ".git", "refs", "heads", "master"), "utf8")).trim();
+      const state = await harness.ctx.state.get(CATALOG_SCOPE) as {
+        importedCompanies?: Array<{
+          importedSourceRevision?: string;
+          importedSourceVersion?: string;
+          selection?: {
+            agents: { mode: "selected"; itemPaths: string[] };
+            projects: { mode: "selected"; itemPaths: string[] };
+            tasks: { mode: "none" | "selected"; itemPaths?: string[] };
+            issues: { mode: "none" };
+            skills: { mode: "none" };
+          };
+        }>;
+      };
+      const tracked = state.importedCompanies![0]!;
+      tracked.importedSourceRevision = latestRevision;
+      tracked.importedSourceVersion = "1.1.0";
+      tracked.selection!.tasks = {
+        mode: "selected",
+        itemPaths: ["tasks/monday-review/TASK.md"]
+      };
+      await harness.ctx.state.set(CATALOG_SCOPE, state);
+
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: company?.id,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      expect(importCompleted).toBe(true);
+      const stored = await harness.ctx.state.get(CATALOG_SCOPE) as {
+        importedCompanies?: Array<{
+          importedSourceVersion?: string;
+          itemIdentityBindings?: Array<{ sourceKind: string; sourcePath: string; targetId: string }>;
+        }>;
+      };
+      expect(stored.importedCompanies?.[0]?.importedSourceVersion).toBe("1.1.0");
+      expect(stored.importedCompanies?.[0]?.itemIdentityBindings).toContainEqual(
+        expect.objectContaining({
+          sourceKind: "routine",
+          sourcePath: "tasks/monday-review/TASK.md",
+          targetId: "routine-new"
+        })
+      );
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
