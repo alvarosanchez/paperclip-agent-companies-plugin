@@ -4799,7 +4799,7 @@ Review the week.
     }
   });
 
-  it("creates a newly selected routine when recovery sees no live identity yet", async () => {
+  it("syncs a newly selected routine even when source version and revision are unchanged", async () => {
     useExplicitTestInventory = true;
     const repositoryPath = await createRepositoryFixture();
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
@@ -4888,7 +4888,7 @@ Review the week.
       };
       const tracked = state.importedCompanies![0]!;
       tracked.importedSourceRevision = latestRevision;
-      tracked.importedSourceVersion = "1.0.0";
+      tracked.importedSourceVersion = "1.1.0";
       tracked.selection!.tasks = {
         mode: "selected",
         itemPaths: ["tasks/monday-review/TASK.md"]

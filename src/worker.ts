@@ -6228,7 +6228,35 @@ async function runCatalogCompanySync(
         importedCompany.importedSourceVersion,
         latestSourceVersion
       );
-      const syncAvailable = versionSyncAvailable || sourceRenames.length > 0;
+      let selectionExpansionPreparedImport: Awaited<
+        ReturnType<typeof buildCatalogCompanyImportSource>
+      > | null = null;
+      let selectionExpansionAvailable = false;
+      if (
+        !versionSyncAvailable &&
+        sourceRenames.length === 0 &&
+        importedCompany.itemIdentityBindings.length > 0
+      ) {
+        selectionExpansionPreparedImport = await buildCatalogCompanyImportSource(
+          ctx,
+          sourceCompanyId,
+          importedCompany.selection
+        );
+        const selectedIdentities = collectPreparedSourceIdentities(
+          selectionExpansionPreparedImport.source.files
+        );
+        const projectedBindings = projectCurrentIdentityBindings(
+          importedCompany.itemIdentityBindings,
+          [],
+          selectedIdentities
+        );
+        selectionExpansionAvailable = !isIdentityLedgerComplete(
+          projectedBindings,
+          selectedIdentities
+        );
+      }
+      const syncAvailable =
+        versionSyncAvailable || sourceRenames.length > 0 || selectionExpansionAvailable;
 
       if (!syncAvailable) {
         let bootstrappedBindings = importedCompany.itemIdentityBindings;
@@ -6352,7 +6380,7 @@ async function runCatalogCompanySync(
         previousBindings,
         preMutationInventory
       );
-      const preparedImport = await buildCatalogCompanyImportSource(
+      const preparedImport = selectionExpansionPreparedImport ?? await buildCatalogCompanyImportSource(
         ctx,
         sourceCompanyId,
         migratedSelection
