@@ -5169,6 +5169,67 @@ function projectCurrentIdentityBindings(
   });
 }
 
+export function recoverPreviousIdentityBindingsForSync(
+  previousBindings: CatalogItemIdentityBinding[],
+  identities: Array<{ item: PortableItemIdentity; explicitSkillKey: string | null }>,
+  records: IdentityCandidateCollections
+): { bindings: CatalogItemIdentityBinding[]; recoveredExistingBinding: boolean } {
+  const bindings = projectCurrentIdentityBindings(previousBindings, [], identities);
+  const claimedTargets = new Set(bindings.map((binding) => binding.targetId));
+  let recoveredExistingBinding = false;
+
+  for (const { item, explicitSkillKey } of identities) {
+    const alreadyBound = bindings.some((binding) =>
+      binding.sourceKind === item.kind
+      && binding.sourceId === item.sourceId
+      && binding.sourcePath === item.path
+      && binding.sourceName === item.name
+      && binding.sourceSlug === item.slug
+    );
+    if (alreadyBound) continue;
+
+    const candidates = matchIdentityCandidates(item, records, explicitSkillKey);
+    if (candidates.length === 0) {
+      // A saved selection can expand before the next sync (for example through
+      // an operator/API re-import workflow). New selected items have no live
+      // identity yet and must remain unbound until portability import creates
+      // them; the post-import ledger verification binds them deterministically.
+      continue;
+    }
+    if (candidates.length !== 1) {
+      throw new Error(
+        `Cannot recover identity ledger for "${item.path}": expected at most one existing ${item.kind}, found ${candidates.length}.`
+      );
+    }
+
+    const targetId = candidates[0]!.id;
+    if (claimedTargets.has(targetId)) {
+      throw new Error(`Cannot recover identity ledger: target ${targetId} matched more than one selected source item.`);
+    }
+    const canonicalSkillKey = item.kind === "skill"
+      ? records.skills.find((skill) => skill.id === targetId)?.key ?? null
+      : null;
+    if (item.kind === "skill" && !canonicalSkillKey) {
+      throw new Error(`Cannot recover identity ledger for "${item.path}": matched skill has no canonical key.`);
+    }
+
+    claimedTargets.add(targetId);
+    recoveredExistingBinding = true;
+    bindings.push({
+      sourceKind: item.kind,
+      sourceId: item.sourceId,
+      sourcePath: item.path,
+      sourceName: item.name,
+      sourceSlug: item.slug,
+      targetId,
+      importPath: item.path,
+      canonicalSkillKey
+    });
+  }
+
+  return { bindings, recoveredExistingBinding };
+}
+
 function identityTargetExists(
   item: PortableItemIdentity,
   targetId: string,
@@ -6263,13 +6324,20 @@ async function runCatalogCompanySync(
           importedCompany.selection
         );
         if (!isIdentityLedgerComplete(previousBindings, previousIdentities)) {
-          previousBindings = await bootstrapIdentityBindingsForItems(
-            ctx,
-            importedCompany.importedCompanyId,
+          const recovered = recoverPreviousIdentityBindingsForSync(
+            previousBindings,
             previousIdentities,
             preMutationInventory
           );
-          recoveredPreviousBindings = true;
+          previousBindings = recovered.bindings;
+          recoveredPreviousBindings = recovered.recoveredExistingBinding;
+          await preflightCurrentIdentityBindings(
+            ctx,
+            importedCompany.importedCompanyId,
+            previousIdentities,
+            previousBindings,
+            preMutationInventory
+          );
         }
       }
       const migratedSelection = migrateSelectionForSourceRenames(importedCompany.selection, sourceRenames);
