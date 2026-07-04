@@ -295,6 +295,7 @@ interface SyncImportRequest {
     newItem: PortableItemIdentity;
     binding: CatalogItemIdentityBinding;
   }>;
+  authoritativeRoutineSourcePaths?: string[] | null;
 }
 
 interface BoundRoutineUpdatePlan extends ImportedRoutineUpdatePlan {
@@ -3815,9 +3816,17 @@ export async function executeDefaultSyncImport(
       collisionStrategy: input.collisionStrategy
     });
   }
+  const configuredRoutineSourcePaths = input.authoritativeRoutineSourcePaths;
+  const selectedTaskSourcePaths = configuredRoutineSourcePaths !== undefined
+    ? configuredRoutineSourcePaths
+    : input.preparedImport.selection.tasks.mode === "all"
+      ? null
+      : input.preparedImport.selection.tasks.mode === "selected"
+        ? input.preparedImport.selection.tasks.itemPaths ?? []
+        : [];
   if (
     input.collisionStrategy === "replace"
-    && input.preparedImport.selection.tasks.mode === "all"
+    && (selectedTaskSourcePaths === null || selectedTaskSourcePaths.length > 0)
   ) {
     await archiveRemovedBoundRoutinesAfterReplaceImport(
       ctx,
@@ -3829,7 +3838,8 @@ export async function executeDefaultSyncImport(
         (input.renameBindings ?? [])
           .filter((binding) => binding.newItem.kind === "routine")
           .map((binding) => binding.binding.targetId)
-      )
+      ),
+      selectedTaskSourcePaths
     );
   }
   const routineDedupeWarnings =
@@ -4599,13 +4609,15 @@ async function archiveRemovedBoundRoutinesAfterReplaceImport(
   companyId: string,
   files: Record<string, PortableCatalogFileEntry>,
   previousBindings: CatalogItemIdentityBinding[],
-  protectedTargetIds: ReadonlySet<string>
+  protectedTargetIds: ReadonlySet<string>,
+  authoritativeSourcePaths: readonly string[] | null
 ): Promise<void> {
   const currentTasks = extractPortableRecurringTaskFileDefinitions(files);
   const routineIdsToArchive = findRemovedBoundRoutineIds(
     currentTasks,
     previousBindings,
-    protectedTargetIds
+    protectedTargetIds,
+    authoritativeSourcePaths
   );
   if (routineIdsToArchive.length === 0) return;
 
@@ -6473,7 +6485,12 @@ async function runCatalogCompanySync(
         existingIssues: issuesBeforeSync,
         adapterPresetSelection: migratedAdapterSelection,
         previousBindings,
-        renameBindings
+        renameBindings,
+        authoritativeRoutineSourcePaths: migratedSelection.tasks.mode === "all"
+          ? null
+          : migratedSelection.tasks.mode === "selected"
+            ? migratedSelection.tasks.itemPaths ?? []
+            : []
       });
       const syncedAt = options.now();
       const latestState = await loadCatalogState(ctx);

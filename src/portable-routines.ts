@@ -395,14 +395,19 @@ function compareRoutineRecency(
 export function findRemovedBoundRoutineIds(
   currentTasks: ImportedRecurringTaskFileDefinition[],
   previousBindings: Array<Pick<CatalogItemIdentityBinding, "sourceKind" | "sourcePath" | "targetId">>,
-  protectedTargetIds: ReadonlySet<string> = new Set()
+  protectedTargetIds: ReadonlySet<string> = new Set(),
+  authoritativeSourcePaths: readonly string[] | null = null
 ): string[] {
   const currentPaths = new Set(currentTasks.map((task) => task.filePath));
+  const authoritativePathSet = authoritativeSourcePaths === null
+    ? null
+    : new Set(authoritativeSourcePaths);
   const removedTargetIds = new Set<string>();
 
   for (const binding of previousBindings) {
     if (
       binding.sourceKind !== "routine"
+      || (authoritativePathSet !== null && !authoritativePathSet.has(binding.sourcePath))
       || currentPaths.has(binding.sourcePath)
       || protectedTargetIds.has(binding.targetId)
     ) {

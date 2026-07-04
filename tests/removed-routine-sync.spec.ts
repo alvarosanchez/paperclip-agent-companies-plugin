@@ -52,9 +52,27 @@ describe("source-removed routine reconciliation", () => {
       ],
       new Set(["routine-renamed"])
     )).toEqual(["routine-removed"]);
+
+    expect(findRemovedBoundRoutineIds(
+      [],
+      [
+        {
+          sourceKind: "routine",
+          sourcePath: "tasks/removed-containment/TASK.md",
+          targetId: "routine-removed"
+        },
+        {
+          sourceKind: "routine",
+          sourcePath: "tasks/unselected/TASK.md",
+          targetId: "routine-unselected"
+        }
+      ],
+      new Set(),
+      ["tasks/removed-containment/TASK.md"]
+    )).toEqual(["routine-removed"]);
   });
 
-  it("archives a source-removed bound routine once and does not infer deletion for partial selection", async () => {
+  it("archives a source-removed bound routine once and limits partial selection to explicit paths", async () => {
     let routineStatus = "active";
     let archiveRequests = 0;
 
@@ -144,5 +162,18 @@ describe("source-removed routine reconciliation", () => {
       }
     });
     expect(archiveRequests).toBe(1);
+
+    await executeDefaultSyncImport(harness.ctx, {
+      ...input,
+      authoritativeRoutineSourcePaths: ["tasks/removed-containment/TASK.md"],
+      preparedImport: {
+        ...input.preparedImport,
+        selection: {
+          ...input.preparedImport.selection,
+          tasks: { mode: "selected" as const, itemPaths: [] }
+        }
+      }
+    });
+    expect(archiveRequests).toBe(2);
   });
 });
