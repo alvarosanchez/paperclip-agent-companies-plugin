@@ -1,5 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import type { PortableCatalogFileEntry } from "./catalog.js";
+import type { CatalogItemIdentityBinding, PortableCatalogFileEntry } from "./catalog.js";
 
 const FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
 const PORTABLE_PAPERCLIP_EXTENSION_PATHS = [".paperclip.yaml", ".paperclip.yml"] as const;
@@ -394,11 +394,7 @@ function compareRoutineRecency(
 
 export function findRemovedBoundRoutineIds(
   currentTasks: ImportedRecurringTaskFileDefinition[],
-  previousBindings: Array<{
-    sourceKind: string;
-    sourcePath: string;
-    targetId: string;
-  }>,
+  previousBindings: Array<Pick<CatalogItemIdentityBinding, "sourceKind" | "sourcePath" | "targetId">>,
   protectedTargetIds: ReadonlySet<string> = new Set()
 ): string[] {
   const currentPaths = new Set(currentTasks.map((task) => task.filePath));
