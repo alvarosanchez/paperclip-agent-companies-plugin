@@ -392,6 +392,34 @@ function compareRoutineRecency(
   );
 }
 
+export function findRemovedBoundRoutineIds(
+  currentTasks: ImportedRecurringTaskFileDefinition[],
+  previousBindings: Array<{
+    sourceKind: string;
+    sourcePath: string;
+    targetId: string;
+  }>,
+  protectedTargetIds: ReadonlySet<string> = new Set()
+): string[] {
+  const currentPaths = new Set(currentTasks.map((task) => task.filePath));
+  const removedTargetIds = new Set<string>();
+
+  for (const binding of previousBindings) {
+    if (
+      binding.sourceKind !== "routine"
+      || currentPaths.has(binding.sourcePath)
+      || protectedTargetIds.has(binding.targetId)
+    ) {
+      continue;
+    }
+    removedTargetIds.add(binding.targetId);
+  }
+
+  return [...removedTargetIds].sort((left, right) =>
+    left.localeCompare(right, undefined, { sensitivity: "base" })
+  );
+}
+
 export function findArchivableImportedRoutineIds(
   importedRecurringTasks: ImportedRecurringTaskDefinition[],
   routines: ImportedRoutineSnapshot[]
