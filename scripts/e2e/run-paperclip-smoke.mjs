@@ -671,6 +671,28 @@ async function gotoWithTimeout(page, url) {
   });
 }
 
+async function invokeAgentCompaniesBridge(page, kind, key, params = {}) {
+  return page.evaluate(async ({ bridgeKind, bridgeKey, bridgeParams }) => {
+    const pluginsResponse = await fetch('/api/plugins');
+    const plugins = await pluginsResponse.json();
+    const plugin = plugins.find((candidate) => candidate?.pluginKey === 'paperclip-agent-companies-plugin');
+    if (!plugin?.id) {
+      throw new Error('Agent Companies plugin was not found.');
+    }
+    const response = await fetch(`/api/plugins/${encodeURIComponent(plugin.id)}/bridge/${bridgeKind}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: bridgeKey, params: bridgeParams })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`Plugin ${bridgeKind} ${bridgeKey} failed: ${response.status} ${text}`);
+    }
+    const body = text ? JSON.parse(text) : null;
+    return body?.data ?? null;
+  }, { bridgeKind: kind, bridgeKey: key, bridgeParams: params });
+}
+
 async function main() {
   process.on('SIGINT', () => {
     void cleanup().finally(() => process.exit(130));
@@ -1173,6 +1195,33 @@ async function main() {
         `Expected Monday Review webhook trigger to be added, received ${JSON.stringify(syncedWebhookTrigger)}.`
       );
     }
+
+    const catalogBeforeRemoval = await invokeAgentCompaniesBridge(page, 'data', 'catalog.read');
+    const trackedFixtureCompany = catalogBeforeRemoval?.importedCompanies?.find(
+      (company) => company?.importedCompany?.id === importTargetCompany.id
+    );
+    if (!trackedFixtureCompany?.sourceCompanyId) {
+      throw new Error('Expected the imported fixture company to remain tracked before removal sync.');
+    }
+    await invokeAgentCompaniesBridge(page, 'action', 'catalog.record-company-import', {
+      sourceCompanyId: trackedFixtureCompany.sourceCompanyId,
+      importedCompanyId: importTargetCompany.id,
+      importedCompanyName: importTargetCompany.name,
+      importedCompanyIssuePrefix: importTargetCompany.issuePrefix,
+      selection: {
+        agents: { mode: 'all' },
+        projects: { mode: 'all' },
+        tasks: {
+          mode: 'selected',
+          itemPaths: ['projects/first-import/tasks/monday-review/TASK.md']
+        },
+        issues: { mode: 'none' },
+        skills: { mode: 'all' }
+      },
+      adapterPresetSelection: trackedFixtureCompany.importedCompany?.adapterPresetSelection,
+      syncCollisionStrategy: 'replace'
+    });
+    log('Narrowed the saved task contract to the recurring routine before removal sync.');
 
     await setFixtureRepositoryVersion(fixtureRepository, '1.2.0');
     await removeFixtureRecurringTaskForSync(fixtureRepository);
