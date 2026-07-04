@@ -549,6 +549,24 @@ Review the updated pipeline health check.
   );
 }
 
+async function removeFixtureRecurringTaskForSync(repositoryRoot) {
+  await writeFile(
+    join(repositoryRoot, '.paperclip.yaml'),
+    `schema: paperclip/v1
+agents:
+  ceo:
+    adapter:
+      type: codex_local
+      config:
+        model: gpt-5.4
+`
+  );
+  await rm(
+    join(repositoryRoot, 'projects', 'first-import', 'tasks', 'monday-review'),
+    { recursive: true, force: true }
+  );
+}
+
 async function ensureCompaniesSeeded(minimumCount = 2) {
   const companiesUrl = new URL('/api/companies', baseUrl).toString();
   const existingCompanies = await fetchJson(companiesUrl);
@@ -1154,6 +1172,59 @@ async function main() {
       throw new Error(
         `Expected Monday Review webhook trigger to be added, received ${JSON.stringify(syncedWebhookTrigger)}.`
       );
+    }
+
+    await setFixtureRepositoryVersion(fixtureRepository, '1.2.0');
+    await removeFixtureRecurringTaskForSync(fixtureRepository);
+    await page.locator('[data-testid="repo-card"]').filter({ hasText: fixtureRepository }).getByRole('button', {
+      name: 'Rescan'
+    }).click();
+
+    await page.waitForFunction(
+      (button) =>
+        button instanceof HTMLButtonElement &&
+        button.textContent?.trim() === 'Sync now' &&
+        button.disabled === false,
+      await syncTrigger.elementHandle(),
+      { timeout: 120000 }
+    );
+    await importedCompanyCard.getByText('Latest v1.2.0', { exact: false }).waitFor({ timeout: 120000 });
+    await syncTrigger.click();
+    await page.getByText('Company synced', { exact: true }).waitFor({ timeout: 120000 });
+
+    const removedRoutineDetail = await waitForValue(
+      `archived source-removed routine ${importedRoutine.id}`,
+      async () => {
+        const detail = await fetchRoutine(importedRoutine.id);
+        return detail?.status === 'archived' ? detail : null;
+      },
+      120000
+    );
+    if (removedRoutineDetail.id !== importedRoutine.id) {
+      throw new Error(
+        `Expected source removal to archive bound routine ${importedRoutine.id}, received ${removedRoutineDetail.id ?? 'null'}.`
+      );
+    }
+    const routinesAfterRemoval = await fetchCompanyRoutines(importTargetCompany.id);
+    const activeMondayRoutinesAfterRemoval = routinesAfterRemoval.filter(
+      (routine) => routine?.title === 'Monday Review' && routine?.status !== 'archived'
+    );
+    if (activeMondayRoutinesAfterRemoval.length !== 0) {
+      throw new Error(
+        `Expected no non-archived Monday Review routine after source removal, received ${activeMondayRoutinesAfterRemoval.length}.`
+      );
+    }
+    const agentsAfterRemoval = await fetchJson(
+      new URL(`/api/companies/${encodeURIComponent(importTargetCompany.id)}/agents`, baseUrl).toString()
+    );
+    if (!Array.isArray(agentsAfterRemoval) || !agentsAfterRemoval.some((agent) => agent?.id === importedAgent.id)) {
+      throw new Error(`Expected source-removal sync to preserve imported agent ${importedAgent.id}.`);
+    }
+    const issuesAfterRemoval = await fetchJson(
+      new URL(`/api/companies/${encodeURIComponent(importTargetCompany.id)}/issues`, baseUrl).toString()
+    );
+    if (!Array.isArray(issuesAfterRemoval) || !issuesAfterRemoval.some((issue) => issue?.id === assignedImportIssue.id)) {
+      throw new Error(`Expected source-removal sync to preserve imported issue ${assignedImportIssue.id}.`);
     }
 
     await importedCompanyCard.getByRole('button', { name: 'View source contents' }).click();

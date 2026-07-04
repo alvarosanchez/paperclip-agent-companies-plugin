@@ -1,5 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import type { PortableCatalogFileEntry } from "./catalog.js";
+import type { CatalogItemIdentityBinding, PortableCatalogFileEntry } from "./catalog.js";
 
 const FRONTMATTER_PATTERN = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/u;
 const PORTABLE_PAPERCLIP_EXTENSION_PATHS = [".paperclip.yaml", ".paperclip.yml"] as const;
@@ -389,6 +389,30 @@ function compareRoutineRecency(
   return (
     rightTimestamp.localeCompare(leftTimestamp) ||
     right.id.localeCompare(left.id, undefined, { sensitivity: "base" })
+  );
+}
+
+export function findRemovedBoundRoutineIds(
+  currentTasks: ImportedRecurringTaskFileDefinition[],
+  previousBindings: Array<Pick<CatalogItemIdentityBinding, "sourceKind" | "sourcePath" | "targetId">>,
+  protectedTargetIds: ReadonlySet<string> = new Set()
+): string[] {
+  const currentPaths = new Set(currentTasks.map((task) => task.filePath));
+  const removedTargetIds = new Set<string>();
+
+  for (const binding of previousBindings) {
+    if (
+      binding.sourceKind !== "routine"
+      || currentPaths.has(binding.sourcePath)
+      || protectedTargetIds.has(binding.targetId)
+    ) {
+      continue;
+    }
+    removedTargetIds.add(binding.targetId);
+  }
+
+  return [...removedTargetIds].sort((left, right) =>
+    left.localeCompare(right, undefined, { sensitivity: "base" })
   );
 }
 

@@ -62,6 +62,7 @@ import {
   extractPortableRecurringTaskDefinitions,
   extractPortableRecurringTaskFileDefinitions,
   findArchivableImportedRoutineIds,
+  findRemovedBoundRoutineIds,
   findUpdatableImportedRoutinePlans,
   removePortableRecurringTaskImports,
   type ImportedRecurringTaskFileDefinition,
@@ -288,6 +289,7 @@ interface SyncImportRequest {
   preparedImport: CatalogPreparedCompanyImport;
   existingIssues?: PaperclipIssueRecord[] | null;
   adapterPresetSelection: ImportAdapterPresetSelection;
+  previousBindings?: CatalogItemIdentityBinding[];
   renameBindings?: Array<{
     oldItem: PortableItemIdentity;
     newItem: PortableItemIdentity;
@@ -3648,7 +3650,7 @@ async function buildCatalogCompanyImportSource(
   };
 }
 
-async function executeDefaultSyncImport(
+export async function executeDefaultSyncImport(
   ctx: PluginContext,
   input: SyncImportRequest
 ): Promise<PaperclipCompanyImportResult> {
@@ -3812,6 +3814,23 @@ async function executeDefaultSyncImport(
       },
       collisionStrategy: input.collisionStrategy
     });
+  }
+  if (
+    input.collisionStrategy === "replace"
+    && input.preparedImport.selection.tasks.mode === "all"
+  ) {
+    await archiveRemovedBoundRoutinesAfterReplaceImport(
+      ctx,
+      connection,
+      input.importedCompanyId,
+      preparedSource.files,
+      input.previousBindings ?? [],
+      new Set(
+        (input.renameBindings ?? [])
+          .filter((binding) => binding.newItem.kind === "routine")
+          .map((binding) => binding.binding.targetId)
+      )
+    );
   }
   const routineDedupeWarnings =
     input.collisionStrategy === "replace"
@@ -4572,6 +4591,35 @@ async function updateExistingImportedRoutinesBeforeReplaceImport(
     updatedTasks,
     warnings: []
   };
+}
+
+async function archiveRemovedBoundRoutinesAfterReplaceImport(
+  ctx: PluginContext,
+  connection: PaperclipApiConnection,
+  companyId: string,
+  files: Record<string, PortableCatalogFileEntry>,
+  previousBindings: CatalogItemIdentityBinding[],
+  protectedTargetIds: ReadonlySet<string>
+): Promise<void> {
+  const currentTasks = extractPortableRecurringTaskFileDefinitions(files);
+  const routineIdsToArchive = findRemovedBoundRoutineIds(
+    currentTasks,
+    previousBindings,
+    protectedTargetIds
+  );
+  if (routineIdsToArchive.length === 0) return;
+
+  const routines = await fetchPaperclipCompanyRoutines(connection, companyId);
+  const routinesById = new Map(routines.map((routine) => [routine.id, routine]));
+  for (const routineId of routineIdsToArchive) {
+    const routine = routinesById.get(routineId);
+    if (!routine || routine.status === "archived") continue;
+    await archivePaperclipRoutine(connection, routineId);
+    ctx.logger.info("Archived a source-removed bound Paperclip routine after replace-mode sync", {
+      companyId,
+      routineId
+    });
+  }
 }
 
 async function archiveImportedRoutineDuplicatesAfterReplaceImport(
@@ -6424,6 +6472,7 @@ async function runCatalogCompanySync(
         preparedImport,
         existingIssues: issuesBeforeSync,
         adapterPresetSelection: migratedAdapterSelection,
+        previousBindings,
         renameBindings
       });
       const syncedAt = options.now();
