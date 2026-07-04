@@ -1,6 +1,6 @@
 {
   "name": "paperclip-agent-companies-plugin",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "type": "module",
   "packageManager": "pnpm@10.34.4",
   "engines": {
