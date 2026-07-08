@@ -482,6 +482,7 @@ function collectPackagedSkillCatalogReferences(
 
     collectSkillReferences(frontmatter.key, packagedReferences);
     collectSkillReferences(frontmatter.id, packagedReferences);
+    collectSkillReferences(frontmatter.name, packagedReferences);
     collectSkillReferences(frontmatter.slug, packagedReferences);
     const metadata = isRecord(frontmatter.metadata) ? frontmatter.metadata : null;
     const paperclip = isRecord(metadata?.paperclip) ? metadata.paperclip : null;

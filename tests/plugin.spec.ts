@@ -18,6 +18,7 @@ import {
   type CatalogPreparedCompanyImport,
   type CatalogCompanySyncResult,
   buildStagedPaperclipImportSource,
+  collectReferencedPaperclipCatalogSkillRefs,
   compareCatalogSourceVersions,
   createRepositorySource,
   createEmptyCompanyContents,
@@ -656,6 +657,31 @@ describe("agent companies plugin", () => {
         exportName: "AgentCompaniesSettingsPage",
         routePath: "agent-companies"
       }
+    ]);
+  });
+
+  it("does not install name-only packaged skills from the Paperclip catalog", () => {
+    const references = collectReferencedPaperclipCatalogSkillRefs({
+      "agents/ceo/AGENTS.md": `---
+name: CEO
+skills:
+  - marketplace-skill-discovery
+  - paperclipai/bundled/paperclip-operations/issue-triage
+---
+
+Lead the company.
+`,
+      "skills/marketplace-skill-discovery/SKILL.md": `---
+name: marketplace-skill-discovery
+description: Search-only marketplace discovery.
+---
+
+# Marketplace Skill Discovery
+`
+    });
+
+    expect(references).toEqual([
+      "paperclipai/bundled/paperclip-operations/issue-triage"
     ]);
   });
 
