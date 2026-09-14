@@ -20,6 +20,7 @@ import {
   collectReferencedPaperclipCatalogSkillRefs,
   type AdapterPreset,
   type CatalogPreparedCompanyImport,
+  type PaperclipCompanyImportRequestBody,
   type CatalogCompanySyncResult,
   type CatalogImportEntityResult,
   type CompanyImportPartSelection,
@@ -3976,7 +3977,7 @@ async function fetchPaperclipApiJson(
 
 async function postPaperclipCompanyImport(
   connection: PaperclipApiConnection,
-  body: Record<string, unknown>
+  body: PaperclipCompanyImportRequestBody
 ): Promise<PaperclipCompanyImportResult> {
   let payload;
   try {

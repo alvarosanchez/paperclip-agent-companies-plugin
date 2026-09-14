@@ -6790,6 +6790,127 @@ Review the week.
     expect(snapshot.importedCompanies[0]?.importedCompany.syncPauseAutomations).toBe(true);
   });
 
+  it("always sends an explicit collisionStrategy so replace-mode syncs keep replacing package skills", async () => {
+    // Paperclip marks `collisionStrategy` optional on the import schema and the portability
+    // service falls back to "rename", which would import renamed copies of package-owned skills
+    // instead of replacing them. Both sync passes must carry the tracked value verbatim.
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const importBodies: Array<Record<string, unknown>> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-board-token";
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        importBodies.push(bodyText ? JSON.parse(bodyText) : {});
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            warnings: []
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url.startsWith("http://127.0.0.1:3210/api/companies/paperclip-company-123/")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-15T10:10:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", { url: repositoryPath });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const sourceCompanyId = catalog.companies.find(
+        (candidate) => candidate.slug === "alpha-labs"
+      )?.id;
+
+      expect(sourceCompanyId).toBeTruthy();
+
+      await recordTrackedCompanyImport(harness, {
+        sourceCompanyId: sourceCompanyId!,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP",
+        syncCollisionStrategy: "replace",
+        selection: {
+          agents: { mode: "selected", itemPaths: ["agents/ceo/AGENTS.md"] },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "selected", itemPaths: ["issues/follow-up/ISSUE.md"] },
+          skills: { mode: "none" }
+        }
+      }, {
+        agents: [{ id: "agent-123", name: "Alpha CEO", urlKey: "alpha-ceo" }],
+        issues: [{ id: "issue-123", title: "Follow up with launch partners" }]
+      });
+
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: sourceCompanyId!,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      // Pre-issue pass (agents/projects/skills) plus the issue-only pass.
+      expect(importBodies.length).toBeGreaterThanOrEqual(2);
+      for (const body of importBodies) {
+        expect(body.collisionStrategy).toBe("replace");
+      }
+      expect(
+        importBodies.some((body) => (body.include as { agents?: boolean }).agents === true)
+      ).toBe(true);
+      expect(
+        importBodies.some((body) => (body.include as { issues?: boolean }).issues === true)
+      ).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
   it("skips one-time task files whose Paperclip issue already exists during sync", async () => {
     const repositoryPath = await createRepositoryFixture();
     const previousApiUrl = process.env.PAPERCLIP_API_URL;

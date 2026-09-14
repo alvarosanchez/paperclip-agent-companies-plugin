@@ -75,6 +75,7 @@ import {
   DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS,
   DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
+  type PaperclipCompanyImportRequestBody,
   type PaperclipCompanyImportResult,
   buildStagedPaperclipImportSource,
   collectReferencedPaperclipCatalogSkillRefs,
@@ -2933,6 +2934,21 @@ async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<
   }
 
   return payload as T;
+}
+
+/**
+ * Every company import request goes through here so `collisionStrategy` and `pauseAutomations`
+ * are always sent explicitly. Paperclip marks both optional and falls back to `"rename"` /
+ * `false`, which would silently turn a replace-mode import into renamed skill copies and wake
+ * imported agents immediately.
+ */
+async function postPaperclipCompanyImport(
+  body: PaperclipCompanyImportRequestBody
+): Promise<PaperclipCompanyImportResult> {
+  return fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
+    method: "POST",
+    body: JSON.stringify(body)
+  });
 }
 
 async function archiveDuplicateImportedRoutines(
@@ -7469,7 +7485,12 @@ export function AgentCompaniesSettingsPage({
       return;
     }
 
-    if (importDialog.targetMode !== "new_company" && !importDialog.targetCompanyId) {
+    let target: PaperclipCompanyImportRequestBody["target"];
+    if (importDialog.targetMode === "new_company") {
+      target = { mode: "new_company", newCompanyName: nextCompanyName };
+    } else if (importDialog.targetCompanyId) {
+      target = { mode: "existing_company", companyId: importDialog.targetCompanyId };
+    } else {
       setImportError("Choose an existing Paperclip company before importing.");
       return;
     }
@@ -7541,18 +7562,8 @@ export function AgentCompaniesSettingsPage({
         companyId: importDialog.sourceCompanyId
       });
 
-      const target =
-        importDialog.targetMode === "new_company"
-          ? {
-              mode: "new_company" as const,
-              newCompanyName: nextCompanyName
-            }
-          : {
-              mode: "existing_company" as const,
-              companyId: importDialog.targetCompanyId
-            };
       let effectivePreIssueImportInclude = preIssueImportInclude;
-      let effectivePreIssueImportTarget = target;
+      let effectivePreIssueImportTarget: PaperclipCompanyImportRequestBody["target"] = target;
       let createdCompanyOnlyResult: PaperclipCompanyImportResult | null = null;
       let catalogSkillInstallResult: {
         skills: NonNullable<PaperclipCompanyImportResult["skills"]>;
@@ -7560,21 +7571,18 @@ export function AgentCompaniesSettingsPage({
       } = { skills: [], warnings: [] };
 
       if (referencedCatalogSkillRefs.length > 0 && importDialog.targetMode === "new_company") {
-        createdCompanyOnlyResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
-          method: "POST",
-          body: JSON.stringify({
-            source: preIssueImportSource,
-            include: {
-              company: true,
-              agents: false,
-              projects: false,
-              issues: false,
-              skills: false
-            },
-            target,
-            collisionStrategy: importDialog.collisionStrategy,
-            pauseAutomations: importDialog.pauseAutomations
-          })
+        createdCompanyOnlyResult = await postPaperclipCompanyImport({
+          source: preIssueImportSource,
+          include: {
+            company: true,
+            agents: false,
+            projects: false,
+            issues: false,
+            skills: false
+          },
+          target,
+          collisionStrategy: importDialog.collisionStrategy,
+          pauseAutomations: importDialog.pauseAutomations
         });
         const createdCompanyId = createdCompanyOnlyResult.company?.id?.trim();
         if (!createdCompanyId) {
@@ -7606,16 +7614,13 @@ export function AgentCompaniesSettingsPage({
 
       let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
       if (hasEnabledPaperclipImportStage(effectivePreIssueImportInclude)) {
-        importedPhaseOneResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
-          method: "POST",
-          body: JSON.stringify({
-            source: preIssueImportSource,
-            include: effectivePreIssueImportInclude,
-            target: effectivePreIssueImportTarget,
-            collisionStrategy: importDialog.collisionStrategy,
-            pauseAutomations: importDialog.pauseAutomations,
-            ...(adapterOverrides ? { adapterOverrides } : {})
-          })
+        importedPhaseOneResult = await postPaperclipCompanyImport({
+          source: preIssueImportSource,
+          include: effectivePreIssueImportInclude,
+          target: effectivePreIssueImportTarget,
+          collisionStrategy: importDialog.collisionStrategy,
+          pauseAutomations: importDialog.pauseAutomations,
+          ...(adapterOverrides ? { adapterOverrides } : {})
         });
       }
       const importedCompanyName =
@@ -7713,18 +7718,15 @@ export function AgentCompaniesSettingsPage({
 
         let importedPhaseTwoResult: PaperclipCompanyImportResult | null = null;
         if (hasEnabledPaperclipImportStage(issueOnlyImportInclude)) {
-          importedPhaseTwoResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
-            method: "POST",
-            body: JSON.stringify({
-              source: issueOnlyImportSource,
-              include: issueOnlyImportInclude,
-              target: {
-                mode: "existing_company",
-                companyId: importedCompanyId
-              },
-              collisionStrategy: importDialog.collisionStrategy,
-              pauseAutomations: importDialog.pauseAutomations
-            })
+          importedPhaseTwoResult = await postPaperclipCompanyImport({
+            source: issueOnlyImportSource,
+            include: issueOnlyImportInclude,
+            target: {
+              mode: "existing_company",
+              companyId: importedCompanyId
+            },
+            collisionStrategy: importDialog.collisionStrategy,
+            pauseAutomations: importDialog.pauseAutomations
           });
         }
         const importedCompany: PaperclipCompanyImportResult = {

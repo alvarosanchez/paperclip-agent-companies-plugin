@@ -150,6 +150,37 @@ export interface CatalogImportEntityResult {
   reason?: string | null;
 }
 
+/**
+ * Body of `POST /api/companies/import`.
+ *
+ * `collisionStrategy` is deliberately required even though Paperclip marks it optional
+ * (`companyPortabilityImportSchema`, 2026.831.1). The portability service falls back to
+ * `DEFAULT_COLLISION_STRATEGY = "rename"` and feeds the resolved value to the package skill
+ * importer (`resolveSkillConflictStrategy` -> `companySkills.importPackageFiles({ onConflict })`),
+ * so an omitted value silently downgrades a replace-mode sync from replacing package-owned skill
+ * rows to importing renamed copies of them alongside the originals. Making the field required here
+ * keeps every request site explicit.
+ */
+export interface PaperclipCompanyImportRequestBody {
+  source: CatalogPreparedCompanyImport["source"];
+  include: {
+    company: boolean;
+    agents: boolean;
+    projects: boolean;
+    issues: boolean;
+    skills: boolean;
+  };
+  target:
+    | { mode: "new_company"; newCompanyName: string }
+    | { mode: "existing_company"; companyId: string };
+  collisionStrategy: CatalogSyncCollisionStrategy;
+  pauseAutomations: boolean;
+  adapterOverrides?: Record<string, {
+    adapterType: string;
+    adapterConfig?: Record<string, unknown>;
+  }>;
+}
+
 export interface PaperclipCompanyImportResult {
   company?: {
     id?: string;
