@@ -70,7 +70,7 @@ const BOARD_ACCESS_SCOPE = {
   scopeKind: "instance" as const,
   stateKey: "agent-companies.board-access.v1"
 };
-const TARGET_PAPERCLIP_RELEASE = "2026.626.0";
+const TARGET_PAPERCLIP_RELEASE = "2026.831.1";
 const { buildAdapterPresetPayload } = adapterPresetTestUtils;
 
 const DEFAULT_TRACKED_IMPORT_INVENTORY: Record<string, unknown[]> = {
@@ -223,6 +223,7 @@ function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "compa
     status: overrides.status ?? "todo",
     workMode: overrides.workMode ?? "standard",
     priority: overrides.priority ?? "medium",
+    reviewPolicy: overrides.reviewPolicy ?? null,
     assigneeAgentId: overrides.assigneeAgentId ?? null,
     assigneeUserId: overrides.assigneeUserId ?? null,
     checkoutRunId: overrides.checkoutRunId ?? null,
@@ -231,6 +232,7 @@ function createIssueRecord(overrides: Partial<Issue> & Pick<Issue, "id" | "compa
     executionLockedAt: overrides.executionLockedAt ?? null,
     createdByAgentId: overrides.createdByAgentId ?? null,
     createdByUserId: overrides.createdByUserId ?? null,
+    responsibleUserId: overrides.responsibleUserId ?? null,
     issueNumber: overrides.issueNumber ?? null,
     identifier: overrides.identifier ?? null,
     originKind: overrides.originKind,
