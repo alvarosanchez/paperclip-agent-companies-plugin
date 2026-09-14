@@ -12,7 +12,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 - Repository discovery from GitHub shorthand (`owner/repo`), full git URLs, or local checkouts
 - Automatic detection of `COMPANY.md` manifests with `schema: agentcompanies/v1`
 - Hosted Paperclip settings surfaces with separate discovered-source and imported-company sections, available from both Installed Plugins and Company Settings
-- Separate import actions for creating a new Paperclip company or importing into an existing non-synced company
+- Separate import actions for creating a new Paperclip company or importing into an existing non-synced company (creating a new company is a catalog convenience; Paperclip's own company import page and `paperclipai company import owner/repo/path` already do one-shot imports from a URL)
 - Per-part and per-item import selection for agents, projects, tasks, and skills, with everything selected by default
 - Agent-company `TASK.md` files and Paperclip `ISSUE.md` manifests are grouped together under **Tasks** in the hosted UI
 - Required project and agent dependencies are auto-included whenever selected tasks depend on them
@@ -75,6 +75,8 @@ Paperclip 2026.831.1 already ships two things that overlap with this plugin, and
 | Import one company package from a public URL, once, with no ongoing link | Paperclip's built-in company import page, or the CLI: `paperclipai company import owner/repo/path` |
 | Install a bundled team pack that ships with the release | Paperclip's **Teams Catalog** (`TEAM.md` entries from `@paperclipai/teams-catalog` or `PAPERCLIP_TEAMS_CATALOG_DIR`), which tracks installed / out-of-date state for bundled packs only |
 | Everything below | This plugin |
+
+**"Import as new company" is not a differentiator.** Paperclip's built-in import page and CLI already create a company from a package URL. The plugin keeps the action only so you can go straight from a discovered catalog entry to a tracked import without leaving the page, and so the new company starts out with a saved selection contract, adapter presets, and revision tracking. If you only need a one-shot copy, use the host's own import.
 
 What this plugin adds on top of those:
 
