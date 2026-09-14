@@ -383,13 +383,6 @@ interface PaperclipSkillRecord {
   key: string | null;
 }
 
-interface PaperclipApprovalRecord {
-  id: string;
-  type: string | null;
-  status: string | null;
-  payload: Record<string, unknown> | null;
-}
-
 interface PaperclipRoutineRecord extends ImportedRoutineSnapshot {}
 
 interface PaperclipIssueWakeTarget {
@@ -459,6 +452,12 @@ interface StoredBoardCredential {
 interface CompanyBoardAccessRecord {
   paperclipBoardApiTokenRef: string;
   identity: string | null;
+  /**
+   * Paperclip user id of the operator who connected board access. `ctx.approvals.decide`
+   * attributes the decision to a human company member, so hire approvals resolved by the
+   * background sync are attributed to the operator who set the connection up.
+   */
+  identityUserId: string | null;
   updatedAt: string | null;
   workerAuthSeededAt: string | null;
 }
@@ -477,6 +476,7 @@ interface BoardAccessRegistration {
   companyId: string | null;
   configured: boolean;
   identity: string | null;
+  identityUserId: string | null;
   updatedAt: string | null;
 }
 
@@ -513,6 +513,7 @@ function normalizeCompanyBoardAccessRecord(value: unknown): CompanyBoardAccessRe
   return {
     paperclipBoardApiTokenRef,
     identity: asNonEmptyString(value.identity),
+    identityUserId: asNonEmptyString(value.identityUserId),
     updatedAt: asIsoTimestamp(value.updatedAt),
     workerAuthSeededAt: asIsoTimestamp(value.workerAuthSeededAt)
   };
@@ -2536,6 +2537,7 @@ function getBoardAccessRegistration(
     companyId,
     configured: Boolean(record?.paperclipBoardApiTokenRef),
     identity: record?.identity ?? null,
+    identityUserId: record?.identityUserId ?? null,
     updatedAt: record?.updatedAt ?? null
   };
 }
@@ -3866,9 +3868,18 @@ export async function executeDefaultSyncImport(
           && selectedAgentSlugs.has(agentSlug);
       });
 
+      const boardAccessState = await loadBoardAccessState(ctx);
+      const approvalActorUserId =
+        boardAccessState.companies[input.importedCompanyId]?.identityUserId ?? null;
+
       for (const agent of pendingImportedAgents) {
         try {
-          await createAndApprovePaperclipHireApproval(connection, input.importedCompanyId, agent);
+          await approveImportedAgentHire(
+            ctx,
+            input.importedCompanyId,
+            agent,
+            approvalActorUserId
+          );
         } catch (error) {
           additionalWarnings.push(
             `Imported agent "${agent.name}" still needs approval before synced tasks can wake automatically: ${summarizeErrorMessage(error)}`
@@ -4289,34 +4300,6 @@ function normalizePaperclipAgentList(value: unknown): PaperclipAgentRecord[] | n
   return value
     .map((agent) => normalizePaperclipAgent(agent))
     .filter((agent): agent is PaperclipAgentRecord => agent !== null);
-}
-
-function normalizePaperclipApproval(value: unknown): PaperclipApprovalRecord | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const id = asNonEmptyString(value.id);
-  if (!id) {
-    return null;
-  }
-
-  return {
-    id,
-    type: asNonEmptyString(value.type),
-    status: asNonEmptyString(value.status),
-    payload: isRecord(value.payload) ? value.payload : null
-  };
-}
-
-function normalizePaperclipApprovalList(value: unknown): PaperclipApprovalRecord[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  return value
-    .map((approval) => normalizePaperclipApproval(approval))
-    .filter((approval): approval is PaperclipApprovalRecord => approval !== null);
 }
 
 function normalizePaperclipRoutineTrigger(value: unknown): ImportedRoutineTriggerSnapshot | null {
@@ -5818,109 +5801,78 @@ async function verifyRenameTargetIds(
   }
 }
 
-async function fetchPaperclipCompanyApprovals(
-  connection: PaperclipApiConnection,
-  companyId: string
-): Promise<PaperclipApprovalRecord[]> {
-  const payload = await fetchPaperclipApiJson(
-    connection,
-    `/api/companies/${encodeURIComponent(companyId)}/approvals`
-  );
-
-  const approvals = normalizePaperclipApprovalList(payload);
-  if (!approvals) {
-    throw new Error("Paperclip returned an unexpected approvals response.");
-  }
-
-  return approvals;
-}
-
-function findMatchingHireApproval(
-  approvals: PaperclipApprovalRecord[],
+/**
+ * Resolve the pending `hire_agent` approval for an imported agent through the host approvals
+ * capability. Returns the already-approved record when a previous run decided it.
+ */
+async function findImportedAgentHireApproval(
+  ctx: PluginContext,
+  companyId: string,
   agentId: string
-): PaperclipApprovalRecord | null {
-  let approvedApproval: PaperclipApprovalRecord | null = null;
+): Promise<{ id: string; status: string } | null> {
+  const approvals = await ctx.approvals.list({ companyId });
+  let approved: { id: string; status: string } | null = null;
 
   for (const approval of approvals) {
-    const approvalAgentId =
-      approval.payload && typeof approval.payload.agentId === "string" && approval.payload.agentId.trim()
-        ? approval.payload.agentId.trim()
-        : null;
-
-    if (approval.type !== "hire_agent" || approvalAgentId !== agentId) {
+    const payloadAgentId = asNonEmptyString(approval.payload?.agentId);
+    if (approval.type !== "hire_agent" || payloadAgentId !== agentId) {
       continue;
     }
 
     if (approval.status === "pending" || approval.status === "revision_requested") {
-      return approval;
+      return { id: approval.id, status: approval.status };
     }
 
-    if (approval.status === "approved" && !approvedApproval) {
-      approvedApproval = approval;
+    if (approval.status === "approved" && !approved) {
+      approved = { id: approval.id, status: approval.status };
     }
   }
 
-  return approvedApproval;
+  return approved;
 }
 
-async function approvePaperclipApproval(
-  connection: PaperclipApiConnection,
-  approvalId: string,
-  decisionNote: string
-): Promise<void> {
-  await fetchPaperclipApiJson(
-    connection,
-    `/api/approvals/${encodeURIComponent(approvalId)}/approve`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        decisionNote
-      })
-    }
-  );
-}
-
-async function createAndApprovePaperclipHireApproval(
-  connection: PaperclipApiConnection,
+/**
+ * Approve the imported agent's pending hire through `ctx.approvals`, not the board token.
+ *
+ * `ctx.approvals.decide` attributes the decision to a human company member and the host
+ * re-verifies that membership at apply time, so the board access connection has to have recorded
+ * the connecting operator's user id. The host also offers no plugin-side approval *creation*
+ * (`ctx.approvals` is list/get/decide only), so an agent left `pending_approval` without a
+ * matching `hire_agent` row can only be resolved by a human in Paperclip.
+ */
+async function approveImportedAgentHire(
+  ctx: PluginContext,
   companyId: string,
-  agent: PaperclipAgentRecord
+  agent: PaperclipAgentRecord,
+  actorUserId: string | null
 ): Promise<void> {
-  const decisionNote = `Approved automatically during Agent Company sync so imported tasks can wake ${agent.name} immediately.`;
-  const existingApprovals = await fetchPaperclipCompanyApprovals(connection, companyId);
-  const existingApproval = findMatchingHireApproval(existingApprovals, agent.id);
+  const approval = await findImportedAgentHireApproval(ctx, companyId, agent.id);
 
-  if (existingApproval?.status === "approved") {
+  if (approval?.status === "approved") {
     return;
   }
 
-  if (existingApproval?.id) {
-    await approvePaperclipApproval(connection, existingApproval.id, decisionNote);
-    return;
+  if (!approval) {
+    throw new Error(
+      "Paperclip has no pending hire approval for this agent, and plugins cannot create one. Approve the hire in Paperclip."
+    );
   }
 
-  const approvalPayload = await fetchPaperclipApiJson(
-    connection,
-    `/api/companies/${encodeURIComponent(companyId)}/approvals`,
+  if (!actorUserId) {
+    throw new Error(
+      "Approving a hire is attributed to a human company member. Reconnect board access from Company Settings so the plugin records your Paperclip user id, then retry."
+    );
+  }
+
+  await ctx.approvals.decide(
+    approval.id,
     {
-      method: "POST",
-      body: JSON.stringify({
-        type: "hire_agent",
-        payload: {
-          agentId: agent.id,
-          name: agent.name,
-          role: agent.role,
-          title: agent.title
-        }
-      })
-    }
+      action: "approve",
+      actorUserId,
+      decisionNote: `Approved automatically during Agent Company sync so imported tasks can wake ${agent.name} immediately.`
+    },
+    companyId
   );
-
-  const approvalId = isRecord(approvalPayload) ? asNonEmptyString(approvalPayload.id) : null;
-  if (!approvalId) {
-    throw new Error("Paperclip did not return an approval id.");
-  }
-
-  await approvePaperclipApproval(connection, approvalId, decisionNote);
 }
 
 function selectPaperclipIssueWakeTargets(
@@ -7207,6 +7159,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const paperclipBoardApiTokenRef = asNonEmptyString(params.paperclipBoardApiTokenRef);
         const paperclipBoardApiToken = asNonEmptyString(params.paperclipBoardApiToken);
         const identity = asNonEmptyString(params.identity);
+        const identityUserId = asNonEmptyString(params.identityUserId);
         const timestamp = now();
         const currentState = await loadBoardAccessState(ctx);
         const nextCompanies = { ...currentState.companies };
@@ -7221,7 +7174,8 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           await persistStoredBoardCredential(
             storedCredentialApiBase,
             paperclipBoardApiToken!,
-            timestamp
+            timestamp,
+            identityUserId
           );
         }
 
@@ -7229,6 +7183,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           nextCompanies[companyId] = {
             paperclipBoardApiTokenRef,
             identity,
+            identityUserId,
             updatedAt: timestamp,
             workerAuthSeededAt: shouldSeedStoredCredential
               ? timestamp

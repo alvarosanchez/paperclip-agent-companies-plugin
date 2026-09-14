@@ -2242,11 +2242,14 @@ interface CliAuthChallengePollResponse {
 }
 
 interface CliAuthIdentityResponse {
+  userId?: string | null;
+  id?: string | null;
   login?: string | null;
   email?: string | null;
   displayName?: string | null;
   name?: string | null;
   user?: {
+    id?: string | null;
     login?: string | null;
     email?: string | null;
     displayName?: string | null;
@@ -3988,14 +3991,33 @@ function getCliAuthIdentityLabel(identity: CliAuthIdentityResponse): string | nu
   return null;
 }
 
-async function fetchBoardAccessIdentity(boardApiToken: string): Promise<string | null> {
+function getCliAuthIdentityUserId(identity: CliAuthIdentityResponse): string | null {
+  for (const candidate of [identity.userId, identity.user?.id, identity.id]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+/**
+ * The connecting operator's display label and Paperclip user id. The user id is what
+ * `ctx.approvals.decide` attributes a hire approval to when the background sync resolves one.
+ */
+async function fetchBoardAccessIdentity(
+  boardApiToken: string
+): Promise<{ label: string | null; userId: string | null }> {
   const identity = await fetchHostJson<CliAuthIdentityResponse>("/api/cli-auth/me", {
     headers: {
       authorization: `Bearer ${boardApiToken.trim()}`
     }
   });
 
-  return getCliAuthIdentityLabel(identity);
+  return {
+    label: getCliAuthIdentityLabel(identity),
+    userId: getCliAuthIdentityUserId(identity)
+  };
 }
 
 function usePaperclipBoardAccessRequirement(): {
@@ -8369,7 +8391,7 @@ export function AgentCompaniesSettingsPage({
       }
 
       const boardApiToken = await waitForBoardAccessApproval(challenge);
-      const identity = await fetchBoardAccessIdentity(boardApiToken);
+      const { label: identity, userId: identityUserId } = await fetchBoardAccessIdentity(boardApiToken);
       const secretName = `agent_companies_board_api_${context.companyId.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(context.companyId, secretName, boardApiToken);
       const pluginConfigResult = await registerBoardAccessPluginConfig(
@@ -8383,7 +8405,8 @@ export function AgentCompaniesSettingsPage({
         companyId: context.companyId,
         paperclipBoardApiTokenRef: secret.id,
         paperclipBoardApiToken: boardApiToken,
-        identity
+        identity,
+        identityUserId
       });
       await boardAccess.refresh();
 

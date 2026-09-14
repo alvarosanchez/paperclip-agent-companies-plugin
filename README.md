@@ -176,6 +176,10 @@ The selected preset mapping is saved with the tracked import, so later re-import
 - Local checkout paths are read from the Paperclip host machine, so only trusted operators should add local paths.
 - Board access connections are stored as company secrets and the plugin keeps only the secret reference plus display metadata in plugin state.
 - On Paperclip `2026.831.1` and newer, connecting board access also saves a company-scoped plugin config (`boardAccessTokenRef`) that binds that secret to the plugin; the host only resolves plugin secret references through such bindings. Saving plugin config requires an instance admin, so a non-admin connect still succeeds and falls back to the cached worker credential. Board access connected on an older release must be reconnected once after upgrading so the binding exists.
+- Worker-side hire approvals for imported agents go through Paperclip's plugin host capabilities (`approvals.read` / `approvals.respond`, `ctx.approvals.list` / `decide`), not the board API token. The board token is now used only for company portability import and routine reconciliation. (Approvals raised by an import you run from the hosted settings page are still resolved in the browser with your own Paperclip session, as before — that path never used the board token.)
+- Deciding an approval is attributed to a human company member: the host re-verifies at apply time that the supplied user is an active, non-viewer member. The plugin records the connecting operator's Paperclip user id when board access is connected and uses it as that actor, so background syncs decide hires as the operator who set the connection up. Board access connected before this release has no saved user id; reconnect once so hire approvals can be resolved automatically.
+- Plugins cannot *create* approvals (`ctx.approvals` is list/get/decide only). If an imported agent is left `pending_approval` with no matching `hire_agent` approval, the sync reports it and a human has to approve the hire in Paperclip. On Paperclip `2026.831.1` this does not normally happen: company import creates agents as `idle` or `paused`, never `pending_approval`.
+- **Upgrading an existing install:** adding `approvals.read` and `approvals.respond` changes the manifest's capability set, and Paperclip stops the worker and moves an already-installed plugin to `upgrade_pending` whenever a manifest adds capabilities. An instance admin has to approve the upgrade before background sync resumes.
 - After board access is approved, the plugin also seeds the worker's local Paperclip auth store as a compatibility cache for that board-access connection so current authenticated hosts can reuse the token during worker-side syncs, and clears that cached credential again if board access is removed.
 - After upgrading to a build with auth-store seeding, previously connected authenticated instances may need one board-access reconnect so the worker auth store is populated for future syncs.
 - Inline imports intentionally skip common secret-bearing files such as `.env*`, `.npmrc`, `.git-credentials`, `.netrc`, and files inside `.ssh/`, `.aws/`, or `.gnupg/`.
@@ -189,6 +193,8 @@ The manifest currently requests these Paperclip capabilities:
 - `jobs.schedule`
 - `issues.read`
 - `issues.wakeup`
+- `approvals.read`
+- `approvals.respond`
 - `http.outbound`
 - `secrets.read-ref`
 - `ui.page.register`
