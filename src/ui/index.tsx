@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { BOARD_ACCESS_TOKEN_CONFIG_PATH, PLUGIN_ID } from "../plugin-constants.js";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -3776,6 +3777,24 @@ async function resolveOrCreateCompanySecret(
       body: JSON.stringify({ name, value })
     }
   );
+}
+
+/**
+ * Save the company-scoped plugin config that binds the board access secret to
+ * this plugin. On Paperclip 2026.831+ the host only resolves plugin secret refs
+ * that are bound through plugin config, and only admits proactive worker calls
+ * (scheduled auto-sync) for companies that have saved plugin config.
+ */
+async function registerBoardAccessPluginConfig(companyId: string, secretId: string): Promise<void> {
+  await fetchHostJson(`/api/plugins/${encodeURIComponent(PLUGIN_ID)}/config`, {
+    method: "POST",
+    body: JSON.stringify({
+      companyId,
+      configJson: {
+        [BOARD_ACCESS_TOKEN_CONFIG_PATH]: { type: "secret_ref", secretId, version: "latest" }
+      }
+    })
+  });
 }
 
 function resolveBrowserOrigin(): string | null {
@@ -8213,6 +8232,12 @@ export function AgentCompaniesSettingsPage({
       const identity = await fetchBoardAccessIdentity(boardApiToken);
       const secretName = `agent_companies_board_api_${context.companyId.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(context.companyId, secretName, boardApiToken);
+      let pluginConfigHint: string | null = null;
+      try {
+        await registerBoardAccessPluginConfig(context.companyId, secret.id);
+      } catch (configError) {
+        pluginConfigHint = `The company-scoped plugin config binding could not be saved (${getErrorMessage(configError)}); worker-side sync will rely on the cached worker credential until an instance admin reconnects board access.`;
+      }
 
       await updateBoardAccess({
         companyId: context.companyId,
@@ -8225,7 +8250,7 @@ export function AgentCompaniesSettingsPage({
       setNotice({
         tone: "success",
         title: identity ? `Board access connected as ${identity}` : "Board access connected",
-        text: `Worker-side sync can now authenticate against ${currentCompanyLabel}.`
+        text: `Worker-side sync can now authenticate against ${currentCompanyLabel}.${pluginConfigHint ? ` ${pluginConfigHint}` : ""}`
       });
     } catch (actionError) {
       setNotice({
