@@ -424,11 +424,24 @@ interface PaperclipIssueWakeRequestResult {
 
 class PaperclipApiResponseError extends Error {
   status: number;
+  /** Machine-readable `code` from the Paperclip error body, when the host sent one. */
+  code: string | null;
+  /**
+   * `remediation` hint that Paperclip attaches to skill policy denials. The sibling `reason` is
+   * already picked up by `getPaperclipApiErrorMessage`, `remediation` is not.
+   */
+  remediation: string | null;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    options: { code?: string | null; remediation?: string | null } = {}
+  ) {
     super(message);
     this.name = "PaperclipApiResponseError";
     this.status = status;
+    this.code = options.code ?? null;
+    this.remediation = options.remediation ?? null;
   }
 }
 
@@ -956,6 +969,53 @@ function isBoardAccessRequiredError(error: unknown): boolean {
   return summarizeErrorMessage(error).toLowerCase().includes("board access required");
 }
 
+/**
+ * Paperclip 2026.831.0 added an import floor that answers 403 with a machine-readable `code`
+ * (`server/src/routes/companies.ts`), and 2026.720.0 added the company skill policy denial
+ * (`server/src/routes/company-skills.ts`). All of them look like an authorization failure, so
+ * without this mapping every one of them is reported as "board access required", which sends the
+ * operator to reconnect a token that is already fine.
+ */
+const PAPERCLIP_FORBIDDEN_CODE_MESSAGES: Record<string, string> = {
+  cloud_managed:
+    "Paperclip company import is disabled on this cloud-managed instance, so this company cannot be imported or synced. Board access is not the problem; ask the Paperclip Cloud operator to enable company import.",
+  settings_operator_managed:
+    "The hosting operator hid Paperclip's company import page, which also blocks the import API this plugin uses. Board access is not the problem; ask the operator to unhide company import in instance settings.",
+  skill_policy_denied:
+    "This company's Paperclip skill policy denied the skill change required by this import. Allow the skill action in the company's skill policy, or deselect skills from the sync contract, then retry.",
+  skill_company_boundary_denied:
+    "Paperclip refused the skill change because the saved board access credential belongs to a different company. Reconnect board access from inside the imported company and retry.",
+  skill_actor_restricted:
+    "Paperclip restricted this skill change for the current actor. Review the company's skill policy and the board access identity, then retry."
+};
+
+function getPaperclipForbiddenCodeMessage(error: unknown): string | null {
+  if (
+    !(error instanceof PaperclipApiResponseError)
+    || !error.code
+    || !isPaperclipApiAuthorizationError(error)
+  ) {
+    return null;
+  }
+
+  const mapped = PAPERCLIP_FORBIDDEN_CODE_MESSAGES[error.code];
+  if (!mapped) {
+    return null;
+  }
+
+  const lines = [mapped, `Paperclip reported: ${summarizeErrorMessage(error)}`];
+  if (error.remediation) {
+    lines.push(error.remediation);
+  }
+
+  return lines.join(" ");
+}
+
+/** Sync-result text for a failed Paperclip call: a known 403 code keeps its own explanation. */
+function summarizePaperclipSyncFailure(error: unknown): string {
+  return getPaperclipForbiddenCodeMessage(error) ?? summarizeErrorMessage(error);
+}
+
 function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
   const lines: string[] = [];
   const seen = new Set<string>();
@@ -1005,6 +1065,23 @@ function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
 
   visit(value);
   return lines;
+}
+
+function getPaperclipApiErrorCode(payload: unknown): string | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  const topLevelCode = asNonEmptyString(payload.code);
+  if (topLevelCode) {
+    return topLevelCode;
+  }
+
+  return isRecord(payload.details) ? asNonEmptyString(payload.details.code) : null;
+}
+
+function getPaperclipApiErrorRemediation(payload: unknown): string | null {
+  return isRecord(payload) ? asNonEmptyString(payload.remediation) : null;
 }
 
 function getPaperclipApiErrorMessage(payload: unknown, status: number): string {
@@ -1062,7 +1139,11 @@ async function parsePaperclipJsonResponse(response: Response): Promise<unknown> 
   if (!response.ok) {
     throw new PaperclipApiResponseError(
       getPaperclipApiErrorMessage(payload, response.status),
-      response.status
+      response.status,
+      {
+        code: getPaperclipApiErrorCode(payload),
+        remediation: getPaperclipApiErrorRemediation(payload)
+      }
     );
   }
 
@@ -3986,6 +4067,11 @@ async function postPaperclipCompanyImport(
       body: JSON.stringify(body)
     });
   } catch (error) {
+    const codeMessage = getPaperclipForbiddenCodeMessage(error);
+    if (codeMessage) {
+      throw new Error(codeMessage);
+    }
+
     if (isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)) {
       throw new Error(buildBoardAccessRequiredSyncMessage());
     }
@@ -4115,7 +4201,7 @@ async function installReferencedPaperclipCatalogSkills(
     return {
       skills: [],
       warnings: [
-        `Referenced Paperclip catalog skills could not be resolved before import: ${summarizeErrorMessage(error)}`
+        `Referenced Paperclip catalog skills could not be resolved before import: ${summarizePaperclipSyncFailure(error)}`
       ]
     };
   }
@@ -4140,7 +4226,7 @@ async function installReferencedPaperclipCatalogSkills(
       warnings.push(...getStructuredMessageLines(result.warnings, 4));
     } catch (error) {
       warnings.push(
-        `Referenced Paperclip catalog skill ${reference} could not be installed before import: ${summarizeErrorMessage(error)}`
+        `Referenced Paperclip catalog skill ${reference} could not be installed before import: ${summarizePaperclipSyncFailure(error)}`
       );
     }
   }
@@ -6637,6 +6723,8 @@ async function runCatalogCompanySync(
     } catch (error) {
       const failedAt = options.now();
       const latestState = await loadCatalogState(ctx);
+      const mappedForbiddenMessage = getPaperclipForbiddenCodeMessage(error);
+      const syncFailureMessage = mappedForbiddenMessage ?? summarizeErrorMessage(error);
 
       await persistCatalogState(
         ctx,
@@ -6644,7 +6732,7 @@ async function runCatalogCompanySync(
           ...company,
           lastSyncStatus: "failed",
           syncRunningSince: null,
-          lastSyncError: summarizeErrorMessage(error)
+          lastSyncError: syncFailureMessage
         })),
         failedAt
       );
@@ -6655,9 +6743,9 @@ async function runCatalogCompanySync(
         importedCompanyId,
         importedCompanyName: importedCompany.importedCompanyName,
         trigger: options.trigger,
-        error: summarizeErrorMessage(error)
+        error: syncFailureMessage
       });
-      throw error;
+      throw mappedForbiddenMessage ? new Error(mappedForbiddenMessage) : error;
     }
   })().finally(() => {
     if (companySyncInflight.get(syncKey) === syncPromise) {

@@ -142,6 +142,7 @@ The selected preset mapping is saved with the tracked import, so later re-import
 - When a synced package or adapter preset updates an agent adapter but omits `adapterConfig.env`, the worker preserves the target agent's existing environment bindings. A package or preset must include an explicit `env` value to replace those bindings.
 - The hosted settings page records the active Paperclip origin for worker-side imports and syncs, so background sync keeps targeting the same host even when the worker runs with a sanitized environment.
 - Authenticated Paperclip deployments require a saved Board access connection in the imported company before worker-side sync can call the Paperclip import API.
+- Not every Paperclip 403 means the board access token is wrong. Sync results now keep the host's machine-readable `code` and report these separately instead of prompting for a reconnect: `cloud_managed` (company import is disabled on a cloud-managed instance), `settings_operator_managed` (the hosting operator hid the company import page, which also blocks the import API), and the company skill policy denials `skill_policy_denied`, `skill_company_boundary_denied`, and `skill_actor_restricted` (reported with Paperclip's own `reason`/`remediation`). Any other 401/403 still resolves to the board access prompt.
 
 ## Security And Privacy
 
