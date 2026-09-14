@@ -4,7 +4,13 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { definePlugin, startWorkerRpcHost, type PluginContext, type ScopeKey } from "@paperclipai/plugin-sdk";
+import {
+  definePlugin,
+  startWorkerRpcHost,
+  type EnvSecretRefBinding,
+  type PluginContext,
+  type ScopeKey
+} from "@paperclipai/plugin-sdk";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   AGENT_COMPANIES_SCHEMA,
@@ -53,6 +59,7 @@ import {
   type CatalogItemIdentityBinding
 } from "./catalog.js";
 import { requiresPaperclipBoardAccess } from "./paperclip-health.js";
+import { BOARD_ACCESS_TOKEN_CONFIG_PATH } from "./plugin-constants.js";
 import {
   parseGitChangedPaths,
   parsePortableItemIdentity,
@@ -844,16 +851,45 @@ async function resolveSavedBoardAccessToken(
   }
 
   try {
-    const token = (await ctx.secrets.resolve(secretRef)).trim();
+    // Paperclip 2026.831+ only resolves object-shaped secret_ref bindings, scoped to
+    // the company and to the plugin config path that binds the secret.
+    const token = (
+      await ctx.secrets.resolve(buildBoardAccessSecretRefBinding(secretRef), {
+        companyId,
+        configPath: BOARD_ACCESS_TOKEN_CONFIG_PATH
+      })
+    ).trim();
     return token || null;
   } catch (error) {
+    const hint = isPluginInvocationScopeDeniedError(error)
+      ? "The host denied company scope for this worker call. Outside a company-scoped invocation (for example the scheduled auto-sync job) the host only admits companies with a saved company-scoped plugin config; the worker credential cache is used instead."
+      : isPluginSecretBindingMissingError(error)
+        ? "The board access secret is not bound to this plugin's company-scoped config. Reconnect board access from the company's Agent Companies page to register the binding."
+        : null;
     ctx.logger.warn("Unable to resolve the saved Paperclip board access token.", {
       companyId,
       secretRef,
-      error: summarizeErrorMessage(error)
+      error: summarizeErrorMessage(error),
+      ...(hint ? { hint } : {})
     });
     return null;
   }
+}
+
+function buildBoardAccessSecretRefBinding(secretId: string): EnvSecretRefBinding {
+  return { type: "secret_ref", secretId, version: "latest" };
+}
+
+function isSecretRefBinding(value: unknown): value is EnvSecretRefBinding {
+  return isRecord(value)
+    && value.type === "secret_ref"
+    && typeof value.secretId === "string"
+    && value.secretId.trim().length > 0;
+}
+
+function isPluginSecretBindingMissingError(error: unknown): boolean {
+  const message = summarizeErrorMessage(error).toLowerCase();
+  return message.includes("binding_missing") || message.includes("is not bound to plugin");
 }
 
 export async function resolvePaperclipApiConnection(
@@ -6685,6 +6721,18 @@ async function runDueAutoSyncs(
         .filter((repositoryId): repositoryId is string => Boolean(repositoryId))
     )];
 
+    if (dueImports.length > 0) {
+      // Outside a host-issued invocation the host only admits company-scoped
+      // calls (issues.list, wakeups, secrets.resolve) for companies that have a
+      // saved company-scoped plugin config; everything else in this sweep goes
+      // through the Paperclip REST API with the cached board credential.
+      ctx.logger.info("Starting automatic agent company sync sweep", {
+        trigger: options.trigger,
+        dueImportCount: dueImports.length,
+        importedCompanyIds: dueImports.map((company) => company.importedCompanyId)
+      });
+    }
+
     currentState = await rescanRepositoriesForAutoSync(
       ctx,
       currentState,
@@ -6714,7 +6762,12 @@ async function runDueAutoSyncs(
           sourceCompanyId: importedCompany.sourceCompanyId,
           importedCompanyId: importedCompany.importedCompanyId,
           trigger: options.trigger,
-          error: summarizeErrorMessage(error)
+          error: summarizeErrorMessage(error),
+          ...(isPluginInvocationScopeDeniedError(error)
+            ? {
+                hint: "The host denied company scope for a proactive worker call. Save the company-scoped plugin config (connect board access from the company's Agent Companies page) so scheduled syncs are admitted for this company."
+              }
+            : {})
         });
       }
     }
@@ -6757,8 +6810,28 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
       ? DEFAULT_STARTUP_AUTO_SYNC_DELAY_MS
       : options.startupAutoSyncDelayMs;
 
+  let pluginContext: PluginContext | null = null;
+
   return definePlugin({
+    // Paperclip 2026.831 delivers one configChanged per configured company and
+    // rejects differing configs from distinct companies unless the plugin opts
+    // in. Each company's config carries its own board access secret binding, so
+    // the configs legitimately differ per company.
+    multiCompanyConfig: true,
+    async onConfigChanged(newConfig, context) {
+      const companyId = context?.companyId ?? null;
+      const binding = isRecord(newConfig) ? newConfig[BOARD_ACCESS_TOKEN_CONFIG_PATH] : undefined;
+      // Config is only the vehicle for the host-side secret binding and the
+      // proactive company scope; the board access registration itself stays in
+      // plugin state, so nothing is cached here.
+      pluginContext?.logger.info("Received company-scoped plugin config", {
+        companyId,
+        boardAccessTokenBound: isSecretRefBinding(binding)
+      });
+    },
     async setup(ctx) {
+      pluginContext = ctx;
+
       ctx.data.register("catalog.read", async () => {
         const timestamp = now();
         const loadedState = await loadCatalogStateRecord(ctx);

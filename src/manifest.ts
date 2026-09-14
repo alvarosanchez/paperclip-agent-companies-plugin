@@ -1,5 +1,10 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
-import { DEFAULT_AUTO_SYNC_CADENCE_HOURS, PLUGIN_DISPLAY_NAME, PLUGIN_ID } from "./plugin-constants.js";
+import {
+  BOARD_ACCESS_TOKEN_CONFIG_PATH,
+  DEFAULT_AUTO_SYNC_CADENCE_HOURS,
+  PLUGIN_DISPLAY_NAME,
+  PLUGIN_ID
+} from "./plugin-constants.js";
 
 declare const __PACKAGE_VERSION__: string | undefined;
 
@@ -30,9 +35,22 @@ const manifest: PaperclipPluginManifestV1 = {
     "secrets.read-ref",
     "ui.page.register"
   ],
+  // Plugin config is company-scoped on Paperclip 2026.831+. The only field is the
+  // board access token secret_ref binding: saving it registers the secret binding
+  // that `ctx.secrets.resolve` requires and enrolls the company in the worker's
+  // proactive (scheduled auto-sync) company scopes. The catalog itself stays in
+  // instance-scoped plugin state.
   instanceConfigSchema: {
     type: "object",
-    properties: {}
+    properties: {
+      [BOARD_ACCESS_TOKEN_CONFIG_PATH]: {
+        type: ["object", "string"],
+        format: "secret-ref",
+        title: "Board access token",
+        description:
+          "Company secret holding the Paperclip board API token used for worker-side imports and syncs. Saved automatically when board access is connected from the Agent Companies page."
+      }
+    }
   },
   entrypoints: {
     worker: "./dist/worker.js",

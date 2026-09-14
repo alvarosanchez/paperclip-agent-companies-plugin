@@ -4,10 +4,11 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { Issue } from "@paperclipai/plugin-sdk";
+import type { EnvSecretRefBinding, Issue } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { parse as parseYaml } from "yaml";
 import manifest from "../src/manifest.js";
+import { BOARD_ACCESS_TOKEN_CONFIG_PATH } from "../src/plugin-constants.js";
 import {
   AGENT_COMPANIES_SCHEMA,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
@@ -668,6 +669,42 @@ describe("agent companies plugin", () => {
     expect(readme).toContain("Paperclip `2026.626.0` adds built-in Hermes adapters");
     expect(readme).toContain("task watchdogs, ask-mode issue creation, Teams Catalog installation");
     expect(readme).toContain("instance-scoped environment defaults remain live Paperclip/company-package decisions");
+  });
+
+  it("declares company-scoped plugin config for the board access secret binding", () => {
+    const properties = (manifest.instanceConfigSchema as { properties?: Record<string, Record<string, unknown>> })
+      .properties ?? {};
+    const field = properties[BOARD_ACCESS_TOKEN_CONFIG_PATH];
+
+    expect(field?.format).toBe("secret-ref");
+    expect(field?.type).toEqual(["object", "string"]);
+  });
+
+  it("serves several companies with differing config from one worker", async () => {
+    const plugin = createAgentCompaniesPlugin({ startupAutoSyncDelayMs: null });
+
+    expect(plugin.definition.multiCompanyConfig).toBe(true);
+    expect(typeof plugin.definition.onConfigChanged).toBe("function");
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    await expect(
+      plugin.definition.onConfigChanged?.(
+        { [BOARD_ACCESS_TOKEN_CONFIG_PATH]: { type: "secret_ref", secretId: "secret-a", version: "latest" } },
+        { companyId: "paperclip-company-a" }
+      )
+    ).resolves.toBeUndefined();
+    await expect(
+      plugin.definition.onConfigChanged?.(
+        { [BOARD_ACCESS_TOKEN_CONFIG_PATH]: { type: "secret_ref", secretId: "secret-b", version: "latest" } },
+        { companyId: "paperclip-company-b" }
+      )
+    ).resolves.toBeUndefined();
+    await expect(plugin.definition.onConfigChanged?.({}, { companyId: null })).resolves.toBeUndefined();
   });
 
   it("pins the SDK and disposable Paperclip harnesses to the target release", async () => {
@@ -2501,8 +2538,9 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         identity: "Agent Operator"
       });
 
-      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
-        expect(secretRef).toBe("secret-board-token-ref");
+      (harness.ctx.secrets as { resolve(secretRef: string | EnvSecretRefBinding, options?: { companyId?: string; configPath?: string }): Promise<string> }).resolve = async (secretRef, options) => {
+        expect(secretRef).toEqual({ type: "secret_ref", secretId: "secret-board-token-ref", version: "latest" });
+        expect(options).toEqual({ companyId: "paperclip-company-123", configPath: BOARD_ACCESS_TOKEN_CONFIG_PATH });
         return "paperclip-board-token";
       };
 
@@ -3348,10 +3386,11 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         identity: "Agent Operator"
       });
 
-      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
+      (harness.ctx.secrets as { resolve(secretRef: string | EnvSecretRefBinding, options?: { companyId?: string; configPath?: string }): Promise<string> }).resolve = async (secretRef, options) => {
         secretResolveCallCount += 1;
-        expect(secretRef).toBe("secret-board-token-ref");
-        throw new Error(`Secret not found: ${secretRef}`);
+        expect(secretRef).toEqual({ type: "secret_ref", secretId: "secret-board-token-ref", version: "latest" });
+        expect(options).toEqual({ companyId: "paperclip-company-123", configPath: BOARD_ACCESS_TOKEN_CONFIG_PATH });
+        throw new Error(`Secret not found: ${typeof secretRef === "string" ? secretRef : secretRef.secretId}`);
       };
 
       await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
@@ -3498,9 +3537,12 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         identity: "Agent Operator B"
       });
 
-      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
-        resolvedSecretRefs.push(secretRef);
-        return `resolved-${secretRef}`;
+      (harness.ctx.secrets as { resolve(secretRef: string | EnvSecretRefBinding, options?: { companyId?: string; configPath?: string }): Promise<string> }).resolve = async (secretRef, options) => {
+        const secretId = typeof secretRef === "string" ? secretRef : secretRef.secretId;
+        expect(secretRef).toEqual({ type: "secret_ref", secretId, version: "latest" });
+        expect(options).toEqual({ companyId: "paperclip-company-a", configPath: BOARD_ACCESS_TOKEN_CONFIG_PATH });
+        resolvedSecretRefs.push(secretId);
+        return `resolved-${secretId}`;
       };
 
       const companyAConnection = await resolvePaperclipApiConnection(harness.ctx, "paperclip-company-a");
@@ -3655,9 +3697,9 @@ Lead Alpha Labs and coordinate the delivery pipeline.
         },
         updatedAt: "2026-04-14T09:23:00.000Z"
       });
-      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
+      (harness.ctx.secrets as { resolve(secretRef: string | EnvSecretRefBinding, options?: { companyId?: string; configPath?: string }): Promise<string> }).resolve = async (secretRef, options) => {
         secretResolveCallCount += 1;
-        throw new Error(`Unexpected secret resolve for ${secretRef}`);
+        throw new Error(`Unexpected secret resolve for ${typeof secretRef === "string" ? secretRef : secretRef.secretId}`);
       };
 
       const connection = await resolvePaperclipApiConnection(harness.ctx, "paperclip-company-123");
@@ -5908,8 +5950,9 @@ Review the week.
         identity: "Agent Operator"
       });
 
-      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
-        expect(secretRef).toBe("secret-board-token-ref");
+      (harness.ctx.secrets as { resolve(secretRef: string | EnvSecretRefBinding, options?: { companyId?: string; configPath?: string }): Promise<string> }).resolve = async (secretRef, options) => {
+        expect(secretRef).toEqual({ type: "secret_ref", secretId: "secret-board-token-ref", version: "latest" });
+        expect(options).toEqual({ companyId: "paperclip-company-123", configPath: BOARD_ACCESS_TOKEN_CONFIG_PATH });
         return "paperclip-board-token";
       };
 
@@ -6255,8 +6298,9 @@ Review the week.
         identity: "Agent Operator"
       });
 
-      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
-        expect(secretRef).toBe("secret-board-token-ref");
+      (harness.ctx.secrets as { resolve(secretRef: string | EnvSecretRefBinding, options?: { companyId?: string; configPath?: string }): Promise<string> }).resolve = async (secretRef, options) => {
+        expect(secretRef).toEqual({ type: "secret_ref", secretId: "secret-board-token-ref", version: "latest" });
+        expect(options).toEqual({ companyId: "paperclip-company-123", configPath: BOARD_ACCESS_TOKEN_CONFIG_PATH });
         return "paperclip-board-token";
       };
 
@@ -6499,8 +6543,9 @@ Review the week.
         identity: "Agent Operator"
       });
 
-      (harness.ctx.secrets as { resolve(secretRef: string): Promise<string> }).resolve = async (secretRef: string) => {
-        expect(secretRef).toBe("secret-board-token-ref");
+      (harness.ctx.secrets as { resolve(secretRef: string | EnvSecretRefBinding, options?: { companyId?: string; configPath?: string }): Promise<string> }).resolve = async (secretRef, options) => {
+        expect(secretRef).toEqual({ type: "secret_ref", secretId: "secret-board-token-ref", version: "latest" });
+        expect(options).toEqual({ companyId: "paperclip-company-123", configPath: BOARD_ACCESS_TOKEN_CONFIG_PATH });
         return "paperclip-board-token";
       };
 

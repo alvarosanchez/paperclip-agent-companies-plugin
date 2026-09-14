@@ -8,3 +8,5 @@ export const DEFAULT_AUTO_SYNC_ENABLED = true;
 export const DEFAULT_AUTO_SYNC_CADENCE_HOURS = 24;
 export const MIN_AUTO_SYNC_CADENCE_HOURS = 1;
 export const DEFAULT_SYNC_COLLISION_STRATEGY = "replace" as const;
+/** Company-scoped plugin config path that carries the board access token secret_ref binding. */
+export const BOARD_ACCESS_TOKEN_CONFIG_PATH = "boardAccessTokenRef";
