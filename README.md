@@ -1,7 +1,7 @@
 # Agent Companies Plugin
 
 [![CI](https://img.shields.io/github/actions/workflow/status/alvarosanchez/paperclip-agent-companies-plugin/ci.yml?branch=main&label=ci)](https://github.com/alvarosanchez/paperclip-agent-companies-plugin/actions/workflows/ci.yml)
-[![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node 24.11+ or 26+](https://img.shields.io/badge/node-24.11%2B%20%7C%7C%2026%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![pnpm 10](https://img.shields.io/badge/pnpm-10-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
@@ -26,7 +26,7 @@ Discover Agent Company packages in git repositories, inspect their contents insi
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 24.11 or newer on the 24.x line, or Node.js 26 or newer (the `@paperclipai/plugin-sdk` 2026.831 baseline requires 24.11+; Vitest 5 does not support Node 25, so the test suite needs 24.x or 26+)
 - A Paperclip instance with plugin support, version `2026.831.1` or newer
 - `git` available in the plugin worker environment for remote repositories
 - Access to any private repositories you want to scan
