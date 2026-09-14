@@ -663,12 +663,17 @@ describe("agent companies plugin", () => {
   });
 
 
-  it("documents the Paperclip 2026.626 adoption boundary", async () => {
+  it("documents the Paperclip 2026.831 adoption boundary", async () => {
     const readme = await readFile(join(process.cwd(), "README.md"), "utf8");
 
-    expect(readme).toContain("Paperclip `2026.626.0` adds built-in Hermes adapters");
-    expect(readme).toContain("task watchdogs, ask-mode issue creation, Teams Catalog installation");
-    expect(readme).toContain("instance-scoped environment defaults remain live Paperclip/company-package decisions");
+    expect(readme).toContain("Paperclip `2026.831.1` re-enables company-scoped plugin config and plugin secret references");
+    expect(readme).toContain("bundle schemaVersion 7");
+    expect(readme).toContain("chunked");
+    expect(readme).toContain("explicit merge mode");
+    expect(readme).toContain("host tool gateway");
+    expect(readme).toContain("`claude_local`/`codex_local`");
+    expect(readme).toContain("`hermes_local`/`hermes_gateway`");
+    expect(readme).toContain("are not adopted");
   });
 
   it("declares company-scoped plugin config for the board access secret binding", () => {
