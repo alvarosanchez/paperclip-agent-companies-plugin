@@ -824,6 +824,11 @@ async function main() {
 
     const pluginEntry = page.getByText(pluginDisplayName, { exact: true }).first();
     await pluginEntry.waitFor({ timeout: 120000 });
+    // Headless Chromium (153+, Playwright >= 1.63) starts with the pointer over the
+    // company sidebar, which keeps the hover-expanded sidebar overlaying the settings
+    // sub-navigation and makes the entry non-clickable. Park the pointer in the
+    // content area first so the sidebar collapses back to its rail.
+    await page.mouse.move(800, 400);
     await pluginEntry.click();
 
     await page.getByText(settingsPageHeading, { exact: true }).first().waitFor({ timeout: 120000 });
