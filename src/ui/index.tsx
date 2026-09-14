@@ -72,6 +72,8 @@ import {
   type CatalogRepositorySummary,
   type CatalogSnapshot,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
+  DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   type PaperclipCompanyImportResult,
   buildStagedPaperclipImportSource,
@@ -1844,6 +1846,7 @@ interface PendingActionState {
     | "scanning-repository"
     | "removing"
     | "toggling-auto-sync"
+    | "toggling-sync-pause-automations"
     | "updating-adapter-presets"
     | "updating-cadence";
   repositoryId?: string;
@@ -2026,6 +2029,7 @@ interface ImportDialogState {
   selection: CompanyImportSelection;
   adapterPresetSelection: ImportAdapterPresetSelection;
   collisionStrategy: CatalogSyncCollisionStrategy;
+  pauseAutomations: boolean;
 }
 
 interface CatalogCompanyGroup {
@@ -4872,8 +4876,21 @@ function ImportedCompanySyncControls(props: {
   syncState: SyncState | null;
   onSync(sourceCompanyId: string, importedCompanyId: string): void;
   onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
+  onToggleSyncPauseAutomations(
+    sourceCompanyId: string,
+    importedCompanyId: string,
+    pauseAutomations: boolean
+  ): void;
 }): React.JSX.Element {
-  const { autoSyncCadenceHours, company, isBusy, syncState, onSync, onToggleAutoSync } = props;
+  const {
+    autoSyncCadenceHours,
+    company,
+    isBusy,
+    syncState,
+    onSync,
+    onToggleAutoSync,
+    onToggleSyncPauseAutomations
+  } = props;
   const syncSummary = getCompanySyncSummary(company, autoSyncCadenceHours);
   const syncError = getCompanySyncError(company);
   const isSyncAvailable = company.importedCompany.isSyncAvailable;
@@ -4903,6 +4920,23 @@ function ImportedCompanySyncControls(props: {
                 checked
               )}
             testId="company-auto-sync-toggle"
+          />
+        </label>
+        <label
+          className="agent-companies-settings__switch-field"
+          title={'Send pauseAutomations to Paperclip on every sync so updated agents and routines are parked with pause reason "import" instead of waking immediately.'}
+        >
+          <span>Pause agents on sync</span>
+          <ToggleSwitch
+            checked={company.importedCompany.syncPauseAutomations}
+            disabled={isBusy}
+            onChange={(checked) =>
+              void onToggleSyncPauseAutomations(
+                company.sourceCompanyId,
+                company.importedCompany.id,
+                checked
+              )}
+            testId="company-sync-pause-automations-toggle"
           />
         </label>
         {company.importedCompany.syncStatus === "running" ? (
@@ -5012,6 +5046,11 @@ function ImportedCompanyCard(props: {
   onOpenReimport(sourceCompanyId: string, importedCompanyId: string): void;
   onSync(sourceCompanyId: string, importedCompanyId: string): void;
   onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
+  onToggleSyncPauseAutomations(
+    sourceCompanyId: string,
+    importedCompanyId: string,
+    pauseAutomations: boolean
+  ): void;
 }): React.JSX.Element {
   const {
     autoSyncCadenceHours,
@@ -5022,7 +5061,8 @@ function ImportedCompanyCard(props: {
     onOpenContents,
     onOpenReimport,
     onSync,
-    onToggleAutoSync
+    onToggleAutoSync,
+    onToggleSyncPauseAutomations
   } = props;
   const importedCompanyLabel = getImportedCompanyLabel(company);
   const versionInfo = getImportedCompanyVersionInfo(
@@ -5092,6 +5132,7 @@ function ImportedCompanyCard(props: {
         isBusy={isSyncDisabled}
         onSync={onSync}
         onToggleAutoSync={onToggleAutoSync}
+        onToggleSyncPauseAutomations={onToggleSyncPauseAutomations}
         syncState={syncState}
       />
     </article>
@@ -5420,6 +5461,7 @@ function ImportCompanyDialog(props: {
   onChangeAgentAdapterPreset(agentSlug: string, value: string): void;
   onChangeDefaultAdapterPreset(value: string): void;
   onChangeCollisionStrategy(value: CatalogSyncCollisionStrategy): void;
+  onChangePauseAutomations(value: boolean): void;
   onChangeCompanyName(value: string): void;
   onClose(): void;
   onToggleItem(key: CompanyContentKey, itemPath: string, checked: boolean): void;
@@ -5435,6 +5477,7 @@ function ImportCompanyDialog(props: {
     onChangeAgentAdapterPreset,
     onChangeDefaultAdapterPreset,
     onChangeCollisionStrategy,
+    onChangePauseAutomations,
     onChangeCompanyName,
     onClose,
     onToggleItem,
@@ -5753,6 +5796,30 @@ function ImportCompanyDialog(props: {
                     />
                   </label>
                 ))}
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend className="agent-companies-settings__metric-label">Automations</legend>
+              <div className="agent-companies-settings__status-grid">
+                <label className="agent-companies-settings__status-row">
+                  <div className="agent-companies-settings__status-copy">
+                    <span className="agent-companies-settings__status-title">
+                      Pause agents after import until verified
+                    </span>
+                    <span className="agent-companies-settings__status-body">
+                      Paperclip parks imported agents and routines with pause reason "import" instead of
+                      waking them immediately. Resume them from the agent page once the company looks right.
+                    </span>
+                  </div>
+                  <input
+                    checked={dialogState.pauseAutomations}
+                    data-testid="company-import-pause-automations"
+                    disabled={isBusy}
+                    onChange={(event) => onChangePauseAutomations(event.target.checked)}
+                    type="checkbox"
+                  />
+                </label>
               </div>
             </fieldset>
 
@@ -6983,6 +7050,9 @@ export function AgentCompaniesSettingsPage({
   const recordCompanyImport = usePluginAction("catalog.record-company-import");
   const syncCompany = usePluginAction("catalog.sync-company");
   const setCompanyAutoSync = usePluginAction("catalog.set-company-auto-sync");
+  const setCompanySyncPauseAutomations = usePluginAction(
+    "catalog.set-company-sync-pause-automations"
+  );
   const setAutoSyncCadence = usePluginAction("catalog.set-auto-sync-cadence");
   const setAdapterPresets = usePluginAction("catalog.set-adapter-presets");
   const addRepository = usePluginAction("catalog.add-repository");
@@ -7309,7 +7379,8 @@ export function AgentCompaniesSettingsPage({
         createDefaultCompanyImportSelection()
       ),
       adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
-      collisionStrategy: "replace"
+      collisionStrategy: "replace",
+      pauseAutomations: DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS
     });
     setImportError(null);
   }
@@ -7344,7 +7415,8 @@ export function AgentCompaniesSettingsPage({
         createDefaultCompanyImportSelection()
       ),
       adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
-      collisionStrategy: "replace"
+      collisionStrategy: "replace",
+      pauseAutomations: DEFAULT_SYNC_PAUSE_AUTOMATIONS
     });
     setImportError(null);
   }
@@ -7377,7 +7449,8 @@ export function AgentCompaniesSettingsPage({
       adapterPresetSelection: cloneImportAdapterPresetSelection(
         company.importedCompany.adapterPresetSelection
       ),
-      collisionStrategy: company.importedCompany.syncCollisionStrategy
+      collisionStrategy: company.importedCompany.syncCollisionStrategy,
+      pauseAutomations: company.importedCompany.syncPauseAutomations
     });
     setImportError(null);
   }
@@ -7499,7 +7572,8 @@ export function AgentCompaniesSettingsPage({
               skills: false
             },
             target,
-            collisionStrategy: importDialog.collisionStrategy
+            collisionStrategy: importDialog.collisionStrategy,
+            pauseAutomations: importDialog.pauseAutomations
           })
         });
         const createdCompanyId = createdCompanyOnlyResult.company?.id?.trim();
@@ -7539,6 +7613,7 @@ export function AgentCompaniesSettingsPage({
             include: effectivePreIssueImportInclude,
             target: effectivePreIssueImportTarget,
             collisionStrategy: importDialog.collisionStrategy,
+            pauseAutomations: importDialog.pauseAutomations,
             ...(adapterOverrides ? { adapterOverrides } : {})
           })
         });
@@ -7647,7 +7722,8 @@ export function AgentCompaniesSettingsPage({
                 mode: "existing_company",
                 companyId: importedCompanyId
               },
-              collisionStrategy: importDialog.collisionStrategy
+              collisionStrategy: importDialog.collisionStrategy,
+              pauseAutomations: importDialog.pauseAutomations
             })
           });
         }
@@ -7710,6 +7786,12 @@ export function AgentCompaniesSettingsPage({
             selection: preparedImport.selection,
             adapterPresetSelection: importDialog.adapterPresetSelection,
             syncCollisionStrategy: importDialog.collisionStrategy,
+            // A fresh company keeps the host default for later syncs: "pause until verified" is a
+            // one-time check on the first import, not a standing policy for every hourly auto-sync.
+            syncPauseAutomations:
+              importDialog.targetMode === "new_company"
+                ? DEFAULT_SYNC_PAUSE_AUTOMATIONS
+                : importDialog.pauseAutomations,
             issuesBeforeImport
           });
           refresh();
@@ -7810,6 +7892,17 @@ export function AgentCompaniesSettingsPage({
         ? {
             ...currentDialog,
             collisionStrategy
+          }
+        : currentDialog
+    );
+  }
+
+  function handleChangePauseAutomations(pauseAutomations: boolean): void {
+    setImportDialog((currentDialog) =>
+      currentDialog
+        ? {
+            ...currentDialog,
+            pauseAutomations
           }
         : currentDialog
     );
@@ -7943,6 +8036,53 @@ export function AgentCompaniesSettingsPage({
         text: enabled
           ? `Auto-sync enabled for "${company.importedCompany.name}".`
           : `Auto-sync paused for "${company.importedCompany.name}".`
+      });
+    } catch (actionError) {
+      setNotice({
+        tone: "error",
+        text: getErrorMessage(actionError)
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function handleSetCompanySyncPauseAutomations(
+    sourceCompanyId: string,
+    importedCompanyId: string,
+    pauseAutomations: boolean
+  ): Promise<void> {
+    const company = catalog.importedCompanies.find(
+      (candidate) =>
+        candidate.sourceCompanyId === sourceCompanyId
+        && candidate.importedCompany.id === importedCompanyId
+    );
+    if (!company) {
+      setNotice({
+        tone: "error",
+        text: "That imported company is no longer available in the current catalog snapshot."
+      });
+      return;
+    }
+
+    setPendingAction({
+      kind: "toggling-sync-pause-automations",
+      sourceCompanyId,
+      importedCompanyId
+    });
+    setNotice(null);
+
+    try {
+      await setCompanySyncPauseAutomations({
+        sourceCompanyId,
+        importedCompanyId,
+        pauseAutomations
+      });
+      await refreshCatalog({
+        tone: "info",
+        text: pauseAutomations
+          ? `Synced agents and routines in "${company.importedCompany.name}" will be paused until you resume them.`
+          : `Synced agents and routines in "${company.importedCompany.name}" will keep waking immediately.`
       });
     } catch (actionError) {
       setNotice({
@@ -8744,6 +8884,7 @@ export function AgentCompaniesSettingsPage({
                   onOpenReimport={openReimportDialog}
                   onSync={handleSyncCompany}
                   onToggleAutoSync={handleSetCompanyAutoSync}
+                  onToggleSyncPauseAutomations={handleSetCompanySyncPauseAutomations}
                   syncState={syncState}
                 />
               ))}
@@ -8782,6 +8923,7 @@ export function AgentCompaniesSettingsPage({
           importState={importState}
           onChangeAgentAdapterPreset={handleChangeAgentAdapterPreset}
           onChangeCollisionStrategy={handleChangeImportCollisionStrategy}
+          onChangePauseAutomations={handleChangePauseAutomations}
           onChangeCompanyName={handleChangeImportCompanyName}
           onChangeDefaultAdapterPreset={handleChangeDefaultAdapterPreset}
           onClose={() => {

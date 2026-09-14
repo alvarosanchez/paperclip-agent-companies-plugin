@@ -5,8 +5,10 @@ import {
   COMPANY_CONTENT_KEYS,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_AUTO_SYNC_ENABLED,
+  DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS,
   DEFAULT_REPOSITORY_URL,
   DEFAULT_SYNC_COLLISION_STRATEGY,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   PLUGIN_DISPLAY_NAME,
   PLUGIN_ID
@@ -18,8 +20,10 @@ export {
   COMPANY_CONTENT_KEYS,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_AUTO_SYNC_ENABLED,
+  DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS,
   DEFAULT_REPOSITORY_URL,
   DEFAULT_SYNC_COLLISION_STRATEGY,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   PLUGIN_DISPLAY_NAME,
   PLUGIN_ID
@@ -192,6 +196,8 @@ export interface ImportedCatalogCompanyRecord {
   adapterPresetSelection: ImportAdapterPresetSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
+  /** Sent as `pauseAutomations` on every tracked sync import request. */
+  syncPauseAutomations: boolean;
   lastSyncStatus: CatalogCompanySyncStatus;
   lastSyncAttemptAt: string | null;
   lastSyncedAt: string | null;
@@ -210,6 +216,7 @@ export interface CatalogCompanyImportStatus {
   adapterPresetSelection: ImportAdapterPresetSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
+  syncPauseAutomations: boolean;
   syncStatus: CatalogCompanySyncStatus;
   lastSyncAttemptAt: string | null;
   lastSyncedAt: string | null;
@@ -1565,6 +1572,10 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
     syncCollisionStrategy: normalizeCatalogSyncCollisionStrategy(
       value.syncCollisionStrategy ?? value.collisionStrategy
     ),
+    syncPauseAutomations:
+      typeof value.syncPauseAutomations === "boolean"
+        ? value.syncPauseAutomations
+        : DEFAULT_SYNC_PAUSE_AUTOMATIONS,
     lastSyncStatus:
       initialSyncStatus === "idle" && lastSyncedAt !== null
         ? "succeeded"
@@ -1760,6 +1771,7 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
               adapterPresetSelection: importedCompany.adapterPresetSelection,
               autoSyncEnabled: importedCompany.autoSyncEnabled,
               syncCollisionStrategy: importedCompany.syncCollisionStrategy,
+              syncPauseAutomations: importedCompany.syncPauseAutomations,
               syncStatus: importedCompany.lastSyncStatus,
               lastSyncAttemptAt: importedCompany.lastSyncAttemptAt,
               lastSyncedAt: importedCompany.lastSyncedAt,

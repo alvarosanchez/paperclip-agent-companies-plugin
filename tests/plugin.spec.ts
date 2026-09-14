@@ -6587,7 +6587,8 @@ Review the week.
               mode: "existing_company",
               companyId: "paperclip-company-123"
             },
-            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY
+            collisionStrategy: DEFAULT_SYNC_COLLISION_STRATEGY,
+            pauseAutomations: false
           }
         }
       ]);
@@ -6605,6 +6606,188 @@ Review the week.
         process.env.PAPERCLIP_API_KEY = previousApiKey;
       }
     }
+  });
+
+  it("sends the tracked syncPauseAutomations flag on every sync import request", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const importBodies: Array<Record<string, unknown>> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-board-token";
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/issues") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        importBodies.push(bodyText ? JSON.parse(bodyText) : {});
+        return new Response(
+          JSON.stringify({
+            company: {
+              id: "paperclip-company-123",
+              name: "Alpha Labs Imported",
+              action: "updated"
+            },
+            issues: [{ action: "updated" }],
+            warnings: []
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+
+      if (url.startsWith("http://127.0.0.1:3210/api/companies/paperclip-company-123/")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    try {
+      const plugin = createAgentCompaniesPlugin({
+        now: () => "2026-04-15T10:00:00.000Z",
+        startupAutoSyncDelayMs: null
+      });
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...manifest.capabilities]
+      });
+
+      await harness.ctx.state.set(CATALOG_SCOPE, {
+        repositories: [],
+        updatedAt: "2026-04-14T09:00:00.000Z"
+      });
+
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction("catalog.add-repository", { url: repositoryPath });
+
+      const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+      const sourceCompanyId = catalog.companies.find(
+        (candidate) => candidate.slug === "alpha-labs"
+      )?.id;
+
+      expect(sourceCompanyId).toBeTruthy();
+
+      await recordTrackedCompanyImport(harness, {
+        sourceCompanyId: sourceCompanyId!,
+        importedCompanyId: "paperclip-company-123",
+        importedCompanyName: "Alpha Labs Imported",
+        importedCompanyIssuePrefix: "ALP",
+        selection: {
+          agents: { mode: "none" },
+          projects: { mode: "none" },
+          tasks: { mode: "none" },
+          issues: { mode: "selected", itemPaths: ["issues/follow-up/ISSUE.md"] },
+          skills: { mode: "none" }
+        }
+      });
+
+      const trackedAfterImport = await harness.getData<CatalogSnapshot>("catalog.read");
+      expect(
+        trackedAfterImport.importedCompanies[0]?.importedCompany.syncPauseAutomations
+      ).toBe(false);
+
+      await setFixtureRepositoryVersion(repositoryPath, "1.1.0");
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: sourceCompanyId!,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      expect(importBodies).toHaveLength(1);
+      expect(importBodies[0]?.pauseAutomations).toBe(false);
+
+      await harness.performAction("catalog.set-company-sync-pause-automations", {
+        sourceCompanyId: sourceCompanyId!,
+        importedCompanyId: "paperclip-company-123",
+        pauseAutomations: true
+      });
+
+      const trackedAfterToggle = await harness.getData<CatalogSnapshot>("catalog.read");
+      expect(
+        trackedAfterToggle.importedCompanies[0]?.importedCompany.syncPauseAutomations
+      ).toBe(true);
+
+      await setFixtureRepositoryVersion(repositoryPath, "1.2.0");
+      await harness.performAction<CatalogCompanySyncResult>("catalog.sync-company", {
+        sourceCompanyId: sourceCompanyId!,
+        importedCompanyId: "paperclip-company-123"
+      });
+
+      expect(importBodies).toHaveLength(2);
+      expect(importBodies[1]?.pauseAutomations).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousApiUrl === undefined) {
+        delete process.env.PAPERCLIP_API_URL;
+      } else {
+        process.env.PAPERCLIP_API_URL = previousApiUrl;
+      }
+
+      if (previousApiKey === undefined) {
+        delete process.env.PAPERCLIP_API_KEY;
+      } else {
+        process.env.PAPERCLIP_API_KEY = previousApiKey;
+      }
+    }
+  });
+
+  it("records the requested syncPauseAutomations flag on a tracked import", async () => {
+    const repositoryPath = await createRepositoryFixture();
+    const plugin = createAgentCompaniesPlugin({
+      now: () => "2026-04-15T10:05:00.000Z",
+      startupAutoSyncDelayMs: null
+    });
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities]
+    });
+
+    await harness.ctx.state.set(CATALOG_SCOPE, {
+      repositories: [],
+      updatedAt: "2026-04-14T09:00:00.000Z"
+    });
+
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction("catalog.add-repository", { url: repositoryPath });
+
+    const catalog = await harness.getData<CatalogSnapshot>("catalog.read");
+    const sourceCompanyId = catalog.companies.find(
+      (candidate) => candidate.slug === "alpha-labs"
+    )?.id;
+
+    expect(sourceCompanyId).toBeTruthy();
+
+    const snapshot = await recordTrackedCompanyImport<CatalogSnapshot>(harness, {
+      sourceCompanyId: sourceCompanyId!,
+      importedCompanyId: "paperclip-company-123",
+      importedCompanyName: "Alpha Labs Imported",
+      importedCompanyIssuePrefix: "ALP",
+      syncPauseAutomations: true,
+      selection: {
+        agents: { mode: "none" },
+        projects: { mode: "none" },
+        tasks: { mode: "none" },
+        issues: { mode: "selected", itemPaths: ["issues/follow-up/ISSUE.md"] },
+        skills: { mode: "none" }
+      }
+    });
+
+    expect(snapshot.importedCompanies[0]?.importedCompany.syncPauseAutomations).toBe(true);
   });
 
   it("skips one-time task files whose Paperclip issue already exists during sync", async () => {

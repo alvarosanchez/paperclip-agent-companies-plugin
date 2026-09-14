@@ -28,6 +28,7 @@ import {
   DEFAULT_AUTO_SYNC_ENABLED,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_SYNC_COLLISION_STRATEGY,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   type ImportedCatalogCompanyRecord,
   COMPANY_CONTENT_KEYS,
   type CatalogCompanyContentDetail,
@@ -293,6 +294,8 @@ interface SyncImportRequest {
   sourceCompanyName: string;
   importedCompanyId: string;
   collisionStrategy: CatalogSyncCollisionStrategy;
+  /** Sent as `pauseAutomations` on the sync import request. */
+  pauseAutomations: boolean;
   preparedImport: CatalogPreparedCompanyImport;
   existingIssues?: PaperclipIssueRecord[] | null;
   adapterPresetSelection: ImportAdapterPresetSelection;
@@ -3792,6 +3795,7 @@ export async function executeDefaultSyncImport(
         companyId: input.importedCompanyId
       },
       collisionStrategy: input.collisionStrategy,
+      pauseAutomations: input.pauseAutomations,
       ...(adapterOverrides ? { adapterOverrides } : {})
     });
   }
@@ -3849,7 +3853,8 @@ export async function executeDefaultSyncImport(
         mode: "existing_company",
         companyId: input.importedCompanyId
       },
-      collisionStrategy: input.collisionStrategy
+      collisionStrategy: input.collisionStrategy,
+      pauseAutomations: input.pauseAutomations
     });
   }
   const configuredRoutineSourcePaths = input.authoritativeRoutineSourcePaths;
@@ -6517,6 +6522,7 @@ async function runCatalogCompanySync(
         sourceCompanyName: refreshedMatch.company.name,
         importedCompanyId: importedCompany.importedCompanyId,
         collisionStrategy: importedCompany.syncCollisionStrategy,
+        pauseAutomations: importedCompany.syncPauseAutomations,
         preparedImport,
         existingIssues: issuesBeforeSync,
         adapterPresetSelection: migratedAdapterSelection,
@@ -6953,6 +6959,10 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           params.syncCollisionStrategy,
           existingImport?.syncCollisionStrategy ?? DEFAULT_SYNC_COLLISION_STRATEGY
         );
+        const syncPauseAutomations =
+          typeof params.syncPauseAutomations === "boolean"
+            ? params.syncPauseAutomations
+            : existingImport?.syncPauseAutomations ?? DEFAULT_SYNC_PAUSE_AUTOMATIONS;
         const issuesBeforeImport = Array.isArray(params.issuesBeforeImport)
           ? normalizePaperclipIssueList(params.issuesBeforeImport) ?? []
           : null;
@@ -6994,6 +7004,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
                 adapterPresetSelection,
                 autoSyncEnabled: existingImport?.autoSyncEnabled ?? DEFAULT_AUTO_SYNC_ENABLED,
                 syncCollisionStrategy,
+                syncPauseAutomations,
                 lastSyncStatus: "succeeded",
                 lastSyncAttemptAt: existingImport?.lastSyncAttemptAt ?? timestamp,
                 lastSyncedAt: timestamp,
@@ -7038,6 +7049,38 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           updateImportedCatalogCompany(currentState, sourceCompanyId, importedCompanyId, (company) => ({
             ...company,
             autoSyncEnabled: enabled
+          })),
+          timestamp
+        );
+
+        return buildCatalogResponse(nextState, timestamp);
+      });
+
+      ctx.actions.register("catalog.set-company-sync-pause-automations", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const sourceCompanyId = getRequiredString(params, "sourceCompanyId");
+        const importedCompanyId = getRequiredString(params, "importedCompanyId");
+        const pauseAutomations =
+          typeof params.pauseAutomations === "boolean" ? params.pauseAutomations : null;
+
+        if (pauseAutomations === null) {
+          throw new Error("pauseAutomations must be a boolean.");
+        }
+
+        const timestamp = now();
+        const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+        const match = findRepositoryCompany(currentState, sourceCompanyId);
+        if (!match) {
+          throw new Error("Company not found.");
+        }
+
+        assertCatalogCompanyCanBeSynced(currentState, match.company, importedCompanyId);
+
+        const nextState = await persistCatalogState(
+          ctx,
+          updateImportedCatalogCompany(currentState, sourceCompanyId, importedCompanyId, (company) => ({
+            ...company,
+            syncPauseAutomations: pauseAutomations
           })),
           timestamp
         );

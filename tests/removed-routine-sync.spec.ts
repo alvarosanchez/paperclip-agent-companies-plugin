@@ -113,6 +113,7 @@ describe("source-removed routine reconciliation", () => {
       sourceCompanyName: "Alpha Labs",
       importedCompanyId: "paperclip-company-123",
       collisionStrategy: "replace" as const,
+      pauseAutomations: false,
       preparedImport: {
         companyId: "source-company",
         companyName: "Alpha Labs",
