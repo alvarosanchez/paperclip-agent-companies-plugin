@@ -87,7 +87,7 @@ What this plugin adds on top of those:
 
 Verified against `packages/shared/src/validators/company-portability.ts` at `v2026.831.1`: the routine manifest entry carries only `concurrencyPolicy`, `catchUpPolicy`, `variables`, and `triggers`. Routine `activityGatePolicy`, `activityGateScope`, and `folderId` appear nowhere in the portability types, validators, or the import/export service, even though they exist on the live routine model.
 
-So those three settings cannot round-trip through any import path, this plugin's included. Set them on the live Paperclip routine after import. The plugin's routine reconciliation deliberately PATCHes only the fields it owns, so a later sync will not clobber an activity gate or a folder placement you set by hand.
+So those three settings cannot round-trip through any import path, including this plugin's. Set them on the live Paperclip routine after import. The plugin's routine reconciliation deliberately PATCHes only the fields it owns, so a later sync will not clobber an activity gate or a folder placement you set by hand.
 
 ## Package Expectations
 
@@ -215,6 +215,7 @@ Manual verification highlights:
 
 - In **Imported Companies**, confirm the auto-sync cadence input defaults to `24` hours and updates the next-run messaging when you save a different value.
 - Toggle **Auto-sync** off and back on for a tracked import to verify the per-company setting still applies immediately.
+- Toggle **Pause agents on sync** off and back on for a tracked import to verify the saved `syncPauseAutomations` setting persists, and check that the import dialog's **Pause agents after import until verified** checkbox defaults to on for **Import as new company** and off for **Import into...**.
 - Open **Company Settings** > **Agent Companies** for a seeded or imported company and confirm the same repository catalog settings page mounts with the company-scoped Board access controls.
 - On the target Paperclip release, confirm imported agents normally skip `pending_approval`; if you enable the target company's approval policy manually, confirm the plugin still approves matching pending imported agents before assigned tasks are imported.
 

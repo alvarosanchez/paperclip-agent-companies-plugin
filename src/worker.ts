@@ -21,6 +21,9 @@ import {
   type AdapterPreset,
   type CatalogPreparedCompanyImport,
   type PaperclipCompanyImportRequestBody,
+  buildPaperclipForbiddenCodeMessage,
+  getPaperclipApiErrorCode,
+  getPaperclipApiErrorRemediation,
   type CatalogCompanySyncResult,
   type CatalogImportEntityResult,
   type CompanyImportPartSelection,
@@ -969,51 +972,38 @@ function isBoardAccessRequiredError(error: unknown): boolean {
   return summarizeErrorMessage(error).toLowerCase().includes("board access required");
 }
 
-/**
- * Paperclip 2026.831.0 added an import floor that answers 403 with a machine-readable `code`
- * (`server/src/routes/companies.ts`), and 2026.720.0 added the company skill policy denial
- * (`server/src/routes/company-skills.ts`). All of them look like an authorization failure, so
- * without this mapping every one of them is reported as "board access required", which sends the
- * operator to reconnect a token that is already fine.
- */
-const PAPERCLIP_FORBIDDEN_CODE_MESSAGES: Record<string, string> = {
-  cloud_managed:
-    "Paperclip company import is disabled on this cloud-managed instance, so this company cannot be imported or synced. Board access is not the problem; ask the Paperclip Cloud operator to enable company import.",
-  settings_operator_managed:
-    "The hosting operator hid Paperclip's company import page, which also blocks the import API this plugin uses. Board access is not the problem; ask the operator to unhide company import in instance settings.",
-  skill_policy_denied:
-    "This company's Paperclip skill policy denied the skill change required by this import. Allow the skill action in the company's skill policy, or deselect skills from the sync contract, then retry.",
-  skill_company_boundary_denied:
-    "Paperclip refused the skill change because the saved board access credential belongs to a different company. Reconnect board access from inside the imported company and retry.",
-  skill_actor_restricted:
-    "Paperclip restricted this skill change for the current actor. Review the company's skill policy and the board access identity, then retry."
-};
-
 function getPaperclipForbiddenCodeMessage(error: unknown): string | null {
-  if (
-    !(error instanceof PaperclipApiResponseError)
-    || !error.code
-    || !isPaperclipApiAuthorizationError(error)
-  ) {
+  if (!(error instanceof PaperclipApiResponseError) || !isPaperclipApiAuthorizationError(error)) {
     return null;
   }
 
-  const mapped = PAPERCLIP_FORBIDDEN_CODE_MESSAGES[error.code];
-  if (!mapped) {
-    return null;
-  }
-
-  const lines = [mapped, `Paperclip reported: ${summarizeErrorMessage(error)}`];
-  if (error.remediation) {
-    lines.push(error.remediation);
-  }
-
-  return lines.join(" ");
+  return buildPaperclipForbiddenCodeMessage({
+    code: error.code,
+    hostMessage: error.message,
+    remediation: error.remediation
+  });
 }
 
-/** Sync-result text for a failed Paperclip call: a known 403 code keeps its own explanation. */
+/**
+ * Operator-facing text for a failed Paperclip call during import or sync. A known 401/403 `code`
+ * keeps its own explanation; any other authorization failure falls back to the board access prompt,
+ * because that is the only remedy the hosted UI offers. Returns null when the error is not an
+ * authorization failure, so callers keep their own message.
+ */
+function mapPaperclipAuthorizationFailure(error: unknown): string | null {
+  const codeMessage = getPaperclipForbiddenCodeMessage(error);
+  if (codeMessage) {
+    return codeMessage;
+  }
+
+  return isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)
+    ? buildBoardAccessRequiredSyncMessage()
+    : null;
+}
+
+/** Sync-result text for a failed Paperclip call, falling back to the raw error message. */
 function summarizePaperclipSyncFailure(error: unknown): string {
-  return getPaperclipForbiddenCodeMessage(error) ?? summarizeErrorMessage(error);
+  return mapPaperclipAuthorizationFailure(error) ?? summarizeErrorMessage(error);
 }
 
 function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
@@ -1065,23 +1055,6 @@ function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
 
   visit(value);
   return lines;
-}
-
-function getPaperclipApiErrorCode(payload: unknown): string | null {
-  if (!isRecord(payload)) {
-    return null;
-  }
-
-  const topLevelCode = asNonEmptyString(payload.code);
-  if (topLevelCode) {
-    return topLevelCode;
-  }
-
-  return isRecord(payload.details) ? asNonEmptyString(payload.details.code) : null;
-}
-
-function getPaperclipApiErrorRemediation(payload: unknown): string | null {
-  return isRecord(payload) ? asNonEmptyString(payload.remediation) : null;
 }
 
 function getPaperclipApiErrorMessage(payload: unknown, status: number): string {
@@ -3797,7 +3770,7 @@ export async function executeDefaultSyncImport(
     input.importedCompanyId
   );
   for (const plan of boundRoutinePlans) {
-    await executeBoundRoutineUpdatePlan(connection, plan);
+    await executeBoundRoutineUpdatePlan(connection, plan, input.pauseAutomations);
     ctx.logger.info("Updated renamed Paperclip routine by bound UUID before portability sync", {
       companyId: input.importedCompanyId,
       routineId: plan.routine.id,
@@ -3914,7 +3887,8 @@ export async function executeDefaultSyncImport(
       ctx,
       connection,
       input.importedCompanyId,
-      sourceWithoutBoundRoutines.files
+      sourceWithoutBoundRoutines.files,
+      input.pauseAutomations
     );
     additionalWarnings.push(...routineUpdateResult.warnings);
     issueOnlyImportSource = removePortableRecurringTaskImports(
@@ -4067,13 +4041,9 @@ async function postPaperclipCompanyImport(
       body: JSON.stringify(body)
     });
   } catch (error) {
-    const codeMessage = getPaperclipForbiddenCodeMessage(error);
-    if (codeMessage) {
-      throw new Error(codeMessage);
-    }
-
-    if (isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)) {
-      throw new Error(buildBoardAccessRequiredSyncMessage());
+    const authorizationMessage = mapPaperclipAuthorizationFailure(error);
+    if (authorizationMessage) {
+      throw new Error(authorizationMessage);
     }
 
     throw error;
@@ -4677,11 +4647,25 @@ async function archivePaperclipRoutine(
   });
 }
 
+/**
+ * Routines the plugin reconciles by UUID never pass through Paperclip's importer, so the host's
+ * `pauseAutomations` handling (which only parks routines the import itself creates) does not reach
+ * them. Force the paused status here so "Pause agents on sync" covers already-tracked routines too,
+ * instead of letting the package manifest status wake them again.
+ */
+function applyPauseAutomationsToRoutinePatch<TPatch extends { status?: string }>(
+  patch: TPatch,
+  pauseAutomations: boolean
+): TPatch {
+  return pauseAutomations ? { ...patch, status: "paused" } : patch;
+}
+
 async function updateExistingImportedRoutinesBeforeReplaceImport(
   ctx: PluginContext,
   connection: PaperclipApiConnection,
   companyId: string,
-  files: Record<string, PortableCatalogFileEntry>
+  files: Record<string, PortableCatalogFileEntry>,
+  pauseAutomations: boolean
 ): Promise<{
   updatedTasks: ImportedRecurringTaskFileDefinition[];
   warnings: string[];
@@ -4707,7 +4691,11 @@ async function updateExistingImportedRoutinesBeforeReplaceImport(
   const updatedTasks: ImportedRecurringTaskFileDefinition[] = [];
 
   for (const plan of plans) {
-    await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
+    await updatePaperclipRoutine(
+      connection,
+      plan.routine.id,
+      applyPauseAutomationsToRoutinePatch(plan.patch, pauseAutomations)
+    );
 
     if (plan.task.routineTriggers !== null) {
       await reconcilePaperclipRoutineTriggers(
@@ -5708,9 +5696,14 @@ async function prevalidateBoundRoutineUpdatePlans(
 
 async function executeBoundRoutineUpdatePlan(
   connection: PaperclipApiConnection,
-  plan: BoundRoutineUpdatePlan
+  plan: BoundRoutineUpdatePlan,
+  pauseAutomations: boolean
 ): Promise<void> {
-  await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
+  await updatePaperclipRoutine(
+    connection,
+    plan.routine.id,
+    applyPauseAutomationsToRoutinePatch(plan.patch, pauseAutomations)
+  );
   if (plan.task.routineTriggers !== null) {
     await reconcilePaperclipRoutineTriggersFromSnapshot(
       connection,
@@ -6723,8 +6716,8 @@ async function runCatalogCompanySync(
     } catch (error) {
       const failedAt = options.now();
       const latestState = await loadCatalogState(ctx);
-      const mappedForbiddenMessage = getPaperclipForbiddenCodeMessage(error);
-      const syncFailureMessage = mappedForbiddenMessage ?? summarizeErrorMessage(error);
+      const mappedAuthorizationMessage = mapPaperclipAuthorizationFailure(error);
+      const syncFailureMessage = mappedAuthorizationMessage ?? summarizeErrorMessage(error);
 
       await persistCatalogState(
         ctx,
@@ -6745,7 +6738,7 @@ async function runCatalogCompanySync(
         trigger: options.trigger,
         error: syncFailureMessage
       });
-      throw mappedForbiddenMessage ? new Error(mappedForbiddenMessage) : error;
+      throw mappedAuthorizationMessage ? new Error(mappedAuthorizationMessage) : error;
     }
   })().finally(() => {
     if (companySyncInflight.get(syncKey) === syncPromise) {

@@ -177,4 +177,88 @@ describe("source-removed routine reconciliation", () => {
     });
     expect(archiveRequests).toBe(2);
   });
+
+  it("pauses routines it reconciles by UUID when the tracked sync sets pauseAutomations", async () => {
+    const routinePatches: Array<Record<string, unknown>> = [];
+
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
+    process.env.PAPERCLIP_API_KEY = "paperclip-board-token"; // pragma: allowlist secret
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (url === "http://127.0.0.1:3210/api/companies/paperclip-company-123/routines") {
+        return new Response(JSON.stringify([{
+          id: "routine-monday",
+          title: "Monday Review",
+          description: "Review pipeline health.",
+          status: "active",
+          createdAt: "2026-04-20T05:16:44.000Z",
+          updatedAt: "2026-04-20T05:16:44.000Z"
+        }]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/routines/routine-monday") {
+        routinePatches.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ id: "routine-monday", status: "paused" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      if (url === "http://127.0.0.1:3210/api/companies/import") {
+        return new Response(JSON.stringify({ company: { id: "paperclip-company-123" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+
+      throw new Error(`Unexpected fetch to ${url}`);
+    };
+
+    const harness = createTestHarness({ manifest, capabilities: [...manifest.capabilities] });
+    const source = {
+      type: "inline" as const,
+      files: {
+        "COMPANY.md": "---\nname: Alpha Labs\nschema: agentcompanies/v1\n---\n",
+        // The package manifest asks for an active routine; pauseAutomations must win.
+        "tasks/monday-review/TASK.md": "---\nname: Monday Review\nrecurring: true\n---\n\nReview pipeline health.\n"
+      }
+    };
+    const baseInput = {
+      sourceCompanyId: "source-company",
+      sourceCompanyName: "Alpha Labs",
+      importedCompanyId: "paperclip-company-123",
+      collisionStrategy: "replace" as const,
+      preparedImport: {
+        companyId: "source-company",
+        companyName: "Alpha Labs",
+        selection: {
+          agents: { mode: "none" as const },
+          projects: { mode: "none" as const },
+          tasks: { mode: "all" as const },
+          issues: { mode: "none" as const },
+          skills: { mode: "none" as const }
+        },
+        source,
+        stats: { fileCount: 2, textFileCount: 2, binaryFileCount: 0 }
+      },
+      existingIssues: [],
+      adapterPresetSelection: { defaultPresetId: null, agentPresetIds: {} },
+      previousBindings: [],
+      renameBindings: []
+    };
+
+    await executeDefaultSyncImport(harness.ctx, { ...baseInput, pauseAutomations: true });
+    expect(routinePatches).toHaveLength(1);
+    expect(routinePatches[0]).toMatchObject({ title: "Monday Review", status: "paused" });
+
+    routinePatches.length = 0;
+    await executeDefaultSyncImport(harness.ctx, { ...baseInput, pauseAutomations: false });
+    expect(routinePatches).toHaveLength(1);
+    expect(routinePatches[0]).not.toHaveProperty("status", "paused");
+  });
 });

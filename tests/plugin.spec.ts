@@ -7045,7 +7045,13 @@ Review the week.
     }
   });
 
-  it("still asks for board access when Paperclip returns a 403 without a known code", async () => {
+  it.each([
+    { label: "no code", payload: { error: "Forbidden" } },
+    // Regression: an inherited Object.prototype key must not resolve to a bogus "known" mapping.
+    { label: "an inherited Object.prototype key as its code", payload: { error: "Forbidden", code: "constructor" } },
+    { label: "__proto__ as its code", payload: { error: "Forbidden", code: "__proto__" } },
+    { label: "an unmapped code", payload: { error: "Forbidden", code: "something_else" } }
+  ])("still asks for board access when Paperclip returns a 403 with $label", async ({ payload }) => {
     const repositoryPath = await createRepositoryFixture();
     const previousApiUrl = process.env.PAPERCLIP_API_URL;
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
@@ -7053,15 +7059,17 @@ Review the week.
 
     process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3210";
     process.env.PAPERCLIP_API_KEY = "paperclip-board-token";
+    const forbidden = () =>
+      new Response(JSON.stringify(payload), {
+        status: 403,
+        headers: { "content-type": "application/json" }
+      });
     globalThis.fetch = async (input) => {
       const url =
         typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 
       if (url === "http://127.0.0.1:3210/api/companies/import") {
-        return new Response(JSON.stringify({ error: "Board access required" }), {
-          status: 403,
-          headers: { "content-type": "application/json" }
-        });
+        return forbidden();
       }
 
       if (url.startsWith("http://127.0.0.1:3210/api/companies/paperclip-company-123/")) {
@@ -7118,6 +7126,11 @@ Review the week.
           importedCompanyId: "paperclip-company-123"
         })
       ).rejects.toThrow(/Board access required/u);
+
+      const afterFailure = await harness.getData<CatalogSnapshot>("catalog.read");
+      expect(afterFailure.importedCompanies[0]?.importedCompany.lastSyncError).toMatch(
+        /Board access required/u
+      );
     } finally {
       globalThis.fetch = originalFetch;
       if (previousApiUrl === undefined) {

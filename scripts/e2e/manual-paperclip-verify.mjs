@@ -588,6 +588,7 @@ async function main() {
   console.log('If the imported selection includes recurring tasks, open Routines and confirm overwrite-mode re-imports leave only one active routine per recurring task name instead of duplicating the routine list.');
   console.log('Change the auto-sync cadence to a smaller hourly value, save it, and confirm the imported company summary updates its next-run messaging.');
   console.log('Toggle Auto-sync off and back on again to confirm the per-company setting updates immediately.');
+  console.log('Toggle Pause agents on sync off and back on again to confirm the tracked pauseAutomations setting persists.');
   console.log('Confirm that the imported company appears in Paperclip with the expected agents, skills, projects, and issues.');
   console.log('Open View contents on a company, click an item in the left column, and confirm the rendered markdown updates on the right.');
   console.log('Press Ctrl+C when you are done inspecting the instance.');

@@ -77,8 +77,11 @@ import {
   MIN_AUTO_SYNC_CADENCE_HOURS,
   type PaperclipCompanyImportRequestBody,
   type PaperclipCompanyImportResult,
+  buildPaperclipForbiddenCodeMessage,
   buildStagedPaperclipImportSource,
   collectReferencedPaperclipCatalogSkillRefs,
+  getPaperclipApiErrorCode,
+  getPaperclipApiErrorRemediation,
   createDefaultCompanyImportSelection,
   getCompanyContentItemRequirementLookup,
   getCompanyContentSectionForKey,
@@ -2930,7 +2933,20 @@ async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<
   }
 
   if (!response.ok) {
-    throw new Error(getApiErrorMessage(payload) ?? `Request failed with status ${response.status}.`);
+    const hostMessage =
+      getApiErrorMessage(payload) ?? `Request failed with status ${response.status}.`;
+    // Paperclip's import floor and skill policy answer 401/403 with a machine-readable code.
+    // Give those the same operator explanation the worker-side sync uses.
+    const forbiddenMessage =
+      response.status === 401 || response.status === 403
+        ? buildPaperclipForbiddenCodeMessage({
+            code: getPaperclipApiErrorCode(payload),
+            hostMessage,
+            remediation: getPaperclipApiErrorRemediation(payload)
+          })
+        : null;
+
+    throw new Error(forbiddenMessage ?? hostMessage);
   }
 
   return payload as T;
