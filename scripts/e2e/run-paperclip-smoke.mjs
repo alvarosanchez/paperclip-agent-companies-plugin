@@ -937,6 +937,13 @@ async function main() {
       .filter({ hasText: 'First Import' });
     await requiredProjectRow.waitFor({ timeout: 120000 });
     await importModal.getByText(selectedContentsSummary, { exact: false }).waitFor({ timeout: 120000 });
+
+    const pauseAutomationsCheckbox = importModal.locator('[data-testid="company-import-pause-automations"]');
+    await pauseAutomationsCheckbox.waitFor({ timeout: 120000 });
+    if (await pauseAutomationsCheckbox.isChecked()) {
+      throw new Error('Expected "Import into..." to leave the pause-automations checkbox unchecked by default.');
+    }
+
     await importModal.locator('[data-testid="company-import-submit"]').click();
 
     await page.getByText('Company imported', { exact: true }).waitFor({ timeout: 120000 });
@@ -1117,6 +1124,24 @@ async function main() {
     if (!autoSyncEnabled) {
       throw new Error('Expected imported company auto-sync to be enabled by default.');
     }
+
+    const syncPauseToggle = importedCompanyCard.locator('[data-testid="company-sync-pause-automations-toggle"]');
+    await syncPauseToggle.waitFor({ timeout: 120000 });
+    if (await syncPauseToggle.isChecked()) {
+      throw new Error('Expected the tracked import pause-agents-on-sync toggle to be off by default.');
+    }
+    await syncPauseToggle.click();
+    await waitForValue(
+      'tracked import pause-agents-on-sync toggle to turn on',
+      async () => ((await syncPauseToggle.isChecked()) ? true : null),
+      120000
+    );
+    await syncPauseToggle.click();
+    await waitForValue(
+      'tracked import pause-agents-on-sync toggle to turn back off',
+      async () => ((await syncPauseToggle.isChecked()) ? null : true),
+      120000
+    );
 
     await setFixtureRepositoryVersion(fixtureRepository, '1.1.0');
     await updateFixtureRecurringTaskForSync(fixtureRepository);

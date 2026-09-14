@@ -72,10 +72,16 @@ import {
   type CatalogRepositorySummary,
   type CatalogSnapshot,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
+  DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
+  type PaperclipCompanyImportRequestBody,
   type PaperclipCompanyImportResult,
+  buildPaperclipForbiddenCodeMessage,
   buildStagedPaperclipImportSource,
   collectReferencedPaperclipCatalogSkillRefs,
+  getPaperclipApiErrorCode,
+  getPaperclipApiErrorRemediation,
   createDefaultCompanyImportSelection,
   getCompanyContentItemRequirementLookup,
   getCompanyContentSectionForKey,
@@ -1844,6 +1850,7 @@ interface PendingActionState {
     | "scanning-repository"
     | "removing"
     | "toggling-auto-sync"
+    | "toggling-sync-pause-automations"
     | "updating-adapter-presets"
     | "updating-cadence";
   repositoryId?: string;
@@ -2026,6 +2033,7 @@ interface ImportDialogState {
   selection: CompanyImportSelection;
   adapterPresetSelection: ImportAdapterPresetSelection;
   collisionStrategy: CatalogSyncCollisionStrategy;
+  pauseAutomations: boolean;
 }
 
 interface CatalogCompanyGroup {
@@ -2234,11 +2242,14 @@ interface CliAuthChallengePollResponse {
 }
 
 interface CliAuthIdentityResponse {
+  userId?: string | null;
+  id?: string | null;
   login?: string | null;
   email?: string | null;
   displayName?: string | null;
   name?: string | null;
   user?: {
+    id?: string | null;
     login?: string | null;
     email?: string | null;
     displayName?: string | null;
@@ -2925,10 +2936,38 @@ async function fetchHostJson<T>(input: string, init: RequestInit = {}): Promise<
   }
 
   if (!response.ok) {
-    throw new Error(getApiErrorMessage(payload) ?? `Request failed with status ${response.status}.`);
+    const hostMessage =
+      getApiErrorMessage(payload) ?? `Request failed with status ${response.status}.`;
+    // Paperclip's import floor and skill policy answer 401/403 with a machine-readable code.
+    // Give those the same operator explanation the worker-side sync uses.
+    const forbiddenMessage =
+      response.status === 401 || response.status === 403
+        ? buildPaperclipForbiddenCodeMessage({
+            code: getPaperclipApiErrorCode(payload),
+            hostMessage,
+            remediation: getPaperclipApiErrorRemediation(payload)
+          })
+        : null;
+
+    throw new Error(forbiddenMessage ?? hostMessage);
   }
 
   return payload as T;
+}
+
+/**
+ * Every company import request goes through here so `collisionStrategy` and `pauseAutomations`
+ * are always sent explicitly. Paperclip marks both optional and falls back to `"rename"` /
+ * `false`, which would silently turn a replace-mode import into renamed skill copies and wake
+ * imported agents immediately.
+ */
+async function postPaperclipCompanyImport(
+  body: PaperclipCompanyImportRequestBody
+): Promise<PaperclipCompanyImportResult> {
+  return fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
+    method: "POST",
+    body: JSON.stringify(body)
+  });
 }
 
 async function archiveDuplicateImportedRoutines(
@@ -3952,14 +3991,33 @@ function getCliAuthIdentityLabel(identity: CliAuthIdentityResponse): string | nu
   return null;
 }
 
-async function fetchBoardAccessIdentity(boardApiToken: string): Promise<string | null> {
+function getCliAuthIdentityUserId(identity: CliAuthIdentityResponse): string | null {
+  for (const candidate of [identity.userId, identity.user?.id, identity.id]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+/**
+ * The connecting operator's display label and Paperclip user id. The user id is what
+ * `ctx.approvals.decide` attributes a hire approval to when the background sync resolves one.
+ */
+async function fetchBoardAccessIdentity(
+  boardApiToken: string
+): Promise<{ label: string | null; userId: string | null }> {
   const identity = await fetchHostJson<CliAuthIdentityResponse>("/api/cli-auth/me", {
     headers: {
       authorization: `Bearer ${boardApiToken.trim()}`
     }
   });
 
-  return getCliAuthIdentityLabel(identity);
+  return {
+    label: getCliAuthIdentityLabel(identity),
+    userId: getCliAuthIdentityUserId(identity)
+  };
 }
 
 function usePaperclipBoardAccessRequirement(): {
@@ -4872,8 +4930,21 @@ function ImportedCompanySyncControls(props: {
   syncState: SyncState | null;
   onSync(sourceCompanyId: string, importedCompanyId: string): void;
   onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
+  onToggleSyncPauseAutomations(
+    sourceCompanyId: string,
+    importedCompanyId: string,
+    pauseAutomations: boolean
+  ): void;
 }): React.JSX.Element {
-  const { autoSyncCadenceHours, company, isBusy, syncState, onSync, onToggleAutoSync } = props;
+  const {
+    autoSyncCadenceHours,
+    company,
+    isBusy,
+    syncState,
+    onSync,
+    onToggleAutoSync,
+    onToggleSyncPauseAutomations
+  } = props;
   const syncSummary = getCompanySyncSummary(company, autoSyncCadenceHours);
   const syncError = getCompanySyncError(company);
   const isSyncAvailable = company.importedCompany.isSyncAvailable;
@@ -4903,6 +4974,23 @@ function ImportedCompanySyncControls(props: {
                 checked
               )}
             testId="company-auto-sync-toggle"
+          />
+        </label>
+        <label
+          className="agent-companies-settings__switch-field"
+          title={'Send pauseAutomations to Paperclip on every sync so updated agents and routines are parked with pause reason "import" instead of waking immediately.'}
+        >
+          <span>Pause agents on sync</span>
+          <ToggleSwitch
+            checked={company.importedCompany.syncPauseAutomations}
+            disabled={isBusy}
+            onChange={(checked) =>
+              void onToggleSyncPauseAutomations(
+                company.sourceCompanyId,
+                company.importedCompany.id,
+                checked
+              )}
+            testId="company-sync-pause-automations-toggle"
           />
         </label>
         {company.importedCompany.syncStatus === "running" ? (
@@ -5012,6 +5100,11 @@ function ImportedCompanyCard(props: {
   onOpenReimport(sourceCompanyId: string, importedCompanyId: string): void;
   onSync(sourceCompanyId: string, importedCompanyId: string): void;
   onToggleAutoSync(sourceCompanyId: string, importedCompanyId: string, enabled: boolean): void;
+  onToggleSyncPauseAutomations(
+    sourceCompanyId: string,
+    importedCompanyId: string,
+    pauseAutomations: boolean
+  ): void;
 }): React.JSX.Element {
   const {
     autoSyncCadenceHours,
@@ -5022,7 +5115,8 @@ function ImportedCompanyCard(props: {
     onOpenContents,
     onOpenReimport,
     onSync,
-    onToggleAutoSync
+    onToggleAutoSync,
+    onToggleSyncPauseAutomations
   } = props;
   const importedCompanyLabel = getImportedCompanyLabel(company);
   const versionInfo = getImportedCompanyVersionInfo(
@@ -5092,6 +5186,7 @@ function ImportedCompanyCard(props: {
         isBusy={isSyncDisabled}
         onSync={onSync}
         onToggleAutoSync={onToggleAutoSync}
+        onToggleSyncPauseAutomations={onToggleSyncPauseAutomations}
         syncState={syncState}
       />
     </article>
@@ -5420,6 +5515,7 @@ function ImportCompanyDialog(props: {
   onChangeAgentAdapterPreset(agentSlug: string, value: string): void;
   onChangeDefaultAdapterPreset(value: string): void;
   onChangeCollisionStrategy(value: CatalogSyncCollisionStrategy): void;
+  onChangePauseAutomations(value: boolean): void;
   onChangeCompanyName(value: string): void;
   onClose(): void;
   onToggleItem(key: CompanyContentKey, itemPath: string, checked: boolean): void;
@@ -5435,6 +5531,7 @@ function ImportCompanyDialog(props: {
     onChangeAgentAdapterPreset,
     onChangeDefaultAdapterPreset,
     onChangeCollisionStrategy,
+    onChangePauseAutomations,
     onChangeCompanyName,
     onClose,
     onToggleItem,
@@ -5753,6 +5850,30 @@ function ImportCompanyDialog(props: {
                     />
                   </label>
                 ))}
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend className="agent-companies-settings__metric-label">Automations</legend>
+              <div className="agent-companies-settings__status-grid">
+                <label className="agent-companies-settings__status-row">
+                  <div className="agent-companies-settings__status-copy">
+                    <span className="agent-companies-settings__status-title">
+                      Pause agents after import until verified
+                    </span>
+                    <span className="agent-companies-settings__status-body">
+                      Paperclip parks imported agents and routines with pause reason "import" instead of
+                      waking them immediately. Resume them from the agent page once the company looks right.
+                    </span>
+                  </div>
+                  <input
+                    checked={dialogState.pauseAutomations}
+                    data-testid="company-import-pause-automations"
+                    disabled={isBusy}
+                    onChange={(event) => onChangePauseAutomations(event.target.checked)}
+                    type="checkbox"
+                  />
+                </label>
               </div>
             </fieldset>
 
@@ -6983,6 +7104,9 @@ export function AgentCompaniesSettingsPage({
   const recordCompanyImport = usePluginAction("catalog.record-company-import");
   const syncCompany = usePluginAction("catalog.sync-company");
   const setCompanyAutoSync = usePluginAction("catalog.set-company-auto-sync");
+  const setCompanySyncPauseAutomations = usePluginAction(
+    "catalog.set-company-sync-pause-automations"
+  );
   const setAutoSyncCadence = usePluginAction("catalog.set-auto-sync-cadence");
   const setAdapterPresets = usePluginAction("catalog.set-adapter-presets");
   const addRepository = usePluginAction("catalog.add-repository");
@@ -7309,7 +7433,8 @@ export function AgentCompaniesSettingsPage({
         createDefaultCompanyImportSelection()
       ),
       adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
-      collisionStrategy: "replace"
+      collisionStrategy: "replace",
+      pauseAutomations: DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS
     });
     setImportError(null);
   }
@@ -7344,7 +7469,8 @@ export function AgentCompaniesSettingsPage({
         createDefaultCompanyImportSelection()
       ),
       adapterPresetSelection: createDefaultImportAdapterPresetSelection(),
-      collisionStrategy: "replace"
+      collisionStrategy: "replace",
+      pauseAutomations: DEFAULT_SYNC_PAUSE_AUTOMATIONS
     });
     setImportError(null);
   }
@@ -7377,7 +7503,8 @@ export function AgentCompaniesSettingsPage({
       adapterPresetSelection: cloneImportAdapterPresetSelection(
         company.importedCompany.adapterPresetSelection
       ),
-      collisionStrategy: company.importedCompany.syncCollisionStrategy
+      collisionStrategy: company.importedCompany.syncCollisionStrategy,
+      pauseAutomations: company.importedCompany.syncPauseAutomations
     });
     setImportError(null);
   }
@@ -7396,7 +7523,12 @@ export function AgentCompaniesSettingsPage({
       return;
     }
 
-    if (importDialog.targetMode !== "new_company" && !importDialog.targetCompanyId) {
+    let target: PaperclipCompanyImportRequestBody["target"];
+    if (importDialog.targetMode === "new_company") {
+      target = { mode: "new_company", newCompanyName: nextCompanyName };
+    } else if (importDialog.targetCompanyId) {
+      target = { mode: "existing_company", companyId: importDialog.targetCompanyId };
+    } else {
       setImportError("Choose an existing Paperclip company before importing.");
       return;
     }
@@ -7468,18 +7600,8 @@ export function AgentCompaniesSettingsPage({
         companyId: importDialog.sourceCompanyId
       });
 
-      const target =
-        importDialog.targetMode === "new_company"
-          ? {
-              mode: "new_company" as const,
-              newCompanyName: nextCompanyName
-            }
-          : {
-              mode: "existing_company" as const,
-              companyId: importDialog.targetCompanyId
-            };
       let effectivePreIssueImportInclude = preIssueImportInclude;
-      let effectivePreIssueImportTarget = target;
+      let effectivePreIssueImportTarget: PaperclipCompanyImportRequestBody["target"] = target;
       let createdCompanyOnlyResult: PaperclipCompanyImportResult | null = null;
       let catalogSkillInstallResult: {
         skills: NonNullable<PaperclipCompanyImportResult["skills"]>;
@@ -7487,20 +7609,18 @@ export function AgentCompaniesSettingsPage({
       } = { skills: [], warnings: [] };
 
       if (referencedCatalogSkillRefs.length > 0 && importDialog.targetMode === "new_company") {
-        createdCompanyOnlyResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
-          method: "POST",
-          body: JSON.stringify({
-            source: preIssueImportSource,
-            include: {
-              company: true,
-              agents: false,
-              projects: false,
-              issues: false,
-              skills: false
-            },
-            target,
-            collisionStrategy: importDialog.collisionStrategy
-          })
+        createdCompanyOnlyResult = await postPaperclipCompanyImport({
+          source: preIssueImportSource,
+          include: {
+            company: true,
+            agents: false,
+            projects: false,
+            issues: false,
+            skills: false
+          },
+          target,
+          collisionStrategy: importDialog.collisionStrategy,
+          pauseAutomations: importDialog.pauseAutomations
         });
         const createdCompanyId = createdCompanyOnlyResult.company?.id?.trim();
         if (!createdCompanyId) {
@@ -7532,15 +7652,13 @@ export function AgentCompaniesSettingsPage({
 
       let importedPhaseOneResult: PaperclipCompanyImportResult | null = null;
       if (hasEnabledPaperclipImportStage(effectivePreIssueImportInclude)) {
-        importedPhaseOneResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
-          method: "POST",
-          body: JSON.stringify({
-            source: preIssueImportSource,
-            include: effectivePreIssueImportInclude,
-            target: effectivePreIssueImportTarget,
-            collisionStrategy: importDialog.collisionStrategy,
-            ...(adapterOverrides ? { adapterOverrides } : {})
-          })
+        importedPhaseOneResult = await postPaperclipCompanyImport({
+          source: preIssueImportSource,
+          include: effectivePreIssueImportInclude,
+          target: effectivePreIssueImportTarget,
+          collisionStrategy: importDialog.collisionStrategy,
+          pauseAutomations: importDialog.pauseAutomations,
+          ...(adapterOverrides ? { adapterOverrides } : {})
         });
       }
       const importedCompanyName =
@@ -7638,17 +7756,15 @@ export function AgentCompaniesSettingsPage({
 
         let importedPhaseTwoResult: PaperclipCompanyImportResult | null = null;
         if (hasEnabledPaperclipImportStage(issueOnlyImportInclude)) {
-          importedPhaseTwoResult = await fetchHostJson<PaperclipCompanyImportResult>("/api/companies/import", {
-            method: "POST",
-            body: JSON.stringify({
-              source: issueOnlyImportSource,
-              include: issueOnlyImportInclude,
-              target: {
-                mode: "existing_company",
-                companyId: importedCompanyId
-              },
-              collisionStrategy: importDialog.collisionStrategy
-            })
+          importedPhaseTwoResult = await postPaperclipCompanyImport({
+            source: issueOnlyImportSource,
+            include: issueOnlyImportInclude,
+            target: {
+              mode: "existing_company",
+              companyId: importedCompanyId
+            },
+            collisionStrategy: importDialog.collisionStrategy,
+            pauseAutomations: importDialog.pauseAutomations
           });
         }
         const importedCompany: PaperclipCompanyImportResult = {
@@ -7710,6 +7826,12 @@ export function AgentCompaniesSettingsPage({
             selection: preparedImport.selection,
             adapterPresetSelection: importDialog.adapterPresetSelection,
             syncCollisionStrategy: importDialog.collisionStrategy,
+            // A fresh company keeps the host default for later syncs: "pause until verified" is a
+            // one-time check on the first import, not a standing policy for every hourly auto-sync.
+            syncPauseAutomations:
+              importDialog.targetMode === "new_company"
+                ? DEFAULT_SYNC_PAUSE_AUTOMATIONS
+                : importDialog.pauseAutomations,
             issuesBeforeImport
           });
           refresh();
@@ -7810,6 +7932,17 @@ export function AgentCompaniesSettingsPage({
         ? {
             ...currentDialog,
             collisionStrategy
+          }
+        : currentDialog
+    );
+  }
+
+  function handleChangePauseAutomations(pauseAutomations: boolean): void {
+    setImportDialog((currentDialog) =>
+      currentDialog
+        ? {
+            ...currentDialog,
+            pauseAutomations
           }
         : currentDialog
     );
@@ -7943,6 +8076,53 @@ export function AgentCompaniesSettingsPage({
         text: enabled
           ? `Auto-sync enabled for "${company.importedCompany.name}".`
           : `Auto-sync paused for "${company.importedCompany.name}".`
+      });
+    } catch (actionError) {
+      setNotice({
+        tone: "error",
+        text: getErrorMessage(actionError)
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function handleSetCompanySyncPauseAutomations(
+    sourceCompanyId: string,
+    importedCompanyId: string,
+    pauseAutomations: boolean
+  ): Promise<void> {
+    const company = catalog.importedCompanies.find(
+      (candidate) =>
+        candidate.sourceCompanyId === sourceCompanyId
+        && candidate.importedCompany.id === importedCompanyId
+    );
+    if (!company) {
+      setNotice({
+        tone: "error",
+        text: "That imported company is no longer available in the current catalog snapshot."
+      });
+      return;
+    }
+
+    setPendingAction({
+      kind: "toggling-sync-pause-automations",
+      sourceCompanyId,
+      importedCompanyId
+    });
+    setNotice(null);
+
+    try {
+      await setCompanySyncPauseAutomations({
+        sourceCompanyId,
+        importedCompanyId,
+        pauseAutomations
+      });
+      await refreshCatalog({
+        tone: "info",
+        text: pauseAutomations
+          ? `Synced agents and routines in "${company.importedCompany.name}" will be paused until you resume them.`
+          : `Synced agents and routines in "${company.importedCompany.name}" will keep waking immediately.`
       });
     } catch (actionError) {
       setNotice({
@@ -8211,7 +8391,7 @@ export function AgentCompaniesSettingsPage({
       }
 
       const boardApiToken = await waitForBoardAccessApproval(challenge);
-      const identity = await fetchBoardAccessIdentity(boardApiToken);
+      const { label: identity, userId: identityUserId } = await fetchBoardAccessIdentity(boardApiToken);
       const secretName = `agent_companies_board_api_${context.companyId.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(context.companyId, secretName, boardApiToken);
       const pluginConfigResult = await registerBoardAccessPluginConfig(
@@ -8225,7 +8405,8 @@ export function AgentCompaniesSettingsPage({
         companyId: context.companyId,
         paperclipBoardApiTokenRef: secret.id,
         paperclipBoardApiToken: boardApiToken,
-        identity
+        identity,
+        identityUserId
       });
       await boardAccess.refresh();
 
@@ -8744,6 +8925,7 @@ export function AgentCompaniesSettingsPage({
                   onOpenReimport={openReimportDialog}
                   onSync={handleSyncCompany}
                   onToggleAutoSync={handleSetCompanyAutoSync}
+                  onToggleSyncPauseAutomations={handleSetCompanySyncPauseAutomations}
                   syncState={syncState}
                 />
               ))}
@@ -8782,6 +8964,7 @@ export function AgentCompaniesSettingsPage({
           importState={importState}
           onChangeAgentAdapterPreset={handleChangeAgentAdapterPreset}
           onChangeCollisionStrategy={handleChangeImportCollisionStrategy}
+          onChangePauseAutomations={handleChangePauseAutomations}
           onChangeCompanyName={handleChangeImportCompanyName}
           onChangeDefaultAdapterPreset={handleChangeDefaultAdapterPreset}
           onClose={() => {

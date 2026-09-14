@@ -20,6 +20,10 @@ import {
   collectReferencedPaperclipCatalogSkillRefs,
   type AdapterPreset,
   type CatalogPreparedCompanyImport,
+  type PaperclipCompanyImportRequestBody,
+  buildPaperclipForbiddenCodeMessage,
+  getPaperclipApiErrorCode,
+  getPaperclipApiErrorRemediation,
   type CatalogCompanySyncResult,
   type CatalogImportEntityResult,
   type CompanyImportPartSelection,
@@ -28,6 +32,7 @@ import {
   DEFAULT_AUTO_SYNC_ENABLED,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_SYNC_COLLISION_STRATEGY,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   type ImportedCatalogCompanyRecord,
   COMPANY_CONTENT_KEYS,
   type CatalogCompanyContentDetail,
@@ -293,6 +298,8 @@ interface SyncImportRequest {
   sourceCompanyName: string;
   importedCompanyId: string;
   collisionStrategy: CatalogSyncCollisionStrategy;
+  /** Sent as `pauseAutomations` on the sync import request. */
+  pauseAutomations: boolean;
   preparedImport: CatalogPreparedCompanyImport;
   existingIssues?: PaperclipIssueRecord[] | null;
   adapterPresetSelection: ImportAdapterPresetSelection;
@@ -376,13 +383,6 @@ interface PaperclipSkillRecord {
   key: string | null;
 }
 
-interface PaperclipApprovalRecord {
-  id: string;
-  type: string | null;
-  status: string | null;
-  payload: Record<string, unknown> | null;
-}
-
 interface PaperclipRoutineRecord extends ImportedRoutineSnapshot {}
 
 interface PaperclipIssueWakeTarget {
@@ -420,11 +420,24 @@ interface PaperclipIssueWakeRequestResult {
 
 class PaperclipApiResponseError extends Error {
   status: number;
+  /** Machine-readable `code` from the Paperclip error body, when the host sent one. */
+  code: string | null;
+  /**
+   * `remediation` hint that Paperclip attaches to skill policy denials. The sibling `reason` is
+   * already picked up by `getPaperclipApiErrorMessage`, `remediation` is not.
+   */
+  remediation: string | null;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    options: { code?: string | null; remediation?: string | null } = {}
+  ) {
     super(message);
     this.name = "PaperclipApiResponseError";
     this.status = status;
+    this.code = options.code ?? null;
+    this.remediation = options.remediation ?? null;
   }
 }
 
@@ -439,6 +452,12 @@ interface StoredBoardCredential {
 interface CompanyBoardAccessRecord {
   paperclipBoardApiTokenRef: string;
   identity: string | null;
+  /**
+   * Paperclip user id of the operator who connected board access. `ctx.approvals.decide`
+   * attributes the decision to a human company member, so hire approvals resolved by the
+   * background sync are attributed to the operator who set the connection up.
+   */
+  identityUserId: string | null;
   updatedAt: string | null;
   workerAuthSeededAt: string | null;
 }
@@ -457,6 +476,7 @@ interface BoardAccessRegistration {
   companyId: string | null;
   configured: boolean;
   identity: string | null;
+  identityUserId: string | null;
   updatedAt: string | null;
 }
 
@@ -493,6 +513,7 @@ function normalizeCompanyBoardAccessRecord(value: unknown): CompanyBoardAccessRe
   return {
     paperclipBoardApiTokenRef,
     identity: asNonEmptyString(value.identity),
+    identityUserId: asNonEmptyString(value.identityUserId),
     updatedAt: asIsoTimestamp(value.updatedAt),
     workerAuthSeededAt: asIsoTimestamp(value.workerAuthSeededAt)
   };
@@ -952,6 +973,40 @@ function isBoardAccessRequiredError(error: unknown): boolean {
   return summarizeErrorMessage(error).toLowerCase().includes("board access required");
 }
 
+function getPaperclipForbiddenCodeMessage(error: unknown): string | null {
+  if (!(error instanceof PaperclipApiResponseError) || !isPaperclipApiAuthorizationError(error)) {
+    return null;
+  }
+
+  return buildPaperclipForbiddenCodeMessage({
+    code: error.code,
+    hostMessage: error.message,
+    remediation: error.remediation
+  });
+}
+
+/**
+ * Operator-facing text for a failed Paperclip call during import or sync. A known 401/403 `code`
+ * keeps its own explanation; any other authorization failure falls back to the board access prompt,
+ * because that is the only remedy the hosted UI offers. Returns null when the error is not an
+ * authorization failure, so callers keep their own message.
+ */
+function mapPaperclipAuthorizationFailure(error: unknown): string | null {
+  const codeMessage = getPaperclipForbiddenCodeMessage(error);
+  if (codeMessage) {
+    return codeMessage;
+  }
+
+  return isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)
+    ? buildBoardAccessRequiredSyncMessage()
+    : null;
+}
+
+/** Sync-result text for a failed Paperclip call, falling back to the raw error message. */
+function summarizePaperclipSyncFailure(error: unknown): string {
+  return mapPaperclipAuthorizationFailure(error) ?? summarizeErrorMessage(error);
+}
+
 function getStructuredMessageLines(value: unknown, maxLines = 4): string[] {
   const lines: string[] = [];
   const seen = new Set<string>();
@@ -1058,7 +1113,11 @@ async function parsePaperclipJsonResponse(response: Response): Promise<unknown> 
   if (!response.ok) {
     throw new PaperclipApiResponseError(
       getPaperclipApiErrorMessage(payload, response.status),
-      response.status
+      response.status,
+      {
+        code: getPaperclipApiErrorCode(payload),
+        remediation: getPaperclipApiErrorRemediation(payload)
+      }
     );
   }
 
@@ -2478,6 +2537,7 @@ function getBoardAccessRegistration(
     companyId,
     configured: Boolean(record?.paperclipBoardApiTokenRef),
     identity: record?.identity ?? null,
+    identityUserId: record?.identityUserId ?? null,
     updatedAt: record?.updatedAt ?? null
   };
 }
@@ -3712,7 +3772,7 @@ export async function executeDefaultSyncImport(
     input.importedCompanyId
   );
   for (const plan of boundRoutinePlans) {
-    await executeBoundRoutineUpdatePlan(connection, plan);
+    await executeBoundRoutineUpdatePlan(connection, plan, input.pauseAutomations);
     ctx.logger.info("Updated renamed Paperclip routine by bound UUID before portability sync", {
       companyId: input.importedCompanyId,
       routineId: plan.routine.id,
@@ -3792,6 +3852,7 @@ export async function executeDefaultSyncImport(
         companyId: input.importedCompanyId
       },
       collisionStrategy: input.collisionStrategy,
+      pauseAutomations: input.pauseAutomations,
       ...(adapterOverrides ? { adapterOverrides } : {})
     });
   }
@@ -3807,9 +3868,18 @@ export async function executeDefaultSyncImport(
           && selectedAgentSlugs.has(agentSlug);
       });
 
+      const boardAccessState = await loadBoardAccessState(ctx);
+      const approvalActorUserId =
+        boardAccessState.companies[input.importedCompanyId]?.identityUserId ?? null;
+
       for (const agent of pendingImportedAgents) {
         try {
-          await createAndApprovePaperclipHireApproval(connection, input.importedCompanyId, agent);
+          await approveImportedAgentHire(
+            ctx,
+            input.importedCompanyId,
+            agent,
+            approvalActorUserId
+          );
         } catch (error) {
           additionalWarnings.push(
             `Imported agent "${agent.name}" still needs approval before synced tasks can wake automatically: ${summarizeErrorMessage(error)}`
@@ -3828,7 +3898,8 @@ export async function executeDefaultSyncImport(
       ctx,
       connection,
       input.importedCompanyId,
-      sourceWithoutBoundRoutines.files
+      sourceWithoutBoundRoutines.files,
+      input.pauseAutomations
     );
     additionalWarnings.push(...routineUpdateResult.warnings);
     issueOnlyImportSource = removePortableRecurringTaskImports(
@@ -3849,7 +3920,8 @@ export async function executeDefaultSyncImport(
         mode: "existing_company",
         companyId: input.importedCompanyId
       },
-      collisionStrategy: input.collisionStrategy
+      collisionStrategy: input.collisionStrategy,
+      pauseAutomations: input.pauseAutomations
     });
   }
   const configuredRoutineSourcePaths = input.authoritativeRoutineSourcePaths;
@@ -3971,7 +4043,7 @@ async function fetchPaperclipApiJson(
 
 async function postPaperclipCompanyImport(
   connection: PaperclipApiConnection,
-  body: Record<string, unknown>
+  body: PaperclipCompanyImportRequestBody
 ): Promise<PaperclipCompanyImportResult> {
   let payload;
   try {
@@ -3980,8 +4052,9 @@ async function postPaperclipCompanyImport(
       body: JSON.stringify(body)
     });
   } catch (error) {
-    if (isBoardAccessRequiredError(error) || isPaperclipApiAuthorizationError(error)) {
-      throw new Error(buildBoardAccessRequiredSyncMessage());
+    const authorizationMessage = mapPaperclipAuthorizationFailure(error);
+    if (authorizationMessage) {
+      throw new Error(authorizationMessage);
     }
 
     throw error;
@@ -4109,7 +4182,7 @@ async function installReferencedPaperclipCatalogSkills(
     return {
       skills: [],
       warnings: [
-        `Referenced Paperclip catalog skills could not be resolved before import: ${summarizeErrorMessage(error)}`
+        `Referenced Paperclip catalog skills could not be resolved before import: ${summarizePaperclipSyncFailure(error)}`
       ]
     };
   }
@@ -4134,7 +4207,7 @@ async function installReferencedPaperclipCatalogSkills(
       warnings.push(...getStructuredMessageLines(result.warnings, 4));
     } catch (error) {
       warnings.push(
-        `Referenced Paperclip catalog skill ${reference} could not be installed before import: ${summarizeErrorMessage(error)}`
+        `Referenced Paperclip catalog skill ${reference} could not be installed before import: ${summarizePaperclipSyncFailure(error)}`
       );
     }
   }
@@ -4227,34 +4300,6 @@ function normalizePaperclipAgentList(value: unknown): PaperclipAgentRecord[] | n
   return value
     .map((agent) => normalizePaperclipAgent(agent))
     .filter((agent): agent is PaperclipAgentRecord => agent !== null);
-}
-
-function normalizePaperclipApproval(value: unknown): PaperclipApprovalRecord | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const id = asNonEmptyString(value.id);
-  if (!id) {
-    return null;
-  }
-
-  return {
-    id,
-    type: asNonEmptyString(value.type),
-    status: asNonEmptyString(value.status),
-    payload: isRecord(value.payload) ? value.payload : null
-  };
-}
-
-function normalizePaperclipApprovalList(value: unknown): PaperclipApprovalRecord[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  return value
-    .map((approval) => normalizePaperclipApproval(approval))
-    .filter((approval): approval is PaperclipApprovalRecord => approval !== null);
 }
 
 function normalizePaperclipRoutineTrigger(value: unknown): ImportedRoutineTriggerSnapshot | null {
@@ -4585,11 +4630,25 @@ async function archivePaperclipRoutine(
   });
 }
 
+/**
+ * Routines the plugin reconciles by UUID never pass through Paperclip's importer, so the host's
+ * `pauseAutomations` handling (which only parks routines the import itself creates) does not reach
+ * them. Force the paused status here so "Pause agents on sync" covers already-tracked routines too,
+ * instead of letting the package manifest status wake them again.
+ */
+function applyPauseAutomationsToRoutinePatch<TPatch extends { status?: string }>(
+  patch: TPatch,
+  pauseAutomations: boolean
+): TPatch {
+  return pauseAutomations ? { ...patch, status: "paused" } : patch;
+}
+
 async function updateExistingImportedRoutinesBeforeReplaceImport(
   ctx: PluginContext,
   connection: PaperclipApiConnection,
   companyId: string,
-  files: Record<string, PortableCatalogFileEntry>
+  files: Record<string, PortableCatalogFileEntry>,
+  pauseAutomations: boolean
 ): Promise<{
   updatedTasks: ImportedRecurringTaskFileDefinition[];
   warnings: string[];
@@ -4615,7 +4674,11 @@ async function updateExistingImportedRoutinesBeforeReplaceImport(
   const updatedTasks: ImportedRecurringTaskFileDefinition[] = [];
 
   for (const plan of plans) {
-    await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
+    await updatePaperclipRoutine(
+      connection,
+      plan.routine.id,
+      applyPauseAutomationsToRoutinePatch(plan.patch, pauseAutomations)
+    );
 
     if (plan.task.routineTriggers !== null) {
       await reconcilePaperclipRoutineTriggers(
@@ -5616,9 +5679,14 @@ async function prevalidateBoundRoutineUpdatePlans(
 
 async function executeBoundRoutineUpdatePlan(
   connection: PaperclipApiConnection,
-  plan: BoundRoutineUpdatePlan
+  plan: BoundRoutineUpdatePlan,
+  pauseAutomations: boolean
 ): Promise<void> {
-  await updatePaperclipRoutine(connection, plan.routine.id, plan.patch);
+  await updatePaperclipRoutine(
+    connection,
+    plan.routine.id,
+    applyPauseAutomationsToRoutinePatch(plan.patch, pauseAutomations)
+  );
   if (plan.task.routineTriggers !== null) {
     await reconcilePaperclipRoutineTriggersFromSnapshot(
       connection,
@@ -5733,109 +5801,78 @@ async function verifyRenameTargetIds(
   }
 }
 
-async function fetchPaperclipCompanyApprovals(
-  connection: PaperclipApiConnection,
-  companyId: string
-): Promise<PaperclipApprovalRecord[]> {
-  const payload = await fetchPaperclipApiJson(
-    connection,
-    `/api/companies/${encodeURIComponent(companyId)}/approvals`
-  );
-
-  const approvals = normalizePaperclipApprovalList(payload);
-  if (!approvals) {
-    throw new Error("Paperclip returned an unexpected approvals response.");
-  }
-
-  return approvals;
-}
-
-function findMatchingHireApproval(
-  approvals: PaperclipApprovalRecord[],
+/**
+ * Resolve the pending `hire_agent` approval for an imported agent through the host approvals
+ * capability. Returns the already-approved record when a previous run decided it.
+ */
+async function findImportedAgentHireApproval(
+  ctx: PluginContext,
+  companyId: string,
   agentId: string
-): PaperclipApprovalRecord | null {
-  let approvedApproval: PaperclipApprovalRecord | null = null;
+): Promise<{ id: string; status: string } | null> {
+  const approvals = await ctx.approvals.list({ companyId });
+  let approved: { id: string; status: string } | null = null;
 
   for (const approval of approvals) {
-    const approvalAgentId =
-      approval.payload && typeof approval.payload.agentId === "string" && approval.payload.agentId.trim()
-        ? approval.payload.agentId.trim()
-        : null;
-
-    if (approval.type !== "hire_agent" || approvalAgentId !== agentId) {
+    const payloadAgentId = asNonEmptyString(approval.payload?.agentId);
+    if (approval.type !== "hire_agent" || payloadAgentId !== agentId) {
       continue;
     }
 
     if (approval.status === "pending" || approval.status === "revision_requested") {
-      return approval;
+      return { id: approval.id, status: approval.status };
     }
 
-    if (approval.status === "approved" && !approvedApproval) {
-      approvedApproval = approval;
+    if (approval.status === "approved" && !approved) {
+      approved = { id: approval.id, status: approval.status };
     }
   }
 
-  return approvedApproval;
+  return approved;
 }
 
-async function approvePaperclipApproval(
-  connection: PaperclipApiConnection,
-  approvalId: string,
-  decisionNote: string
-): Promise<void> {
-  await fetchPaperclipApiJson(
-    connection,
-    `/api/approvals/${encodeURIComponent(approvalId)}/approve`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        decisionNote
-      })
-    }
-  );
-}
-
-async function createAndApprovePaperclipHireApproval(
-  connection: PaperclipApiConnection,
+/**
+ * Approve the imported agent's pending hire through `ctx.approvals`, not the board token.
+ *
+ * `ctx.approvals.decide` attributes the decision to a human company member and the host
+ * re-verifies that membership at apply time, so the board access connection has to have recorded
+ * the connecting operator's user id. The host also offers no plugin-side approval *creation*
+ * (`ctx.approvals` is list/get/decide only), so an agent left `pending_approval` without a
+ * matching `hire_agent` row can only be resolved by a human in Paperclip.
+ */
+async function approveImportedAgentHire(
+  ctx: PluginContext,
   companyId: string,
-  agent: PaperclipAgentRecord
+  agent: PaperclipAgentRecord,
+  actorUserId: string | null
 ): Promise<void> {
-  const decisionNote = `Approved automatically during Agent Company sync so imported tasks can wake ${agent.name} immediately.`;
-  const existingApprovals = await fetchPaperclipCompanyApprovals(connection, companyId);
-  const existingApproval = findMatchingHireApproval(existingApprovals, agent.id);
+  const approval = await findImportedAgentHireApproval(ctx, companyId, agent.id);
 
-  if (existingApproval?.status === "approved") {
+  if (approval?.status === "approved") {
     return;
   }
 
-  if (existingApproval?.id) {
-    await approvePaperclipApproval(connection, existingApproval.id, decisionNote);
-    return;
+  if (!approval) {
+    throw new Error(
+      "Paperclip has no pending hire approval for this agent, and plugins cannot create one. Approve the hire in Paperclip."
+    );
   }
 
-  const approvalPayload = await fetchPaperclipApiJson(
-    connection,
-    `/api/companies/${encodeURIComponent(companyId)}/approvals`,
+  if (!actorUserId) {
+    throw new Error(
+      "Approving a hire is attributed to a human company member. Reconnect board access from Company Settings so the plugin records your Paperclip user id, then retry."
+    );
+  }
+
+  await ctx.approvals.decide(
+    approval.id,
     {
-      method: "POST",
-      body: JSON.stringify({
-        type: "hire_agent",
-        payload: {
-          agentId: agent.id,
-          name: agent.name,
-          role: agent.role,
-          title: agent.title
-        }
-      })
-    }
+      action: "approve",
+      actorUserId,
+      decisionNote: `Approved automatically during Agent Company sync so imported tasks can wake ${agent.name} immediately.`
+    },
+    companyId
   );
-
-  const approvalId = isRecord(approvalPayload) ? asNonEmptyString(approvalPayload.id) : null;
-  if (!approvalId) {
-    throw new Error("Paperclip did not return an approval id.");
-  }
-
-  await approvePaperclipApproval(connection, approvalId, decisionNote);
 }
 
 function selectPaperclipIssueWakeTargets(
@@ -6517,6 +6554,7 @@ async function runCatalogCompanySync(
         sourceCompanyName: refreshedMatch.company.name,
         importedCompanyId: importedCompany.importedCompanyId,
         collisionStrategy: importedCompany.syncCollisionStrategy,
+        pauseAutomations: importedCompany.syncPauseAutomations,
         preparedImport,
         existingIssues: issuesBeforeSync,
         adapterPresetSelection: migratedAdapterSelection,
@@ -6630,6 +6668,8 @@ async function runCatalogCompanySync(
     } catch (error) {
       const failedAt = options.now();
       const latestState = await loadCatalogState(ctx);
+      const mappedAuthorizationMessage = mapPaperclipAuthorizationFailure(error);
+      const syncFailureMessage = mappedAuthorizationMessage ?? summarizeErrorMessage(error);
 
       await persistCatalogState(
         ctx,
@@ -6637,7 +6677,7 @@ async function runCatalogCompanySync(
           ...company,
           lastSyncStatus: "failed",
           syncRunningSince: null,
-          lastSyncError: summarizeErrorMessage(error)
+          lastSyncError: syncFailureMessage
         })),
         failedAt
       );
@@ -6648,9 +6688,9 @@ async function runCatalogCompanySync(
         importedCompanyId,
         importedCompanyName: importedCompany.importedCompanyName,
         trigger: options.trigger,
-        error: summarizeErrorMessage(error)
+        error: syncFailureMessage
       });
-      throw error;
+      throw mappedAuthorizationMessage ? new Error(mappedAuthorizationMessage) : error;
     }
   })().finally(() => {
     if (companySyncInflight.get(syncKey) === syncPromise) {
@@ -6953,6 +6993,10 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           params.syncCollisionStrategy,
           existingImport?.syncCollisionStrategy ?? DEFAULT_SYNC_COLLISION_STRATEGY
         );
+        const syncPauseAutomations =
+          typeof params.syncPauseAutomations === "boolean"
+            ? params.syncPauseAutomations
+            : existingImport?.syncPauseAutomations ?? DEFAULT_SYNC_PAUSE_AUTOMATIONS;
         const issuesBeforeImport = Array.isArray(params.issuesBeforeImport)
           ? normalizePaperclipIssueList(params.issuesBeforeImport) ?? []
           : null;
@@ -6994,6 +7038,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
                 adapterPresetSelection,
                 autoSyncEnabled: existingImport?.autoSyncEnabled ?? DEFAULT_AUTO_SYNC_ENABLED,
                 syncCollisionStrategy,
+                syncPauseAutomations,
                 lastSyncStatus: "succeeded",
                 lastSyncAttemptAt: existingImport?.lastSyncAttemptAt ?? timestamp,
                 lastSyncedAt: timestamp,
@@ -7045,6 +7090,38 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         return buildCatalogResponse(nextState, timestamp);
       });
 
+      ctx.actions.register("catalog.set-company-sync-pause-automations", async (rawParams) => {
+        const params = isRecord(rawParams) ? rawParams : {};
+        const sourceCompanyId = getRequiredString(params, "sourceCompanyId");
+        const importedCompanyId = getRequiredString(params, "importedCompanyId");
+        const pauseAutomations =
+          typeof params.pauseAutomations === "boolean" ? params.pauseAutomations : null;
+
+        if (pauseAutomations === null) {
+          throw new Error("pauseAutomations must be a boolean.");
+        }
+
+        const timestamp = now();
+        const currentState = await loadCatalogStateWithSyncRecovery(ctx, timestamp);
+        const match = findRepositoryCompany(currentState, sourceCompanyId);
+        if (!match) {
+          throw new Error("Company not found.");
+        }
+
+        assertCatalogCompanyCanBeSynced(currentState, match.company, importedCompanyId);
+
+        const nextState = await persistCatalogState(
+          ctx,
+          updateImportedCatalogCompany(currentState, sourceCompanyId, importedCompanyId, (company) => ({
+            ...company,
+            syncPauseAutomations: pauseAutomations
+          })),
+          timestamp
+        );
+
+        return buildCatalogResponse(nextState, timestamp);
+      });
+
       ctx.actions.register("catalog.set-auto-sync-cadence", async (rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
         const autoSyncCadenceHours = getRequiredInteger(params, "autoSyncCadenceHours");
@@ -7082,6 +7159,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
         const paperclipBoardApiTokenRef = asNonEmptyString(params.paperclipBoardApiTokenRef);
         const paperclipBoardApiToken = asNonEmptyString(params.paperclipBoardApiToken);
         const identity = asNonEmptyString(params.identity);
+        const identityUserId = asNonEmptyString(params.identityUserId);
         const timestamp = now();
         const currentState = await loadBoardAccessState(ctx);
         const nextCompanies = { ...currentState.companies };
@@ -7096,7 +7174,8 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           await persistStoredBoardCredential(
             storedCredentialApiBase,
             paperclipBoardApiToken!,
-            timestamp
+            timestamp,
+            identityUserId
           );
         }
 
@@ -7104,6 +7183,7 @@ export function createAgentCompaniesPlugin(options: AgentCompaniesPluginOptions 
           nextCompanies[companyId] = {
             paperclipBoardApiTokenRef,
             identity,
+            identityUserId,
             updatedAt: timestamp,
             workerAuthSeededAt: shouldSeedStoredCredential
               ? timestamp

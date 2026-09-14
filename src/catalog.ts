@@ -5,8 +5,10 @@ import {
   COMPANY_CONTENT_KEYS,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_AUTO_SYNC_ENABLED,
+  DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS,
   DEFAULT_REPOSITORY_URL,
   DEFAULT_SYNC_COLLISION_STRATEGY,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   PLUGIN_DISPLAY_NAME,
   PLUGIN_ID
@@ -18,8 +20,10 @@ export {
   COMPANY_CONTENT_KEYS,
   DEFAULT_AUTO_SYNC_CADENCE_HOURS,
   DEFAULT_AUTO_SYNC_ENABLED,
+  DEFAULT_NEW_COMPANY_IMPORT_PAUSE_AUTOMATIONS,
   DEFAULT_REPOSITORY_URL,
   DEFAULT_SYNC_COLLISION_STRATEGY,
+  DEFAULT_SYNC_PAUSE_AUTOMATIONS,
   MIN_AUTO_SYNC_CADENCE_HOURS,
   PLUGIN_DISPLAY_NAME,
   PLUGIN_ID
@@ -146,6 +150,107 @@ export interface CatalogImportEntityResult {
   reason?: string | null;
 }
 
+/**
+ * Body of `POST /api/companies/import`.
+ *
+ * `collisionStrategy` is deliberately required even though Paperclip marks it optional
+ * (`companyPortabilityImportSchema`, 2026.831.1). The portability service falls back to
+ * `DEFAULT_COLLISION_STRATEGY = "rename"` and feeds the resolved value to the package skill
+ * importer (`resolveSkillConflictStrategy` -> `companySkills.importPackageFiles({ onConflict })`),
+ * so an omitted value silently downgrades a replace-mode sync from replacing package-owned skill
+ * rows to importing renamed copies of them alongside the originals. Making the field required here
+ * keeps every request site explicit.
+ */
+export interface PaperclipCompanyImportRequestBody {
+  source: CatalogPreparedCompanyImport["source"];
+  include: {
+    company: boolean;
+    agents: boolean;
+    projects: boolean;
+    issues: boolean;
+    skills: boolean;
+  };
+  target:
+    | { mode: "new_company"; newCompanyName: string }
+    | { mode: "existing_company"; companyId: string };
+  collisionStrategy: CatalogSyncCollisionStrategy;
+  pauseAutomations: boolean;
+  adapterOverrides?: Record<string, {
+    adapterType: string;
+    adapterConfig?: Record<string, unknown>;
+  }>;
+}
+
+/**
+ * Paperclip 2026.831.0 added an import floor that answers 403 with a machine-readable `code`
+ * (`server/src/routes/companies.ts`), and 2026.720.0 added the company skill policy denial
+ * (`server/src/routes/company-skills.ts`). All of them look like an authorization failure, so
+ * without this mapping every one of them reads as "board access required", which sends the
+ * operator to reconnect a token that is already fine.
+ *
+ * Null-prototype so an unknown code such as `constructor` or `__proto__` cannot resolve to an
+ * inherited `Object.prototype` member and masquerade as a known mapping.
+ */
+const PAPERCLIP_FORBIDDEN_CODE_MESSAGES: Record<string, string> = Object.assign(
+  Object.create(null) as Record<string, string>,
+  {
+    cloud_managed:
+      "Paperclip company import is disabled on this cloud-managed instance, so this company cannot be imported or synced. Board access is not the problem; ask the Paperclip Cloud operator to enable company import.",
+    settings_operator_managed:
+      "The hosting operator hid Paperclip's company import page, which also blocks the import API this plugin uses. Board access is not the problem; ask the operator to unhide company import in instance settings.",
+    skill_policy_denied:
+      "This company's Paperclip skill policy denied the skill change required by this import. Allow the skill action in the company's skill policy, or deselect skills from the sync contract, then retry.",
+    skill_company_boundary_denied:
+      "Paperclip refused the skill change because the saved board access credential belongs to a different company. Reconnect board access from inside the imported company and retry.",
+    skill_actor_restricted:
+      "Paperclip restricted this skill change for the current actor. Review the company's skill policy and the board access identity, then retry."
+  }
+);
+
+/**
+ * Operator-facing text for a Paperclip 401/403 that carries a known `code`. Returns null for
+ * anything else so callers can fall back to their own handling (usually the board access prompt).
+ */
+export function buildPaperclipForbiddenCodeMessage(options: {
+  code: string | null;
+  hostMessage: string;
+  remediation?: string | null;
+}): string | null {
+  const explanation = options.code ? PAPERCLIP_FORBIDDEN_CODE_MESSAGES[options.code] : undefined;
+  if (!explanation) {
+    return null;
+  }
+
+  const parts = [explanation, `Paperclip reported: ${options.hostMessage.replace(/\s+/gu, " ").trim()}`];
+  if (options.remediation) {
+    parts.push(options.remediation);
+  }
+
+  return parts.join(" ");
+}
+
+/** Machine-readable `code` from a Paperclip error body (top level, or nested under `details`). */
+export function getPaperclipApiErrorCode(payload: unknown): string | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  const topLevelCode = asNonEmptyString(payload.code);
+  if (topLevelCode) {
+    return topLevelCode;
+  }
+
+  return isRecord(payload.details) ? asNonEmptyString(payload.details.code) : null;
+}
+
+/**
+ * `remediation` hint Paperclip attaches to skill policy denials. The sibling `reason` is already
+ * folded into the primary error message by the API error message builders, `remediation` is not.
+ */
+export function getPaperclipApiErrorRemediation(payload: unknown): string | null {
+  return isRecord(payload) ? asNonEmptyString(payload.remediation) : null;
+}
+
 export interface PaperclipCompanyImportResult {
   company?: {
     id?: string;
@@ -192,6 +297,8 @@ export interface ImportedCatalogCompanyRecord {
   adapterPresetSelection: ImportAdapterPresetSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
+  /** Sent as `pauseAutomations` on every tracked sync import request. */
+  syncPauseAutomations: boolean;
   lastSyncStatus: CatalogCompanySyncStatus;
   lastSyncAttemptAt: string | null;
   lastSyncedAt: string | null;
@@ -210,6 +317,7 @@ export interface CatalogCompanyImportStatus {
   adapterPresetSelection: ImportAdapterPresetSelection;
   autoSyncEnabled: boolean;
   syncCollisionStrategy: CatalogSyncCollisionStrategy;
+  syncPauseAutomations: boolean;
   syncStatus: CatalogCompanySyncStatus;
   lastSyncAttemptAt: string | null;
   lastSyncedAt: string | null;
@@ -1565,6 +1673,10 @@ function normalizeImportedCatalogCompany(value: unknown): ImportedCatalogCompany
     syncCollisionStrategy: normalizeCatalogSyncCollisionStrategy(
       value.syncCollisionStrategy ?? value.collisionStrategy
     ),
+    syncPauseAutomations:
+      typeof value.syncPauseAutomations === "boolean"
+        ? value.syncPauseAutomations
+        : DEFAULT_SYNC_PAUSE_AUTOMATIONS,
     lastSyncStatus:
       initialSyncStatus === "idle" && lastSyncedAt !== null
         ? "succeeded"
@@ -1760,6 +1872,7 @@ export function buildCatalogSnapshot(state: CatalogState, now: string | null = n
               adapterPresetSelection: importedCompany.adapterPresetSelection,
               autoSyncEnabled: importedCompany.autoSyncEnabled,
               syncCollisionStrategy: importedCompany.syncCollisionStrategy,
+              syncPauseAutomations: importedCompany.syncPauseAutomations,
               syncStatus: importedCompany.lastSyncStatus,
               lastSyncAttemptAt: importedCompany.lastSyncAttemptAt,
               lastSyncedAt: importedCompany.lastSyncedAt,
